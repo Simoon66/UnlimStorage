@@ -1,0 +1,6 @@
+{
+  "name": "UnlimCloud — Telegram Cloud Storage & Transfer Manager",
+  "description": "Unlimited cloud file manager powered by Telegram storage with direct download links, remote URL upload, password protection, bandwidth throttling, activity audit logs, and real-time transfer notifications.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
