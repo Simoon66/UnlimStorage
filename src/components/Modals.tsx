@@ -17,7 +17,7 @@ import { FileRecord, FolderRecord, ShareLink, User } from '../types';
 import { formatBytes, formatShortDate } from '../utils/format';
 
 // ============================================================================
-// 1. SIMPLE REMOTE URL UPLOAD MODAL ("Upload from Web Link")
+// 1. SIMPLE REMOTE URL UPLOAD MODAL (Mobile Bottom-Sheet + Desktop Modal)
 // ============================================================================
 
 interface RemoteUploadModalProps {
@@ -78,22 +78,23 @@ export const RemoteUploadModal: React.FC<RemoteUploadModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/75 flex items-center justify-center p-4">
-      <div className="w-full max-w-lg bg-[#1C1A17] border border-[#2C2824]">
-        <div className="flex items-center justify-between px-6 py-4 border-b border-[#2C2824]">
+    <div className="fixed inset-0 z-50 bg-black/80 flex items-end sm:items-center justify-center p-0 sm:p-4">
+      <div className="w-full sm:max-w-lg bg-[#1C1A17] border-t sm:border border-[#2C2824] max-h-[92vh] overflow-y-auto">
+        <div className="flex items-center justify-between px-5 py-4 border-b border-[#2C2824] sticky top-0 bg-[#1C1A17] z-10">
           <div className="flex items-center gap-2.5">
             <Globe className="w-4 h-4 text-[#D97757]" />
-            <h2 className="text-base font-bold text-[#F2EFE9]">Upload File from Web Link</h2>
+            <h2 className="text-base font-bold text-[#F2EFE9]">Upload from Web Link</h2>
           </div>
           <button
             onClick={onClose}
-            className="p-1 text-[#9E978E] hover:text-[#F2EFE9] cursor-pointer"
+            className="min-w-[44px] min-h-[44px] -mr-2 flex items-center justify-center text-[#9E978E] hover:text-[#F2EFE9] cursor-pointer"
+            aria-label="Close modal"
           >
-            <X className="w-4 h-4" />
+            <X className="w-5 h-5" />
           </button>
         </div>
 
-        <form onSubmit={handleSubmit} className="p-6 space-y-5">
+        <form onSubmit={handleSubmit} className="p-5 sm:p-6 space-y-5">
           <div className="space-y-2">
             <label className="block text-xs font-medium text-[#F2EFE9]">
               Paste any direct file link (URL)
@@ -104,13 +105,13 @@ export const RemoteUploadModal: React.FC<RemoteUploadModalProps> = ({
               value={url}
               onChange={(e) => setUrl(e.target.value)}
               placeholder="https://example.com/file.pdf"
-              className="w-full bg-[#141311] border border-[#2C2824] px-3.5 py-2.5 text-sm text-[#F2EFE9] focus:outline-none focus:border-[#D97757]"
+              className="w-full min-h-[44px] bg-[#141311] border border-[#2C2824] px-3.5 py-2.5 text-sm text-[#F2EFE9] focus:outline-none focus:border-[#D97757]"
             />
           </div>
 
           <div className="space-y-1.5">
-            <div className="text-xs text-[#9E978E]">Or try a sample link with one click:</div>
-            <div className="grid grid-cols-1 gap-1.5">
+            <div className="text-xs text-[#9E978E]">Or tap a sample link to test:</div>
+            <div className="grid grid-cols-1 gap-2">
               {SAMPLE_REMOTE_URLS.map((preset) => (
                 <button
                   key={preset.url}
@@ -119,10 +120,10 @@ export const RemoteUploadModal: React.FC<RemoteUploadModalProps> = ({
                     setUrl(preset.url);
                     setCustomFileName(preset.fileName);
                   }}
-                  className="text-left px-3 py-2 text-xs bg-[#141311] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center justify-between gap-2 cursor-pointer"
+                  className="min-h-[44px] text-left px-3.5 py-2.5 text-xs bg-[#141311] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center justify-between gap-2 cursor-pointer"
                 >
                   <span className="truncate">{preset.label}</span>
-                  <span className="text-[#D97757] font-medium shrink-0">Use Link</span>
+                  <span className="text-[#D97757] font-semibold shrink-0">Use Link</span>
                 </button>
               ))}
             </div>
@@ -136,7 +137,7 @@ export const RemoteUploadModal: React.FC<RemoteUploadModalProps> = ({
                 value={customFileName}
                 onChange={(e) => setCustomFileName(e.target.value)}
                 placeholder="Automatic from link"
-                className="w-full bg-[#141311] border border-[#2C2824] px-3.5 py-2 text-sm text-[#F2EFE9] focus:outline-none focus:border-[#D97757]"
+                className="w-full min-h-[44px] bg-[#141311] border border-[#2C2824] px-3.5 py-2 text-sm text-[#F2EFE9] focus:outline-none focus:border-[#D97757]"
               />
             </div>
 
@@ -145,7 +146,7 @@ export const RemoteUploadModal: React.FC<RemoteUploadModalProps> = ({
               <select
                 value={folderId || ''}
                 onChange={(e) => setFolderId(e.target.value || null)}
-                className="w-full bg-[#141311] border border-[#2C2824] px-3.5 py-2 text-sm text-[#F2EFE9] focus:outline-none focus:border-[#D97757]"
+                className="w-full min-h-[44px] bg-[#141311] border border-[#2C2824] px-3.5 py-2 text-sm text-[#F2EFE9] focus:outline-none focus:border-[#D97757]"
               >
                 <option value="">My Files (Main Drive)</option>
                 {folders.map((f) => (
@@ -159,18 +160,18 @@ export const RemoteUploadModal: React.FC<RemoteUploadModalProps> = ({
 
           {error && <p className="text-xs text-[#D94848]">{error}</p>}
 
-          <div className="flex items-center justify-end gap-3 pt-3 border-t border-[#2C2824]">
+          <div className="flex flex-col-reverse sm:flex-row items-stretch sm:items-center justify-end gap-2.5 pt-3 border-t border-[#2C2824]">
             <button
               type="button"
               onClick={onClose}
-              className="px-4 py-2 text-xs font-medium text-[#9E978E] hover:text-[#F2EFE9] border border-[#2C2824] bg-[#141311] cursor-pointer"
+              className="min-h-[44px] px-4 py-2.5 text-xs font-medium text-[#9E978E] hover:text-[#F2EFE9] border border-[#2C2824] bg-[#141311] cursor-pointer"
             >
               Cancel
             </button>
             <button
               type="submit"
               disabled={submitting}
-              className="px-5 py-2.5 text-xs font-bold bg-[#D97757] text-[#141311] hover:bg-[#E08568] cursor-pointer disabled:opacity-50"
+              className="min-h-[44px] px-5 py-2.5 text-xs font-bold bg-[#D97757] text-[#141311] hover:bg-[#E08568] cursor-pointer disabled:opacity-50"
             >
               {submitting ? 'Starting Transfer...' : 'Upload to My Drive'}
             </button>
@@ -182,7 +183,7 @@ export const RemoteUploadModal: React.FC<RemoteUploadModalProps> = ({
 };
 
 // ============================================================================
-// 2. ONE-CLICK SHARE & PASSWORD TOGGLE MODAL
+// 2. ONE-CLICK SHARE & PASSWORD TOGGLE MODAL (Mobile Ergonomic)
 // ============================================================================
 
 interface CreateShareModalProps {
@@ -223,7 +224,6 @@ export const CreateShareModal: React.FC<CreateShareModalProps> = ({
   const [creating, setCreating] = useState(!existingShare);
   const [copied, setCopied] = useState(false);
 
-  // Simple Password Toggle State
   const [usePassword, setUsePassword] = useState<boolean>(
     existingShare ? existingShare.hasPassword : false
   );
@@ -231,7 +231,6 @@ export const CreateShareModal: React.FC<CreateShareModalProps> = ({
   const [savingSettings, setSavingSettings] = useState(false);
   const [savedNotice, setSavedNotice] = useState<string | null>(null);
 
-  // Automatically create link on open if one doesn't exist yet for true 1-click sharing!
   useEffect(() => {
     let active = true;
     if (!existingShare) {
@@ -312,19 +311,21 @@ export const CreateShareModal: React.FC<CreateShareModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/75 flex items-center justify-center p-4">
-      <div className="w-full max-w-lg bg-[#1C1A17] border border-[#2C2824]">
-        {/* Header */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-[#2C2824]">
-          <div className="flex items-center gap-2.5">
-            <Link2 className="w-4 h-4 text-[#D97757]" />
-            <h2 className="text-base font-bold text-[#F2EFE9]">Share &ldquo;{file.name}&rdquo;</h2>
+    <div className="fixed inset-0 z-50 bg-black/80 flex items-end sm:items-center justify-center p-0 sm:p-4">
+      <div className="w-full sm:max-w-lg bg-[#1C1A17] border-t sm:border border-[#2C2824] max-h-[92vh] overflow-y-auto">
+        <div className="flex items-center justify-between px-5 py-4 border-b border-[#2C2824] sticky top-0 bg-[#1C1A17] z-10">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <Link2 className="w-4 h-4 text-[#D97757] shrink-0" />
+            <h2 className="text-base font-bold text-[#F2EFE9] truncate">
+              Share &ldquo;{file.name}&rdquo;
+            </h2>
           </div>
           <button
             onClick={onClose}
-            className="p-1 text-[#9E978E] hover:text-[#F2EFE9] cursor-pointer"
+            className="min-w-[44px] min-h-[44px] -mr-2 flex items-center justify-center text-[#9E978E] hover:text-[#F2EFE9] cursor-pointer"
+            aria-label="Close modal"
           >
-            <X className="w-4 h-4" />
+            <X className="w-5 h-5" />
           </button>
         </div>
 
@@ -333,24 +334,24 @@ export const CreateShareModal: React.FC<CreateShareModalProps> = ({
             Creating your direct download link...
           </div>
         ) : (
-          <div className="p-6 space-y-5">
+          <div className="p-5 sm:p-6 space-y-5">
             {/* Step 1: One-Click Copy Link Box */}
             <div className="space-y-2">
               <label className="block text-xs font-medium text-[#F2EFE9]">
                 Direct Download Link (Ready to Share)
               </label>
-              <div className="flex items-center gap-2">
+              <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
                 <input
                   type="text"
                   readOnly
                   value={shareUrl}
                   onClick={(e) => (e.target as HTMLInputElement).select()}
-                  className="flex-1 bg-[#141311] border border-[#2C2824] px-3.5 py-2.5 text-xs font-mono text-[#F2EFE9]"
+                  className="flex-1 min-h-[44px] bg-[#141311] border border-[#2C2824] px-3.5 py-2.5 text-xs font-mono text-[#F2EFE9]"
                 />
                 <button
                   type="button"
                   onClick={copyShareUrl}
-                  className="px-5 py-2.5 text-xs font-bold bg-[#D97757] text-[#141311] hover:bg-[#E08568] flex items-center gap-1.5 shrink-0 cursor-pointer"
+                  className="min-h-[44px] px-5 py-2.5 text-xs font-bold bg-[#D97757] text-[#141311] hover:bg-[#E08568] flex items-center justify-center gap-1.5 shrink-0 cursor-pointer"
                 >
                   {copied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
                   {copied ? 'Copied!' : 'Copy Link'}
@@ -360,9 +361,9 @@ export const CreateShareModal: React.FC<CreateShareModalProps> = ({
 
             {/* Step 2: Optional Password Toggle */}
             <div className="p-4 bg-[#141311] border border-[#2C2824] space-y-3">
-              <label className="flex items-center justify-between cursor-pointer">
+              <label className="flex items-center justify-between gap-3 cursor-pointer min-h-[44px]">
                 <div className="flex items-center gap-2.5">
-                  <Lock className="w-4 h-4 text-[#D97757]" />
+                  <Lock className="w-4 h-4 text-[#D97757] shrink-0" />
                   <div>
                     <div className="text-xs font-semibold text-[#F2EFE9]">
                       Protect link with a password
@@ -376,12 +377,15 @@ export const CreateShareModal: React.FC<CreateShareModalProps> = ({
                   type="checkbox"
                   checked={usePassword}
                   onChange={(e) => handleTogglePassword(e.target.checked)}
-                  className="accent-[#D97757] w-4 h-4"
+                  className="accent-[#D97757] w-5 h-5 shrink-0"
                 />
               </label>
 
               {usePassword && (
-                <form onSubmit={handleSavePassword} className="flex items-center gap-2 pt-2">
+                <form
+                  onSubmit={handleSavePassword}
+                  className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 pt-2"
+                >
                   <input
                     type="password"
                     value={passwordInput}
@@ -391,13 +395,13 @@ export const CreateShareModal: React.FC<CreateShareModalProps> = ({
                         ? 'Password is active (type new to change)'
                         : 'Type a password...'
                     }
-                    className="flex-1 bg-[#1C1A17] border border-[#2C2824] px-3 py-2 text-xs text-[#F2EFE9] focus:outline-none focus:border-[#D97757]"
+                    className="flex-1 min-h-[44px] bg-[#1C1A17] border border-[#2C2824] px-3.5 py-2 text-xs text-[#F2EFE9] focus:outline-none focus:border-[#D97757]"
                     required
                   />
                   <button
                     type="submit"
                     disabled={savingSettings}
-                    className="px-4 py-2 text-xs font-semibold bg-[#24211D] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] shrink-0 cursor-pointer"
+                    className="min-h-[44px] px-4 py-2 text-xs font-semibold bg-[#24211D] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] shrink-0 cursor-pointer"
                   >
                     {savingSettings ? 'Saving...' : 'Save Password'}
                   </button>
@@ -416,7 +420,7 @@ export const CreateShareModal: React.FC<CreateShareModalProps> = ({
               <select
                 value={share.throttleKbps || ''}
                 onChange={(e) => handleSpeedChange(e.target.value)}
-                className="bg-[#1C1A17] border border-[#2C2824] px-3 py-2 text-xs text-[#F2EFE9] focus:outline-none focus:border-[#D97757]"
+                className="min-h-[44px] bg-[#1C1A17] border border-[#2C2824] px-3 py-2 text-xs text-[#F2EFE9] focus:outline-none focus:border-[#D97757]"
               >
                 <option value="">Full Speed (Unlimited)</option>
                 <option value="2048">Fast (2 MB/s)</option>
@@ -428,14 +432,14 @@ export const CreateShareModal: React.FC<CreateShareModalProps> = ({
             {savedNotice && <p className="text-xs text-[#2E9E6B]">{savedNotice}</p>}
 
             {/* Footer Buttons */}
-            <div className="flex items-center justify-between pt-3 border-t border-[#2C2824]">
+            <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2.5 pt-3 border-t border-[#2C2824]">
               <button
                 type="button"
                 onClick={() => {
                   onClose();
                   onPreviewPublicPortal(share.token);
                 }}
-                className="flex items-center gap-1.5 px-4 py-2 text-xs font-medium text-[#F2EFE9] bg-[#24211D] border border-[#2C2824] hover:border-[#D97757] cursor-pointer"
+                className="min-h-[44px] flex items-center justify-center gap-1.5 px-4 py-2.5 text-xs font-medium text-[#F2EFE9] bg-[#24211D] border border-[#2C2824] hover:border-[#D97757] cursor-pointer"
               >
                 <ExternalLink className="w-3.5 h-3.5" />
                 Open Download Page
@@ -443,7 +447,7 @@ export const CreateShareModal: React.FC<CreateShareModalProps> = ({
               <button
                 type="button"
                 onClick={onClose}
-                className="px-5 py-2 text-xs font-bold bg-[#D97757] text-[#141311] hover:bg-[#E08568] cursor-pointer"
+                className="min-h-[44px] px-6 py-2.5 text-xs font-bold bg-[#D97757] text-[#141311] hover:bg-[#E08568] cursor-pointer"
               >
                 Done
               </button>
@@ -456,7 +460,7 @@ export const CreateShareModal: React.FC<CreateShareModalProps> = ({
 };
 
 // ============================================================================
-// 3. SIMPLE FILE PREVIEW MODAL
+// 3. SIMPLE FILE PREVIEW MODAL (Mobile Bottom-Sheet + Desktop Modal)
 // ============================================================================
 
 interface FileDetailDrawerProps {
@@ -475,22 +479,23 @@ export const FileDetailDrawer: React.FC<FileDetailDrawerProps> = ({
   onDelete,
 }) => {
   return (
-    <div className="fixed inset-0 z-50 bg-black/75 flex items-center justify-center p-4">
-      <div className="w-full max-w-xl bg-[#1C1A17] border border-[#2C2824]">
-        <div className="flex items-center justify-between px-6 py-4 border-b border-[#2C2824]">
+    <div className="fixed inset-0 z-50 bg-black/80 flex items-end sm:items-center justify-center p-0 sm:p-4">
+      <div className="w-full sm:max-w-xl bg-[#1C1A17] border-t sm:border border-[#2C2824] max-h-[92vh] overflow-y-auto">
+        <div className="flex items-center justify-between px-5 py-4 border-b border-[#2C2824] sticky top-0 bg-[#1C1A17] z-10">
           <div className="flex items-center gap-2.5 min-w-0">
             <FileText className="w-4 h-4 text-[#D97757] shrink-0" />
             <h2 className="text-base font-bold text-[#F2EFE9] truncate">{file.name}</h2>
           </div>
           <button
             onClick={onClose}
-            className="p-1 text-[#9E978E] hover:text-[#F2EFE9] cursor-pointer"
+            className="min-w-[44px] min-h-[44px] -mr-2 flex items-center justify-center text-[#9E978E] hover:text-[#F2EFE9] cursor-pointer"
+            aria-label="Close modal"
           >
-            <X className="w-4 h-4" />
+            <X className="w-5 h-5" />
           </button>
         </div>
 
-        <div className="p-6 space-y-5">
+        <div className="p-5 sm:p-6 space-y-5">
           <div className="flex flex-wrap items-center gap-2 text-xs text-[#9E978E] tabular-nums">
             <span className="text-[#F2EFE9] font-semibold">{formatBytes(file.sizeBytes)}</span>
             <span aria-hidden="true">·</span>
@@ -508,7 +513,7 @@ export const FileDetailDrawer: React.FC<FileDetailDrawerProps> = ({
           {file.previewText ? (
             <div className="space-y-2">
               <div className="text-xs font-medium text-[#9E978E]">File Preview</div>
-              <pre className="p-4 bg-[#141311] border border-[#2C2824] text-xs font-mono text-[#F2EFE9] overflow-x-auto max-h-64 whitespace-pre-wrap">
+              <pre className="p-4 bg-[#141311] border border-[#2C2824] text-xs font-mono text-[#F2EFE9] overflow-x-auto max-h-60 whitespace-pre-wrap">
                 {file.previewText}
               </pre>
             </div>
@@ -518,31 +523,31 @@ export const FileDetailDrawer: React.FC<FileDetailDrawerProps> = ({
             </div>
           )}
 
-          <div className="flex flex-wrap items-center justify-between gap-3 pt-3 border-t border-[#2C2824]">
+          <div className="flex flex-col-reverse sm:flex-row items-stretch sm:items-center justify-between gap-2.5 pt-3 border-t border-[#2C2824]">
             <button
               onClick={async () => {
                 await onDelete(file);
                 onClose();
               }}
-              className="px-3.5 py-2 text-xs font-medium text-[#D94848] border border-[#2C2824] bg-[#141311] hover:border-[#D94848] cursor-pointer"
+              className="min-h-[44px] px-4 py-2.5 text-xs font-medium text-[#D94848] border border-[#2C2824] bg-[#141311] hover:border-[#D94848] cursor-pointer"
             >
               Delete File
             </button>
 
-            <div className="flex items-center gap-2.5">
+            <div className="grid grid-cols-2 sm:flex items-center gap-2.5">
               <button
                 onClick={() => {
                   onClose();
                   onOpenShareModal(file);
                 }}
-                className="flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-[#F2EFE9] bg-[#24211D] border border-[#2C2824] hover:border-[#D97757] cursor-pointer"
+                className="min-h-[44px] flex items-center justify-center gap-1.5 px-4 py-2.5 text-xs font-semibold text-[#F2EFE9] bg-[#24211D] border border-[#2C2824] hover:border-[#D97757] cursor-pointer"
               >
                 <Link2 className="w-3.5 h-3.5 text-[#D97757]" />
                 Share Link
               </button>
               <button
                 onClick={() => onDownload(file)}
-                className="flex items-center gap-1.5 px-5 py-2 text-xs font-bold bg-[#D97757] text-[#141311] hover:bg-[#E08568] cursor-pointer"
+                className="min-h-[44px] flex items-center justify-center gap-1.5 px-5 py-2.5 text-xs font-bold bg-[#D97757] text-[#141311] hover:bg-[#E08568] cursor-pointer"
               >
                 <Download className="w-3.5 h-3.5" />
                 Download
@@ -556,7 +561,7 @@ export const FileDetailDrawer: React.FC<FileDetailDrawerProps> = ({
 };
 
 // ============================================================================
-// 4. USER ACCOUNT SWITCHER & LOGIN MODAL
+// 4. USER ACCOUNT SWITCHER & LOGIN MODAL (Mobile Ergonomic)
 // ============================================================================
 
 interface AuthModalProps {
@@ -608,15 +613,16 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/75 flex items-center justify-center p-4">
-      <div className="w-full max-w-md bg-[#1C1A17] border border-[#2C2824]">
-        <div className="flex items-center justify-between px-6 py-4 border-b border-[#2C2824]">
+    <div className="fixed inset-0 z-50 bg-black/80 flex items-end sm:items-center justify-center p-0 sm:p-4">
+      <div className="w-full sm:max-w-md bg-[#1C1A17] border-t sm:border border-[#2C2824] max-h-[92vh] overflow-y-auto">
+        <div className="flex items-center justify-between px-5 py-4 border-b border-[#2C2824]">
           <h2 className="text-base font-bold text-[#F2EFE9]">Account & Sign In</h2>
           <button
             onClick={onClose}
-            className="p-1 text-[#9E978E] hover:text-[#F2EFE9] cursor-pointer"
+            className="min-w-[44px] min-h-[44px] -mr-2 flex items-center justify-center text-[#9E978E] hover:text-[#F2EFE9] cursor-pointer"
+            aria-label="Close modal"
           >
-            <X className="w-4 h-4" />
+            <X className="w-5 h-5" />
           </button>
         </div>
 
@@ -627,14 +633,14 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               setTab('switch');
               setError(null);
             }}
-            className={`py-2.5 flex items-center justify-center gap-1.5 border-r border-[#2C2824] cursor-pointer ${
+            className={`min-h-[44px] py-2.5 flex items-center justify-center gap-1.5 border-r border-[#2C2824] cursor-pointer ${
               tab === 'switch'
                 ? 'bg-[#1C1A17] text-[#D97757] font-bold'
                 : 'text-[#9E978E] hover:text-[#F2EFE9]'
             }`}
           >
             <UserCheck className="w-3.5 h-3.5" />
-            Switch User
+            Switch
           </button>
           <button
             type="button"
@@ -642,7 +648,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               setTab('login');
               setError(null);
             }}
-            className={`py-2.5 flex items-center justify-center gap-1.5 border-r border-[#2C2824] cursor-pointer ${
+            className={`min-h-[44px] py-2.5 flex items-center justify-center gap-1.5 border-r border-[#2C2824] cursor-pointer ${
               tab === 'login'
                 ? 'bg-[#1C1A17] text-[#D97757] font-bold'
                 : 'text-[#9E978E] hover:text-[#F2EFE9]'
@@ -657,19 +663,19 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               setTab('register');
               setError(null);
             }}
-            className={`py-2.5 flex items-center justify-center gap-1.5 cursor-pointer ${
+            className={`min-h-[44px] py-2.5 flex items-center justify-center gap-1.5 cursor-pointer ${
               tab === 'register'
                 ? 'bg-[#1C1A17] text-[#D97757] font-bold'
                 : 'text-[#9E978E] hover:text-[#F2EFE9]'
             }`}
           >
             <UserPlus className="w-3.5 h-3.5" />
-            New Account
+            Register
           </button>
         </div>
 
         {tab === 'switch' ? (
-          <div className="p-6 space-y-3">
+          <div className="p-5 sm:p-6 space-y-3">
             {users.map((u) => {
               const isCurrent = u.id === currentUser.id;
               return (
@@ -681,12 +687,12 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                       : 'bg-[#141311] border-[#2C2824]'
                   }`}
                 >
-                  <div>
-                    <div className="text-sm font-bold text-[#F2EFE9]">{u.name}</div>
-                    <div className="text-xs text-[#9E978E]">{u.email}</div>
+                  <div className="min-w-0">
+                    <div className="text-sm font-bold text-[#F2EFE9] truncate">{u.name}</div>
+                    <div className="text-xs text-[#9E978E] truncate">{u.email}</div>
                   </div>
                   {isCurrent ? (
-                    <span className="text-xs font-medium text-[#2E9E6B]">Active</span>
+                    <span className="text-xs font-medium text-[#2E9E6B] shrink-0">Active</span>
                   ) : (
                     <button
                       type="button"
@@ -694,7 +700,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                         await onSwitchUser(u.id);
                         onClose();
                       }}
-                      className="px-3 py-1.5 text-xs font-semibold bg-[#D97757] text-[#141311] cursor-pointer"
+                      className="min-h-[40px] px-4 py-2 text-xs font-semibold bg-[#D97757] text-[#141311] shrink-0 cursor-pointer"
                     >
                       Switch
                     </button>
@@ -704,7 +710,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
             })}
           </div>
         ) : (
-          <form onSubmit={handleAuthSubmit} className="p-6 space-y-4">
+          <form onSubmit={handleAuthSubmit} className="p-5 sm:p-6 space-y-4">
             {tab === 'register' && (
               <div className="space-y-1.5">
                 <label className="block text-xs text-[#9E978E]">Your Name</label>
@@ -714,7 +720,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   value={name}
                   onChange={(e) => setName(e.target.value)}
                   placeholder="Enter your name"
-                  className="w-full bg-[#141311] border border-[#2C2824] px-3.5 py-2 text-sm text-[#F2EFE9] focus:outline-none focus:border-[#D97757]"
+                  className="w-full min-h-[44px] bg-[#141311] border border-[#2C2824] px-3.5 py-2 text-sm text-[#F2EFE9] focus:outline-none focus:border-[#D97757]"
                 />
               </div>
             )}
@@ -727,7 +733,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 placeholder="admin@unlim.cloud"
-                className="w-full bg-[#141311] border border-[#2C2824] px-3.5 py-2 text-sm text-[#F2EFE9] focus:outline-none focus:border-[#D97757]"
+                className="w-full min-h-[44px] bg-[#141311] border border-[#2C2824] px-3.5 py-2 text-sm text-[#F2EFE9] focus:outline-none focus:border-[#D97757]"
               />
             </div>
 
@@ -739,24 +745,24 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 placeholder={tab === 'login' ? 'Demo: admin123' : 'Create a password'}
-                className="w-full bg-[#141311] border border-[#2C2824] px-3.5 py-2 text-sm text-[#F2EFE9] focus:outline-none focus:border-[#D97757]"
+                className="w-full min-h-[44px] bg-[#141311] border border-[#2C2824] px-3.5 py-2 text-sm text-[#F2EFE9] focus:outline-none focus:border-[#D97757]"
               />
             </div>
 
             {error && <p className="text-xs text-[#D94848]">{error}</p>}
 
-            <div className="flex items-center justify-end gap-3 pt-2 border-t border-[#2C2824]">
+            <div className="flex flex-col-reverse sm:flex-row items-stretch sm:items-center justify-end gap-2.5 pt-2 border-t border-[#2C2824]">
               <button
                 type="button"
                 onClick={onClose}
-                className="px-4 py-2 text-xs font-medium text-[#9E978E] border border-[#2C2824] bg-[#141311] cursor-pointer"
+                className="min-h-[44px] px-4 py-2 text-xs font-medium text-[#9E978E] border border-[#2C2824] bg-[#141311] cursor-pointer"
               >
                 Cancel
               </button>
               <button
                 type="submit"
                 disabled={busy}
-                className="px-5 py-2 text-xs font-bold bg-[#D97757] text-[#141311] hover:bg-[#E08568] cursor-pointer"
+                className="min-h-[44px] px-5 py-2 text-xs font-bold bg-[#D97757] text-[#141311] hover:bg-[#E08568] cursor-pointer"
               >
                 {busy ? 'Please wait...' : tab === 'login' ? 'Sign In' : 'Create Account'}
               </button>

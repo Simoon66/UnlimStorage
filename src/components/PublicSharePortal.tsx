@@ -130,8 +130,8 @@ export const PublicSharePortal: React.FC<PublicSharePortalProps> = ({
 
   return (
     <div className="min-h-screen bg-[#141311] text-[#F2EFE9] flex flex-col justify-between">
-      {/* Clean Header */}
-      <header className="flex items-center justify-between gap-8 px-6 py-4 border-b border-[#2C2824] bg-[#1C1A17]">
+      {/* Clean Phone-Friendly Header */}
+      <header className="flex items-center justify-between gap-3 sm:gap-8 px-4 sm:px-6 py-3.5 border-b border-[#2C2824] bg-[#1C1A17]">
         <button
           onClick={onExitPublicPortal}
           className="text-lg font-bold tracking-tight text-[#F2EFE9] whitespace-nowrap shrink-0 cursor-pointer"
@@ -146,53 +146,53 @@ export const PublicSharePortal: React.FC<PublicSharePortalProps> = ({
         <div className="flex items-center shrink-0">
           <button
             onClick={onExitPublicPortal}
-            className="flex items-center gap-2 px-4 py-2 text-xs font-medium text-[#F2EFE9] bg-[#24211D] border border-[#2C2824] hover:border-[#D97757] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            className="min-h-[40px] flex items-center gap-2 px-3.5 sm:px-4 py-2 text-xs font-medium text-[#F2EFE9] bg-[#24211D] border border-[#2C2824] hover:border-[#D97757] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
             <ArrowLeft className="w-3.5 h-3.5" />
-            Back to My Files
+            <span>Back to My Files</span>
           </button>
         </div>
       </header>
 
       {/* Centered Friendly File Card */}
-      <main className="flex-1 flex items-center justify-center p-6">
+      <main className="flex-1 flex items-center justify-center p-4 sm:p-6">
         <div className="w-full max-w-lg bg-[#1C1A17] border border-[#2C2824]">
           {loading ? (
-            <div className="p-8 space-y-4">
+            <div className="p-5 sm:p-8 space-y-4">
               <div className="h-12 w-12 bg-[#24211D] border border-[#2C2824]" />
               <div className="h-6 w-56 bg-[#24211D] border border-[#2C2824]" />
               <div className="h-12 w-full bg-[#24211D] border border-[#2C2824]" />
             </div>
           ) : error || !share ? (
-            <div className="p-8 space-y-5 text-center">
+            <div className="p-6 sm:p-8 space-y-5 text-center">
               <div className="w-12 h-12 mx-auto bg-[#24211D] border border-[#2C2824] flex items-center justify-center">
                 <AlertTriangle className="w-6 h-6 text-[#D94848]" />
               </div>
               <div className="space-y-2">
-                <h1 className="text-xl font-bold text-[#F2EFE9]">Link Unavailable</h1>
-                <p className="text-sm text-[#9E978E]">
+                <h1 className="text-lg sm:text-xl font-bold text-[#F2EFE9]">Link Unavailable</h1>
+                <p className="text-xs sm:text-sm text-[#9E978E]">
                   {error || 'This shared link has expired or been turned off by the owner.'}
                 </p>
               </div>
               <button
                 onClick={onExitPublicPortal}
-                className="px-5 py-2.5 text-xs font-semibold bg-[#D97757] text-[#141311] hover:bg-[#E08568] transition-colors cursor-pointer"
+                className="min-h-[44px] w-full sm:w-auto px-5 py-2.5 text-xs font-semibold bg-[#D97757] text-[#141311] hover:bg-[#E08568] transition-colors cursor-pointer"
               >
                 Go to My Drive
               </button>
             </div>
           ) : (
-            <div className="p-8 space-y-6">
+            <div className="p-5 sm:p-8 space-y-6">
               {/* File Icon & Name */}
-              <div className="flex items-start gap-4">
-                <div className="w-12 h-12 bg-[#24211D] border border-[#2C2824] flex items-center justify-center shrink-0">
-                  <FileText className="w-6 h-6 text-[#D97757]" />
+              <div className="flex items-start gap-3.5 sm:gap-4">
+                <div className="w-11 h-11 sm:w-12 sm:h-12 bg-[#24211D] border border-[#2C2824] flex items-center justify-center shrink-0">
+                  <FileText className="w-5 h-5 sm:w-6 sm:h-6 text-[#D97757]" />
                 </div>
                 <div className="min-w-0 flex-1 space-y-1">
-                  <h1 className="text-xl font-bold text-[#F2EFE9] break-all">
+                  <h1 className="text-base sm:text-xl font-bold text-[#F2EFE9] break-all">
                     {share.fileName}
                   </h1>
-                  <div className="flex flex-wrap items-center gap-2 text-xs text-[#9E978E] tabular-nums">
+                  <div className="flex flex-wrap items-center gap-1.5 sm:gap-2 text-xs text-[#9E978E] tabular-nums">
                     <span className="text-[#F2EFE9] font-medium">
                       {formatBytes(share.fileSizeBytes)}
                     </span>
@@ -208,8 +208,8 @@ export const PublicSharePortal: React.FC<PublicSharePortalProps> = ({
               <div className="pt-4 border-t border-[#2C2824]">
                 {share.hasPassword && !unlockedKey ? (
                   <form onSubmit={handleVerifyPassword} className="space-y-4">
-                    <div className="flex items-center gap-2 text-sm font-semibold text-[#F2EFE9]">
-                      <Lock className="w-4 h-4 text-[#D97757]" />
+                    <div className="flex items-center gap-2 text-xs sm:text-sm font-semibold text-[#F2EFE9]">
+                      <Lock className="w-4 h-4 text-[#D97757] shrink-0" />
                       <span>This file is protected with a password</span>
                     </div>
                     {share.token === 'tg-spec-vault-2026' && (
@@ -218,19 +218,19 @@ export const PublicSharePortal: React.FC<PublicSharePortalProps> = ({
                         <span className="font-mono text-[#F2EFE9]">unlim2026</span>
                       </p>
                     )}
-                    <div className="flex flex-col sm:flex-row gap-3">
+                    <div className="flex flex-col sm:flex-row gap-2.5 sm:gap-3">
                       <input
                         type="password"
                         value={passwordInput}
                         onChange={(e) => setPasswordInput(e.target.value)}
                         placeholder="Enter password to unlock..."
-                        className="flex-1 bg-[#141311] border border-[#2C2824] px-4 py-2.5 text-sm text-[#F2EFE9] focus:outline-none focus:border-[#D97757]"
+                        className="flex-1 min-h-[44px] bg-[#141311] border border-[#2C2824] px-4 py-2.5 text-sm text-[#F2EFE9] focus:outline-none focus:border-[#D97757]"
                         required
                       />
                       <button
                         type="submit"
                         disabled={verifying}
-                        className="px-6 py-2.5 text-sm font-semibold bg-[#D97757] text-[#141311] hover:bg-[#E08568] transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
+                        className="min-h-[44px] px-6 py-2.5 text-sm font-semibold bg-[#D97757] text-[#141311] hover:bg-[#E08568] transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
                       >
                         {verifying ? 'Checking...' : 'Unlock File'}
                       </button>
@@ -242,17 +242,19 @@ export const PublicSharePortal: React.FC<PublicSharePortalProps> = ({
                     <button
                       onClick={handleStartDownload}
                       disabled={downloading}
-                      className="w-full flex items-center justify-center gap-2.5 py-3.5 px-6 text-sm font-bold bg-[#D97757] text-[#141311] hover:bg-[#E08568] transition-colors cursor-pointer"
+                      className="min-h-[48px] w-full flex items-center justify-center gap-2.5 py-3.5 px-6 text-sm font-bold bg-[#D97757] text-[#141311] hover:bg-[#E08568] transition-colors cursor-pointer"
                     >
-                      <Download className="w-4 h-4" />
-                      {downloading
-                        ? 'Starting Download...'
-                        : `Download File (${formatBytes(share.fileSizeBytes)})`}
+                      <Download className="w-4 h-4 shrink-0" />
+                      <span className="truncate">
+                        {downloading
+                          ? 'Starting Download...'
+                          : `Download File (${formatBytes(share.fileSizeBytes)})`}
+                      </span>
                     </button>
 
-                    <div className="flex items-center justify-between text-xs text-[#9E978E] tabular-nums">
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1.5 text-xs text-[#9E978E] tabular-nums">
                       <span className="flex items-center gap-1.5 text-[#2E9E6B]">
-                        <CheckCircle2 className="w-3.5 h-3.5" />
+                        <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
                         Ready for direct download
                       </span>
                       <span>

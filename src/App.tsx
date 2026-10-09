@@ -18,6 +18,8 @@ import {
   CheckCircle2,
   AlertCircle,
   Cloud,
+  Gauge,
+  Settings,
 } from 'lucide-react';
 import {
   User,
@@ -180,27 +182,14 @@ export default function App() {
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
     const connect = () => {
-      ws = new WebSocket(wsUrl);
+      try {
+        ws = new WebSocket(wsUrl);
 
-      ws.onmessage = (event) => {
-        try {
-          const msg = JSON.parse(event.data);
-          if (msg.event === 'transfer:progress' && msg.payload) {
-            const job = msg.payload as TransferJob;
-            setTransfers((prev) => {
-              const idx = prev.findIndex((t) => t.id === job.id);
-              if (idx === -1) return [job, ...prev];
-              const copy = [...prev];
-              copy[idx] = job;
-              return copy;
-            });
-          } else if (msg.event === 'transfer:completed' && msg.payload) {
-            const { job, file, notification } = msg.payload as {
-              job?: TransferJob;
-              file?: FileRecord;
-              notification?: RealtimeNotification;
-            };
-            if (job) {
+        ws.onmessage = (event) => {
+          try {
+            const msg = JSON.parse(event.data);
+            if (msg.event === 'transfer:progress' && msg.payload) {
+              const job = msg.payload as TransferJob;
               setTransfers((prev) => {
                 const idx = prev.findIndex((t) => t.id === job.id);
                 if (idx === -1) return [job, ...prev];
@@ -208,51 +197,68 @@ export default function App() {
                 copy[idx] = job;
                 return copy;
               });
-            }
-            if (file) {
-              setFiles((prev) => {
-                const idx = prev.findIndex((f) => f.id === file.id);
-                if (idx === -1) return [file, ...prev];
-                const copy = [...prev];
-                copy[idx] = file;
-                return copy;
+            } else if (msg.event === 'transfer:completed' && msg.payload) {
+              const { job, file, notification } = msg.payload as {
+                job?: TransferJob;
+                file?: FileRecord;
+                notification?: RealtimeNotification;
+              };
+              if (job) {
+                setTransfers((prev) => {
+                  const idx = prev.findIndex((t) => t.id === job.id);
+                  if (idx === -1) return [job, ...prev];
+                  const copy = [...prev];
+                  copy[idx] = job;
+                  return copy;
+                });
+              }
+              if (file) {
+                setFiles((prev) => {
+                  const idx = prev.findIndex((f) => f.id === file.id);
+                  if (idx === -1) return [file, ...prev];
+                  const copy = [...prev];
+                  copy[idx] = file;
+                  return copy;
+                });
+              }
+              if (notification) {
+                pushNotification(notification);
+              }
+            } else if (msg.event === 'transfer:failed' && msg.payload) {
+              const { job, notification } = msg.payload as {
+                job?: TransferJob;
+                notification?: RealtimeNotification;
+              };
+              if (job) {
+                setTransfers((prev) => {
+                  const idx = prev.findIndex((t) => t.id === job.id);
+                  if (idx === -1) return [job, ...prev];
+                  const copy = [...prev];
+                  copy[idx] = job;
+                  return copy;
+                });
+              }
+              if (notification) {
+                pushNotification(notification);
+              }
+            } else if (msg.event === 'log:created' && msg.payload) {
+              const entry = msg.payload as AuditLog;
+              setLogs((prev) => {
+                if (prev.some((l) => l.id === entry.id)) return prev;
+                return [entry, ...prev].slice(0, 300);
               });
             }
-            if (notification) {
-              pushNotification(notification);
-            }
-          } else if (msg.event === 'transfer:failed' && msg.payload) {
-            const { job, notification } = msg.payload as {
-              job?: TransferJob;
-              notification?: RealtimeNotification;
-            };
-            if (job) {
-              setTransfers((prev) => {
-                const idx = prev.findIndex((t) => t.id === job.id);
-                if (idx === -1) return [job, ...prev];
-                const copy = [...prev];
-                copy[idx] = job;
-                return copy;
-              });
-            }
-            if (notification) {
-              pushNotification(notification);
-            }
-          } else if (msg.event === 'log:created' && msg.payload) {
-            const entry = msg.payload as AuditLog;
-            setLogs((prev) => {
-              if (prev.some((l) => l.id === entry.id)) return prev;
-              return [entry, ...prev].slice(0, 300);
-            });
+          } catch {
+            // ignore
           }
-        } catch {
-          // ignore
-        }
-      };
+        };
 
-      ws.onclose = () => {
-        reconnectTimer = setTimeout(connect, 3000);
-      };
+        ws.onclose = () => {
+          reconnectTimer = setTimeout(connect, 5000);
+        };
+      } catch {
+        // ignore ws init error on static hosts
+      }
     };
 
     connect();
@@ -399,6 +405,7 @@ export default function App() {
     if (data.job) {
       setTransfers((prev) => [data.job, ...prev.filter((t) => t.id !== data.job.id)]);
     }
+    await loadWorkspaceData();
   };
 
   const handleCreateShare = useCallback(
@@ -609,7 +616,7 @@ export default function App() {
       {/* ====================================================================
           TOP BAR CONTRACT (Single Clean Navigation Bar — 3 Zones)
       ==================================================================== */}
-      <header className="flex items-center justify-between gap-8 px-6 py-4 border-b border-[#2C2824] bg-[#1C1A17]">
+      <header className="sticky top-0 z-30 flex items-center justify-between gap-4 sm:gap-8 px-4 sm:px-6 py-3 border-b border-[#2C2824] bg-[#1C1A17]">
         {/* Zone 1: Brand Title */}
         <a
           href="#my-files"
@@ -624,8 +631,8 @@ export default function App() {
           UnlimCloud
         </a>
 
-        {/* Zone 2: 4 Simple, Friendly Navigation Links */}
-        <nav className="flex items-center gap-6 text-sm font-medium text-[#9E978E] overflow-x-auto">
+        {/* Zone 2: Desktop Navigation Links (hidden on phone; phone uses thumb-friendly Bottom Tab Bar) */}
+        <nav className="hidden md:flex items-center gap-6 text-sm font-medium text-[#9E978E]">
           <a
             href="#my-files"
             onClick={(e) => {
@@ -685,12 +692,12 @@ export default function App() {
           </a>
         </nav>
 
-        {/* Zone 3: 1 Primary Action */}
+        {/* Zone 3: 1 Primary Action (44px min touch height on mobile) */}
         <div className="flex items-center shrink-0">
           <button
             onClick={() => fileInputRef.current?.click()}
             disabled={uploadingFiles}
-            className="px-4 py-2 text-xs font-bold bg-[#D97757] text-[#141311] hover:bg-[#E08568] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            className="min-h-[40px] sm:min-h-[38px] px-4 py-2 text-xs font-bold bg-[#D97757] text-[#141311] hover:bg-[#E08568] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
             {uploadingFiles ? 'Uploading...' : '+ Upload Files'}
           </button>
@@ -698,36 +705,36 @@ export default function App() {
       </header>
 
       {/* ====================================================================
-          MAIN USER-FRIENDLY CONTAINER
+          MAIN USER-FRIENDLY CONTAINER (with pb-24 on mobile for Bottom Tab Bar)
       ==================================================================== */}
-      <main className="flex-1 w-full max-w-7xl mx-auto px-6 py-6 space-y-6">
+      <main className="flex-1 w-full max-w-7xl mx-auto px-4 sm:px-6 py-4 sm:py-6 pb-24 md:pb-8 space-y-5 sm:space-y-6">
         {/* Friendly Welcome & Storage Summary Bar */}
-        <div className="p-4 bg-[#1C1A17] border border-[#2C2824] flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div className="p-3.5 sm:p-4 bg-[#1C1A17] border border-[#2C2824] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div className="flex items-center gap-3">
-            <div className="w-9 h-9 bg-[#24211D] border border-[#2C2824] flex items-center justify-center shrink-0">
-              <Cloud className="w-4 h-4 text-[#D97757]" />
+            <div className="w-10 h-10 bg-[#24211D] border border-[#2C2824] flex items-center justify-center shrink-0">
+              <Cloud className="w-5 h-5 text-[#D97757]" />
             </div>
-            <div>
-              <div className="text-sm font-bold text-[#F2EFE9]">
+            <div className="min-w-0">
+              <div className="text-sm font-bold text-[#F2EFE9] truncate">
                 Unlimited Telegram Cloud Drive
               </div>
               <div className="text-xs text-[#9E978E] tabular-nums">
-                {formatBytes(totalStorageBytes)} stored across {files.length} files ·{' '}
+                {formatBytes(totalStorageBytes)} · {files.length} files ·{' '}
                 {bandwidthSettings.globalThrottleKbps
-                  ? `Speed limit: ${bandwidthSettings.globalThrottleKbps} KB/s`
-                  : 'Full download speed active'}
+                  ? `${bandwidthSettings.globalThrottleKbps} KB/s limit`
+                  : 'Full speed'}
               </div>
             </div>
           </div>
 
           {currentUser && (
-            <div className="flex items-center gap-3">
-              <span className="text-xs text-[#9E978E]">
-                Signed in as <strong className="text-[#F2EFE9]">{currentUser.name}</strong>
+            <div className="flex items-center justify-between sm:justify-end gap-3 pt-2.5 sm:pt-0 border-t sm:border-t-0 border-[#2C2824]">
+              <span className="text-xs text-[#9E978E] truncate">
+                Account: <strong className="text-[#F2EFE9]">{currentUser.name}</strong>
               </span>
               <button
                 onClick={() => setShowAuthModal(true)}
-                className="px-3 py-1.5 text-xs font-medium bg-[#24211D] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center gap-1.5 cursor-pointer"
+                className="min-h-[40px] px-3.5 py-2 text-xs font-medium bg-[#24211D] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center gap-1.5 shrink-0 cursor-pointer"
               >
                 <UserIcon className="w-3.5 h-3.5 text-[#D97757]" />
                 Switch Account
@@ -736,7 +743,7 @@ export default function App() {
           )}
         </div>
 
-        {/* Active Transfer Progress Bar (Only visible when uploading or fetching from URL) */}
+        {/* Active Transfer Progress Bar */}
         {activeStreamingJobs.length > 0 && (
           <div className="p-4 bg-[#1C1A17] border border-[#D97757] space-y-3">
             <div className="text-xs font-bold text-[#D97757]">
@@ -750,8 +757,8 @@ export default function App() {
               return (
                 <div key={job.id} className="space-y-1.5">
                   <div className="flex items-center justify-between text-xs tabular-nums">
-                    <span className="font-semibold text-[#F2EFE9]">{job.fileName}</span>
-                    <span className="text-[#9E978E]">
+                    <span className="font-semibold text-[#F2EFE9] truncate">{job.fileName}</span>
+                    <span className="text-[#9E978E] shrink-0">
                       {formatBytes(job.transferredBytes)} · {formatSpeed(job.speedBps)}
                     </span>
                   </div>
@@ -784,50 +791,49 @@ export default function App() {
                 handleUploadFiles(e.dataTransfer.files);
               }
             }}
-            className="space-y-6"
+            className="space-y-5 sm:space-y-6"
           >
-            {/* Easy Action Bar: Upload, Upload from URL, New Folder, Search */}
-            <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
-              {/* Left Action Buttons */}
-              <div className="flex flex-wrap items-center gap-2.5">
+            {/* Mobile-Friendly Action Grid (2x2 on phones, inline row on desktop) + Search */}
+            <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+              <div className="grid grid-cols-2 sm:flex sm:flex-wrap items-center gap-2">
                 <button
                   onClick={() => fileInputRef.current?.click()}
-                  className="flex items-center gap-2 px-4 py-2.5 text-xs font-bold bg-[#D97757] text-[#141311] hover:bg-[#E08568] cursor-pointer"
+                  className="min-h-[44px] flex items-center justify-center gap-2 px-4 py-2.5 text-xs font-bold bg-[#D97757] text-[#141311] hover:bg-[#E08568] cursor-pointer"
                 >
-                  <Upload className="w-4 h-4" />
-                  Upload Files
+                  <Upload className="w-4 h-4 shrink-0" />
+                  <span>Upload Files</span>
                 </button>
 
                 <button
                   onClick={() => setShowRemoteModal(true)}
-                  className="flex items-center gap-2 px-4 py-2.5 text-xs font-semibold bg-[#1C1A17] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] cursor-pointer"
+                  className="min-h-[44px] flex items-center justify-center gap-2 px-4 py-2.5 text-xs font-semibold bg-[#1C1A17] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] cursor-pointer"
                 >
-                  <Globe className="w-4 h-4 text-[#D97757]" />
-                  Upload from Link (URL)
+                  <Globe className="w-4 h-4 text-[#D97757] shrink-0" />
+                  <span>Upload URL</span>
                 </button>
 
                 <button
                   onClick={() => setCreatingFolder((prev) => !prev)}
-                  className="flex items-center gap-2 px-4 py-2.5 text-xs font-semibold bg-[#1C1A17] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] cursor-pointer"
+                  className="min-h-[44px] flex items-center justify-center gap-2 px-4 py-2.5 text-xs font-semibold bg-[#1C1A17] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] cursor-pointer"
                 >
-                  <FolderPlus className="w-4 h-4 text-[#D97757]" />
-                  New Folder
+                  <FolderPlus className="w-4 h-4 text-[#D97757] shrink-0" />
+                  <span>New Folder</span>
                 </button>
 
                 <button
                   onClick={() => setOnlyStarred((prev) => !prev)}
-                  className={`flex items-center gap-1.5 px-3.5 py-2.5 text-xs font-semibold border cursor-pointer ${
+                  className={`min-h-[44px] flex items-center justify-center gap-1.5 px-3.5 py-2.5 text-xs font-semibold border cursor-pointer ${
                     onlyStarred
                       ? 'bg-[#24211D] border-[#D97757] text-[#D97757]'
                       : 'bg-[#1C1A17] border-[#2C2824] text-[#9E978E] hover:text-[#F2EFE9]'
                   }`}
                 >
-                  <Star className="w-3.5 h-3.5" fill={onlyStarred ? '#D97757' : 'none'} />
-                  Starred
+                  <Star className="w-4 h-4 shrink-0" fill={onlyStarred ? '#D97757' : 'none'} />
+                  <span>Starred</span>
                 </button>
               </div>
 
-              {/* Right Search Box */}
+              {/* Search Box (44px height on mobile) */}
               <div className="relative w-full lg:w-80">
                 <Search className="w-4 h-4 text-[#9E978E] absolute left-3.5 top-1/2 -translate-y-1/2" />
                 <input
@@ -835,7 +841,7 @@ export default function App() {
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
                   placeholder="Search your files..."
-                  className="w-full bg-[#1C1A17] border border-[#2C2824] pl-10 pr-4 py-2.5 text-xs text-[#F2EFE9] focus:outline-none focus:border-[#D97757]"
+                  className="w-full min-h-[44px] bg-[#1C1A17] border border-[#2C2824] pl-10 pr-4 py-2.5 text-xs text-[#F2EFE9] focus:outline-none focus:border-[#D97757]"
                 />
               </div>
             </div>
@@ -852,19 +858,19 @@ export default function App() {
                   value={newFolderName}
                   onChange={(e) => setNewFolderName(e.target.value)}
                   placeholder="Type folder name..."
-                  className="flex-1 bg-[#141311] border border-[#2C2824] px-3.5 py-2 text-sm text-[#F2EFE9] focus:outline-none focus:border-[#D97757]"
+                  className="flex-1 min-h-[44px] bg-[#141311] border border-[#2C2824] px-3.5 py-2 text-sm text-[#F2EFE9] focus:outline-none focus:border-[#D97757]"
                 />
-                <div className="flex items-center gap-2">
+                <div className="grid grid-cols-2 sm:flex items-center gap-2">
                   <button
                     type="submit"
-                    className="px-5 py-2 text-xs font-bold bg-[#D97757] text-[#141311] cursor-pointer"
+                    className="min-h-[44px] px-5 py-2 text-xs font-bold bg-[#D97757] text-[#141311] cursor-pointer"
                   >
                     Create
                   </button>
                   <button
                     type="button"
                     onClick={() => setCreatingFolder(false)}
-                    className="px-4 py-2 text-xs text-[#9E978E] border border-[#2C2824] bg-[#141311] cursor-pointer"
+                    className="min-h-[44px] px-4 py-2 text-xs text-[#9E978E] border border-[#2C2824] bg-[#141311] cursor-pointer"
                   >
                     Cancel
                   </button>
@@ -880,12 +886,12 @@ export default function App() {
                     setCurrentFolderId(null);
                     setOnlyStarred(false);
                   }}
-                  className="text-[#9E978E] hover:text-[#F2EFE9] cursor-pointer"
+                  className="min-h-[40px] px-2 -ml-2 text-[#9E978E] hover:text-[#F2EFE9] cursor-pointer"
                 >
                   My Files
                 </button>
                 <ChevronRight className="w-4 h-4 text-[#9E978E]" />
-                <span className="text-[#D97757]">
+                <span className="text-[#D97757] truncate">
                   {onlyStarred ? 'Starred Files' : activeFolder?.name}
                 </span>
               </div>
@@ -893,18 +899,18 @@ export default function App() {
 
             {/* Folders Section (Google Drive Style Cards) */}
             {!onlyStarred && !searchQuery.trim() && visibleSubfolders.length > 0 && (
-              <div className="space-y-3">
+              <div className="space-y-2.5">
                 <h2 className="text-xs font-semibold text-[#9E978E] uppercase tracking-wider">
                   Folders
                 </h2>
-                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3.5">
+                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
                   {visibleSubfolders.map((folder) => {
                     const count = files.filter((f) => f.folderId === folder.id).length;
                     return (
                       <div
                         key={folder.id}
                         onClick={() => setCurrentFolderId(folder.id)}
-                        className="p-4 bg-[#1C1A17] border border-[#2C2824] hover:border-[#D97757] transition-colors flex items-center justify-between gap-3 cursor-pointer group"
+                        className="min-h-[64px] p-4 bg-[#1C1A17] border border-[#2C2824] hover:border-[#D97757] transition-colors flex items-center justify-between gap-3 cursor-pointer group"
                       >
                         <div className="flex items-center gap-3 min-w-0">
                           <Folder className="w-6 h-6 text-[#D97757] shrink-0" />
@@ -923,7 +929,7 @@ export default function App() {
                             e.stopPropagation();
                             handleDeleteFolder(folder.id);
                           }}
-                          className="p-1.5 text-[#9E978E] hover:text-[#D94848] opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer"
+                          className="min-w-[44px] min-h-[44px] -mr-2 flex items-center justify-center text-[#9E978E] hover:text-[#D94848] cursor-pointer"
                           title="Delete Folder"
                         >
                           <Trash2 className="w-4 h-4" />
@@ -936,19 +942,19 @@ export default function App() {
             )}
 
             {/* Files Section (Google Drive Style Visual Cards) */}
-            <div className="space-y-3">
+            <div className="space-y-2.5">
               <div className="flex items-center justify-between">
                 <h2 className="text-xs font-semibold text-[#9E978E] uppercase tracking-wider">
                   Files ({visibleFiles.length})
                 </h2>
-                <span className="text-xs text-[#9E978E]">
+                <span className="hidden sm:inline text-xs text-[#9E978E]">
                   Tip: Drag and drop files anywhere to upload
                 </span>
               </div>
 
               {visibleFiles.length === 0 ? (
                 <div
-                  className={`p-12 bg-[#1C1A17] border text-center space-y-3 ${
+                  className={`p-8 sm:p-12 bg-[#1C1A17] border text-center space-y-3 ${
                     isDraggingOver ? 'border-[#D97757]' : 'border-[#2C2824]'
                   }`}
                 >
@@ -956,18 +962,18 @@ export default function App() {
                     This folder is empty
                   </div>
                   <p className="text-xs text-[#9E978E] max-w-md mx-auto">
-                    Drop files here from your computer, or upload directly from any web link.
+                    Tap Upload Files below or upload directly from any web link.
                   </p>
-                  <div className="flex items-center justify-center gap-3 pt-2">
+                  <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-center gap-2.5 pt-2">
                     <button
                       onClick={() => fileInputRef.current?.click()}
-                      className="px-5 py-2.5 text-xs font-bold bg-[#D97757] text-[#141311] cursor-pointer"
+                      className="min-h-[44px] px-5 py-2.5 text-xs font-bold bg-[#D97757] text-[#141311] cursor-pointer"
                     >
                       + Upload Files
                     </button>
                     <button
                       onClick={() => setShowRemoteModal(true)}
-                      className="px-4 py-2.5 text-xs font-semibold bg-[#24211D] border border-[#2C2824] text-[#F2EFE9] cursor-pointer"
+                      className="min-h-[44px] px-4 py-2.5 text-xs font-semibold bg-[#24211D] border border-[#2C2824] text-[#F2EFE9] cursor-pointer"
                     >
                       Upload from Link
                     </button>
@@ -980,9 +986,9 @@ export default function App() {
                     return (
                       <div
                         key={file.id}
-                        className="p-5 bg-[#1C1A17] border border-[#2C2824] hover:border-[#D97757]/70 transition-colors flex flex-col justify-between gap-4"
+                        className="p-4 sm:p-5 bg-[#1C1A17] border border-[#2C2824] hover:border-[#D97757]/70 transition-colors flex flex-col justify-between gap-4"
                       >
-                        {/* Top Card Row: File Icon + Star & Delete */}
+                        {/* Top Card Row: File Icon + Star & Delete (with 44px touch hitboxes) */}
                         <div className="space-y-3">
                           <div className="flex items-start justify-between gap-2">
                             <button
@@ -993,10 +999,10 @@ export default function App() {
                               {renderFileIcon(file.name)}
                             </button>
 
-                            <div className="flex items-center gap-1">
+                            <div className="flex items-center -mr-2 -mt-2">
                               <button
                                 onClick={() => handleToggleStar(file)}
-                                className={`p-1.5 cursor-pointer ${
+                                className={`min-w-[44px] min-h-[44px] flex items-center justify-center cursor-pointer ${
                                   file.starred
                                     ? 'text-[#D97757]'
                                     : 'text-[#9E978E] hover:text-[#F2EFE9]'
@@ -1010,7 +1016,7 @@ export default function App() {
                               </button>
                               <button
                                 onClick={() => handleDeleteFile(file)}
-                                className="p-1.5 text-[#9E978E] hover:text-[#D94848] cursor-pointer"
+                                className="min-w-[44px] min-h-[44px] flex items-center justify-center text-[#9E978E] hover:text-[#D94848] cursor-pointer"
                                 title="Delete File"
                               >
                                 <Trash2 className="w-4 h-4" />
@@ -1043,21 +1049,21 @@ export default function App() {
                           </div>
                         </div>
 
-                        {/* Bottom Card Row: Big Clear Share & Download Buttons */}
-                        <div className="grid grid-cols-2 gap-2 pt-3 border-t border-[#2C2824]">
+                        {/* Bottom Card Row: Big Clear Share & Download Buttons (min-h-[44px]) */}
+                        <div className="grid grid-cols-2 gap-2.5 pt-3 border-t border-[#2C2824]">
                           <button
                             onClick={() => setShareModalFile(file)}
-                            className="py-2 px-3 text-xs font-semibold bg-[#24211D] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center justify-center gap-1.5 cursor-pointer"
+                            className="min-h-[44px] py-2.5 px-3 text-xs font-semibold bg-[#24211D] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center justify-center gap-1.5 cursor-pointer"
                           >
-                            <Link2 className="w-3.5 h-3.5 text-[#D97757]" />
+                            <Link2 className="w-4 h-4 text-[#D97757]" />
                             {existingShare ? 'Shared Link' : 'Share'}
                           </button>
 
                           <button
                             onClick={() => handleDownloadFile(file)}
-                            className="py-2 px-3 text-xs font-bold bg-[#D97757] text-[#141311] hover:bg-[#E08568] flex items-center justify-center gap-1.5 cursor-pointer"
+                            className="min-h-[44px] py-2.5 px-3 text-xs font-bold bg-[#D97757] text-[#141311] hover:bg-[#E08568] flex items-center justify-center gap-1.5 cursor-pointer"
                           >
-                            <Download className="w-3.5 h-3.5" />
+                            <Download className="w-4 h-4" />
                             Download
                           </button>
                         </div>
@@ -1106,10 +1112,60 @@ export default function App() {
       </main>
 
       {/* ====================================================================
-          REAL-TIME COMPLETION NOTIFICATION POPUP (Bottom-Right)
+          MOBILE FIXED BOTTOM TAB BAR (Thumb-Zone Navigation for Phones)
+      ==================================================================== */}
+      <nav className="fixed bottom-0 left-0 right-0 z-40 md:hidden grid grid-cols-4 bg-[#1C1A17] border-t border-[#2C2824]">
+        <button
+          onClick={() => {
+            setActiveView('explorer');
+            setOnlyStarred(false);
+          }}
+          className={`min-h-[56px] flex flex-col items-center justify-center gap-1 text-[11px] font-medium cursor-pointer ${
+            activeView === 'explorer' ? 'text-[#D97757] font-bold' : 'text-[#9E978E]'
+          }`}
+        >
+          <Folder className="w-5 h-5" />
+          <span>My Files</span>
+        </button>
+
+        <button
+          onClick={() => setActiveView('shares')}
+          className={`min-h-[56px] flex flex-col items-center justify-center gap-1 text-[11px] font-medium cursor-pointer ${
+            activeView === 'shares' ? 'text-[#D97757] font-bold' : 'text-[#9E978E]'
+          }`}
+        >
+          <Link2 className="w-5 h-5" />
+          <span>Shared ({shares.length})</span>
+        </button>
+
+        <button
+          onClick={() => setActiveView('activity')}
+          className={`min-h-[56px] flex flex-col items-center justify-center gap-1 text-[11px] font-medium cursor-pointer ${
+            activeView === 'activity' ? 'text-[#D97757] font-bold' : 'text-[#9E978E]'
+          }`}
+        >
+          <Gauge className="w-5 h-5" />
+          <span>Speed & Logs</span>
+        </button>
+
+        <button
+          onClick={() => setActiveView('telegram_settings')}
+          className={`min-h-[56px] flex flex-col items-center justify-center gap-1 text-[11px] font-medium cursor-pointer ${
+            activeView === 'telegram_settings'
+              ? 'text-[#D97757] font-bold'
+              : 'text-[#9E978E]'
+          }`}
+        >
+          <Settings className="w-5 h-5" />
+          <span>Telegram</span>
+        </button>
+      </nav>
+
+      {/* ====================================================================
+          REAL-TIME COMPLETION NOTIFICATION POPUP
       ==================================================================== */}
       {notifications.length > 0 && (
-        <div className="fixed bottom-5 right-5 z-50 w-full max-w-sm space-y-2 pointer-events-none">
+        <div className="fixed bottom-20 md:bottom-5 left-4 right-4 md:left-auto md:right-5 z-50 md:w-full md:max-w-sm space-y-2 pointer-events-none">
           {notifications.map((n) => (
             <div
               key={n.id}
@@ -1130,9 +1186,9 @@ export default function App() {
                 onClick={() =>
                   setNotifications((prev) => prev.filter((item) => item.id !== n.id))
                 }
-                className="text-[#9E978E] hover:text-[#F2EFE9] cursor-pointer shrink-0"
+                className="min-w-[36px] min-h-[36px] -mr-2 -mt-2 flex items-center justify-center text-[#9E978E] hover:text-[#F2EFE9] cursor-pointer shrink-0"
               >
-                <X className="w-3.5 h-3.5" />
+                <X className="w-4 h-4" />
               </button>
             </div>
           ))}
