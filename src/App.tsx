@@ -31,6 +31,7 @@ import {
   RealtimeNotification,
 } from './types';
 import { formatBytes, formatShortDate, formatSpeed } from './utils/format';
+import { apiFetch } from './services/clientCloudFallback';
 import { PublicSharePortal } from './components/PublicSharePortal';
 import {
   RemoteUploadModal,
@@ -127,12 +128,12 @@ export default function App() {
   const loadWorkspaceData = useCallback(async () => {
     try {
       const [meRes, filesRes, sharesRes, bwRes, logsRes, tgRes] = await Promise.all([
-        fetch('/api/auth/me', { headers: authHeaders() }),
-        fetch('/api/files', { headers: authHeaders() }),
-        fetch('/api/shares', { headers: authHeaders() }),
-        fetch('/api/bandwidth', { headers: authHeaders() }),
-        fetch('/api/logs', { headers: authHeaders() }),
-        fetch('/api/telegram/config', { headers: authHeaders() }),
+        apiFetch('/api/auth/me', { headers: authHeaders() }),
+        apiFetch('/api/files', { headers: authHeaders() }),
+        apiFetch('/api/shares', { headers: authHeaders() }),
+        apiFetch('/api/bandwidth', { headers: authHeaders() }),
+        apiFetch('/api/logs', { headers: authHeaders() }),
+        apiFetch('/api/telegram/config', { headers: authHeaders() }),
       ]);
 
       if (meRes.ok) {
@@ -278,7 +279,7 @@ export default function App() {
       }
       arr.forEach((f) => formData.append('files', f));
 
-      const res = await fetch('/api/files/upload', {
+      const res = await apiFetch('/api/files/upload', {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${sessionToken}`,
@@ -308,7 +309,7 @@ export default function App() {
   const handleCreateFolder = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newFolderName.trim()) return;
-    const res = await fetch('/api/folders', {
+    const res = await apiFetch('/api/folders', {
       method: 'POST',
       headers: authHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({
@@ -325,7 +326,7 @@ export default function App() {
   };
 
   const handleDeleteFolder = async (folderId: string) => {
-    const res = await fetch(`/api/folders/${encodeURIComponent(folderId)}`, {
+    const res = await apiFetch(`/api/folders/${encodeURIComponent(folderId)}`, {
       method: 'DELETE',
       headers: authHeaders(),
     });
@@ -336,7 +337,7 @@ export default function App() {
   };
 
   const handleToggleStar = async (file: FileRecord) => {
-    const res = await fetch(`/api/files/${encodeURIComponent(file.id)}`, {
+    const res = await apiFetch(`/api/files/${encodeURIComponent(file.id)}`, {
       method: 'PATCH',
       headers: authHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ starred: !file.starred }),
@@ -348,7 +349,7 @@ export default function App() {
   };
 
   const handleDeleteFile = async (file: FileRecord) => {
-    const res = await fetch(`/api/files/${encodeURIComponent(file.id)}`, {
+    const res = await apiFetch(`/api/files/${encodeURIComponent(file.id)}`, {
       method: 'DELETE',
       headers: authHeaders(),
     });
@@ -358,17 +359,26 @@ export default function App() {
     }
   };
 
-  const handleDownloadFile = (file: FileRecord) => {
-    const url = `/api/files/${encodeURIComponent(file.id)}/download?token=${encodeURIComponent(
-      sessionToken
-    )}`;
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = file.name;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    setTimeout(() => loadWorkspaceData(), 800);
+  const handleDownloadFile = async (file: FileRecord) => {
+    try {
+      const url = `/api/files/${encodeURIComponent(file.id)}/download?token=${encodeURIComponent(
+        sessionToken
+      )}`;
+      const res = await apiFetch(url, { headers: authHeaders() });
+      if (!res.ok) return;
+      const blob = await res.blob();
+      const blobUrl = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = blobUrl;
+      a.download = file.name;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 5000);
+      loadWorkspaceData();
+    } catch {
+      // ignore
+    }
   };
 
   const handleStartRemoteUpload = async (payload: {
@@ -377,7 +387,7 @@ export default function App() {
     folderId: string | null;
     syncToTelegram: boolean;
   }) => {
-    const res = await fetch('/api/transfers/remote', {
+    const res = await apiFetch('/api/transfers/remote', {
       method: 'POST',
       headers: authHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify(payload),
@@ -401,7 +411,7 @@ export default function App() {
       throttleKbps?: number | null;
       bandwidthCapMb?: number | null;
     }): Promise<ShareLink> => {
-      const res = await fetch('/api/shares', {
+      const res = await apiFetch('/api/shares', {
         method: 'POST',
         headers: authHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify(payload),
@@ -425,7 +435,7 @@ export default function App() {
         password?: string | null;
       }
     ): Promise<ShareLink> => {
-      const res = await fetch(`/api/shares/${encodeURIComponent(shareId)}`, {
+      const res = await apiFetch(`/api/shares/${encodeURIComponent(shareId)}`, {
         method: 'PATCH',
         headers: authHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify(patch),
@@ -450,7 +460,7 @@ export default function App() {
   };
 
   const handleDeleteShare = async (shareId: string) => {
-    const res = await fetch(`/api/shares/${encodeURIComponent(shareId)}`, {
+    const res = await apiFetch(`/api/shares/${encodeURIComponent(shareId)}`, {
       method: 'DELETE',
       headers: authHeaders(),
     });
@@ -460,7 +470,7 @@ export default function App() {
   };
 
   const handleUpdateBandwidthSettings = async (patch: Partial<BandwidthSettings>) => {
-    const res = await fetch('/api/bandwidth/settings', {
+    const res = await apiFetch('/api/bandwidth/settings', {
       method: 'PATCH',
       headers: authHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify(patch),
@@ -477,7 +487,7 @@ export default function App() {
     autoSyncUploads?: boolean;
     clearCredentials?: boolean;
   }) => {
-    const res = await fetch('/api/telegram/config', {
+    const res = await apiFetch('/api/telegram/config', {
       method: 'POST',
       headers: authHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify(payload),
@@ -490,7 +500,7 @@ export default function App() {
   };
 
   const handleLogin = async (email: string, password: string) => {
-    const res = await fetch('/api/auth/login', {
+    const res = await apiFetch('/api/auth/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ email, password }),
@@ -509,7 +519,7 @@ export default function App() {
     password: string,
     role: 'admin' | 'member'
   ) => {
-    const res = await fetch('/api/auth/register', {
+    const res = await apiFetch('/api/auth/register', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name, email, password, role }),
@@ -523,7 +533,7 @@ export default function App() {
   };
 
   const handleSwitchUser = async (userId: string) => {
-    const res = await fetch('/api/auth/switch-user', {
+    const res = await apiFetch('/api/auth/switch-user', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ userId }),

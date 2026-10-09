@@ -946,7 +946,11 @@ async function startServer() {
     limits: { fileSize: 100 * 1024 * 1024 }, // 100 MB per upload in web preview
   });
 
-  app.post('/api/files/upload', requireAuth, upload.array('files', 10), async (req, res) => {
+  app.post(
+    '/api/files/upload',
+    requireAuth,
+    upload.array('files', 10) as unknown as express.RequestHandler,
+    async (req, res) => {
     const user = (req as Request & { user: StoredUser }).user;
     const uploadedFiles = (req.files as Express.Multer.File[]) || [];
     const folderId = (req.body.folderId as string) || null;

@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Lock, Download, ArrowLeft, AlertTriangle, FileText, CheckCircle2 } from 'lucide-react';
 import { formatBytes, formatShortDate } from '../utils/format';
+import { apiFetch } from '../services/clientCloudFallback';
 
 interface PublicShareMetadata {
   token: string;
@@ -41,7 +42,7 @@ export const PublicSharePortal: React.FC<PublicSharePortalProps> = ({
     let active = true;
     setLoading(true);
     setError(null);
-    fetch(`/api/public/share/${encodeURIComponent(token)}`)
+    apiFetch(`/api/public/share/${encodeURIComponent(token)}`)
       .then(async (res) => {
         const data = await res.json();
         if (!res.ok) {
@@ -75,7 +76,7 @@ export const PublicSharePortal: React.FC<PublicSharePortalProps> = ({
     setAuthError(null);
 
     try {
-      const res = await fetch(`/api/public/share/${encodeURIComponent(token)}/verify`, {
+      const res = await apiFetch(`/api/public/share/${encodeURIComponent(token)}/verify`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ password: passwordInput }),
@@ -93,33 +94,38 @@ export const PublicSharePortal: React.FC<PublicSharePortalProps> = ({
     }
   };
 
-  const handleStartDownload = () => {
+  const handleStartDownload = async () => {
     if (!share) return;
     setDownloading(true);
-    const downloadUrl = `/api/public/share/${encodeURIComponent(
-      share.token
-    )}/download?key=${encodeURIComponent(unlockedKey || '')}&password=${encodeURIComponent(
-      passwordInput
-    )}`;
-
-    const a = document.createElement('a');
-    a.href = downloadUrl;
-    a.download = share.fileName;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-
-    setTimeout(() => {
+    try {
+      const downloadUrl = `/api/public/share/${encodeURIComponent(
+        share.token
+      )}/download?key=${encodeURIComponent(unlockedKey || '')}&password=${encodeURIComponent(
+        passwordInput
+      )}`;
+      const res = await apiFetch(downloadUrl);
+      if (res.ok) {
+        const blob = await res.blob();
+        const blobUrl = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = blobUrl;
+        a.download = share.fileName;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(() => URL.revokeObjectURL(blobUrl), 5000);
+        setShare((prev) =>
+          prev
+            ? {
+                ...prev,
+                downloadCount: prev.downloadCount + 1,
+              }
+            : prev
+        );
+      }
+    } finally {
       setDownloading(false);
-      setShare((prev) =>
-        prev
-          ? {
-              ...prev,
-              downloadCount: prev.downloadCount + 1,
-            }
-          : prev
-      );
-    }, 900);
+    }
   };
 
   return (
