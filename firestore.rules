@@ -166,17 +166,31 @@ service cloud.firestore {
       ]) &&
       data.keys().hasOnly([
         'id',
+        'authMode',
         'botToken',
         'chatId',
         'botUsername',
         'autoSyncUploads',
+        'apiId',
+        'apiHash',
+        'phoneNumber',
+        'mtprotoSession',
+        'accountName',
+        'accountUsername',
         'updatedAt'
       ]) &&
       data.id is string && data.id.size() >= 1 && data.id.size() <= 128 && data.id.matches('^[a-zA-Z0-9_\\-]+$') &&
+      (!('authMode' in data) || (data.authMode is string && data.authMode.size() <= 32 && data.authMode in ['mtproto', 'bot'])) &&
       data.botToken is string && data.botToken.size() <= 256 &&
       data.chatId is string && data.chatId.size() <= 64 &&
       data.botUsername is string && data.botUsername.size() <= 120 &&
       data.autoSyncUploads is bool &&
+      (!('apiId' in data) || (data.apiId is string && data.apiId.size() <= 32)) &&
+      (!('apiHash' in data) || (data.apiHash is string && data.apiHash.size() <= 128)) &&
+      (!('phoneNumber' in data) || (data.phoneNumber is string && data.phoneNumber.size() <= 64)) &&
+      (!('mtprotoSession' in data) || (data.mtprotoSession is string && data.mtprotoSession.size() <= 2048)) &&
+      (!('accountName' in data) || (data.accountName is string && data.accountName.size() <= 120)) &&
+      (!('accountUsername' in data) || (data.accountUsername is string && data.accountUsername.size() <= 120)) &&
       data.updatedAt is timestamp;
     }
 

@@ -16,6 +16,7 @@ import {
   getDoc,
   getDocs,
   getDocFromServer,
+  onSnapshot,
   setDoc,
   updateDoc,
   deleteDoc,
@@ -395,6 +396,7 @@ export async function syncCloudFileToFirestore(
 }
 
 export async function deleteCloudFileFromFirestore(fileId: string): Promise<void> {
+  markCloudFileDeletedTombstone(fileId);
   const fbUser = auth.currentUser;
   if (!fbUser || !fbUser.emailVerified) return;
   if (isStarterSeedFile(fileId)) return;
@@ -447,6 +449,7 @@ export async function syncCloudFolderToFirestore(folder: FolderRecord): Promise<
 }
 
 export async function deleteCloudFolderFromFirestore(folderId: string): Promise<void> {
+  markCloudFolderDeletedTombstone(folderId);
   const fbUser = auth.currentUser;
   if (!fbUser || !fbUser.emailVerified) return;
 
@@ -893,24 +896,334 @@ export async function fetchPublicShareBinaryChunksFromFirestore(
       parts.push(base64ToUint8Array(d.dataBase64));
     }
     if (parts.length === 0) return null;
-    return new Blob(parts, { type: mimeType || 'application/octet-stream' });
+    return new Blob(parts as BlobPart[], { type: mimeType || 'application/octet-stream' });
   } catch {
     return null;
   }
 }
 
+const DELETED_FILES_STORAGE_KEY = 'unlim_deleted_cloud_files_v1';
+const DELETED_FOLDERS_STORAGE_KEY = 'unlim_deleted_cloud_folders_v1';
+const KNOWN_CLOUD_FILES_STORAGE_KEY = 'unlim_known_cloud_files_v1';
+const KNOWN_CLOUD_FOLDERS_STORAGE_KEY = 'unlim_known_cloud_folders_v1';
+
+function readIdSetFromStorage(key: string): Set<string> {
+  if (typeof window === 'undefined') return new Set();
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (!raw) return new Set();
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) {
+      return new Set(parsed.map((item) => String(item)));
+    }
+  } catch {
+    // ignore storage errors
+  }
+  return new Set();
+}
+
+function writeIdSetToStorage(key: string, set: Set<string>): void {
+  if (typeof window === 'undefined') return;
+  try {
+    const arr = Array.from(set).slice(-2000);
+    window.localStorage.setItem(key, JSON.stringify(arr));
+  } catch {
+    // ignore storage errors
+  }
+}
+
+export function markCloudFileDeletedTombstone(fileId: string): void {
+  const safeId = sanitizeId(fileId);
+  const deleted = readIdSetFromStorage(DELETED_FILES_STORAGE_KEY);
+  deleted.add(safeId);
+  deleted.add(fileId);
+  writeIdSetToStorage(DELETED_FILES_STORAGE_KEY, deleted);
+
+  const known = readIdSetFromStorage(KNOWN_CLOUD_FILES_STORAGE_KEY);
+  known.delete(safeId);
+  known.delete(fileId);
+  writeIdSetToStorage(KNOWN_CLOUD_FILES_STORAGE_KEY, known);
+}
+
+export function isCloudFileDeletedTombstone(fileId: string): boolean {
+  const deleted = readIdSetFromStorage(DELETED_FILES_STORAGE_KEY);
+  return deleted.has(fileId) || deleted.has(sanitizeId(fileId));
+}
+
+export function markCloudFolderDeletedTombstone(folderId: string): void {
+  const safeId = sanitizeId(folderId);
+  const deleted = readIdSetFromStorage(DELETED_FOLDERS_STORAGE_KEY);
+  deleted.add(safeId);
+  deleted.add(folderId);
+  writeIdSetToStorage(DELETED_FOLDERS_STORAGE_KEY, deleted);
+
+  const known = readIdSetFromStorage(KNOWN_CLOUD_FOLDERS_STORAGE_KEY);
+  known.delete(safeId);
+  known.delete(folderId);
+  writeIdSetToStorage(KNOWN_CLOUD_FOLDERS_STORAGE_KEY, known);
+}
+
+export function isCloudFolderDeletedTombstone(folderId: string): boolean {
+  const deleted = readIdSetFromStorage(DELETED_FOLDERS_STORAGE_KEY);
+  return deleted.has(folderId) || deleted.has(sanitizeId(folderId));
+}
+
+export function recordKnownCloudFileIds(fileIds: string[]): void {
+  const known = readIdSetFromStorage(KNOWN_CLOUD_FILES_STORAGE_KEY);
+  for (const id of fileIds) {
+    known.add(id);
+    known.add(sanitizeId(id));
+  }
+  writeIdSetToStorage(KNOWN_CLOUD_FILES_STORAGE_KEY, known);
+}
+
+export function wasCloudFilePreviouslySynced(fileId: string): boolean {
+  const known = readIdSetFromStorage(KNOWN_CLOUD_FILES_STORAGE_KEY);
+  return known.has(fileId) || known.has(sanitizeId(fileId));
+}
+
+export function recordKnownCloudFolderIds(folderIds: string[]): void {
+  const known = readIdSetFromStorage(KNOWN_CLOUD_FOLDERS_STORAGE_KEY);
+  for (const id of folderIds) {
+    known.add(id);
+    known.add(sanitizeId(id));
+  }
+  writeIdSetToStorage(KNOWN_CLOUD_FOLDERS_STORAGE_KEY, known);
+}
+
+export function wasCloudFolderPreviouslySynced(folderId: string): boolean {
+  const known = readIdSetFromStorage(KNOWN_CLOUD_FOLDERS_STORAGE_KEY);
+  return known.has(folderId) || known.has(sanitizeId(folderId));
+}
+
+function parseCloudFileSnapshotDoc(
+  docId: string,
+  d: Record<string, unknown>,
+  safeUid: string,
+  fallbackDisplayName: string
+): FileRecord {
+  let parsedChunks: TelegramChunk[] = [];
+  if (typeof d.telegramChunksJson === 'string' && d.telegramChunksJson.trim()) {
+    try {
+      const arr = JSON.parse(d.telegramChunksJson);
+      if (Array.isArray(arr)) parsedChunks = arr;
+    } catch {
+      parsedChunks = [];
+    }
+  }
+  const rawFolderId = String(d.folderId || 'root');
+  return {
+    id: String(d.id || docId),
+    name: String(d.name || 'file.bin'),
+    folderId: rawFolderId === 'root' ? null : rawFolderId,
+    ownerId: String(d.ownerId || safeUid),
+    ownerName: String(d.ownerName || fallbackDisplayName || 'Cloud User'),
+    sizeBytes: typeof d.sizeBytes === 'number' ? d.sizeBytes : 0,
+    mimeType: String(d.mimeType || 'application/octet-stream'),
+    sha256: String(d.sha256 || 'e3b0c44298fc1c149afbf4c8996fb924'),
+    storageDriver:
+      d.storageDriver === 'telegram' || parsedChunks.length > 0 ? 'telegram' : 'local_vault',
+    telegramChatId: d.telegramChatId ? String(d.telegramChatId) : undefined,
+    telegramChunks: parsedChunks,
+    starred: Boolean(d.starred),
+    downloadCount: typeof d.downloadCount === 'number' ? d.downloadCount : 0,
+    createdAt: toIsoDateString(d.createdAt),
+    updatedAt: toIsoDateString(d.updatedAt),
+    previewText: d.previewText ? String(d.previewText) : undefined,
+    previewDataUrl: d.previewDataUrl ? String(d.previewDataUrl) : undefined,
+    lockedOverQuota: false,
+  };
+}
+
+/**
+ * Real-time subscription to the user's cloud files, folders, and share links in Firestore.
+ * Immediately propagates file/folder deletions, uploads, renames, and stars across all logged-in devices.
+ */
+export function subscribeToUserCloudDrive(
+  fbUser: FirebaseUser,
+  callbacks: {
+    onFilesSnapshot: (files: FileRecord[], removedFileIds: string[]) => void;
+    onFoldersSnapshot: (folders: FolderRecord[], removedFolderIds: string[]) => void;
+    onSharesSnapshot?: (shares: PublicShareCloudRecord[], removedTokens: string[]) => void;
+  }
+): () => void {
+  if (!fbUser || !fbUser.emailVerified) {
+    return () => {};
+  }
+
+  const safeUid = sanitizeId(fbUser.uid);
+  const fallbackName = fbUser.displayName || fbUser.email?.split('@')[0] || 'Cloud User';
+
+  const filesQuery = query(collection(db, 'cloudFiles'), where('ownerId', '==', safeUid));
+  const unsubFiles = onSnapshot(
+    filesQuery,
+    (snapshot) => {
+      const removedFileIds: string[] = [];
+      snapshot.docChanges().forEach((change) => {
+        if (change.type === 'removed') {
+          const data = change.doc.data();
+          const removedId = String(data?.id || change.doc.id);
+          removedFileIds.push(removedId);
+          markCloudFileDeletedTombstone(removedId);
+        }
+      });
+
+      const files: FileRecord[] = [];
+      snapshot.forEach((docSnap) => {
+        const fileRec = parseCloudFileSnapshotDoc(
+          docSnap.id,
+          docSnap.data() as Record<string, unknown>,
+          safeUid,
+          fallbackName
+        );
+        files.push(fileRec);
+      });
+
+      files.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+      recordKnownCloudFileIds(files.map((f) => f.id));
+      callbacks.onFilesSnapshot(files, removedFileIds);
+    },
+    (error) => {
+      handleFirestoreError(error, OperationType.GET, 'cloudFiles');
+    }
+  );
+
+  const foldersQuery = query(collection(db, 'cloudFolders'), where('ownerId', '==', safeUid));
+  const unsubFolders = onSnapshot(
+    foldersQuery,
+    (snapshot) => {
+      const removedFolderIds: string[] = [];
+      snapshot.docChanges().forEach((change) => {
+        if (change.type === 'removed') {
+          const data = change.doc.data();
+          const removedId = String(data?.id || change.doc.id);
+          removedFolderIds.push(removedId);
+          markCloudFolderDeletedTombstone(removedId);
+        }
+      });
+
+      const folders: FolderRecord[] = [];
+      snapshot.forEach((docSnap) => {
+        const d = docSnap.data();
+        const rawParentId = String(d.parentId || 'root');
+        folders.push({
+          id: String(d.id || docSnap.id),
+          name: String(d.name || 'Folder'),
+          parentId: rawParentId === 'root' ? null : rawParentId,
+          ownerId: String(d.ownerId || safeUid),
+          ownerName: String(d.ownerName || fallbackName),
+          createdAt: toIsoDateString(d.createdAt),
+        });
+      });
+
+      recordKnownCloudFolderIds(folders.map((f) => f.id));
+      callbacks.onFoldersSnapshot(folders, removedFolderIds);
+    },
+    (error) => {
+      handleFirestoreError(error, OperationType.GET, 'cloudFolders');
+    }
+  );
+
+  let unsubShares = () => {};
+  if (callbacks.onSharesSnapshot) {
+    const sharesQuery = query(collection(db, 'publicShares'), where('creatorId', '==', safeUid));
+    unsubShares = onSnapshot(
+      sharesQuery,
+      (snapshot) => {
+        const removedTokens: string[] = [];
+        snapshot.docChanges().forEach((change) => {
+          if (change.type === 'removed') {
+            const data = change.doc.data();
+            removedTokens.push(String(data?.token || change.doc.id));
+          }
+        });
+
+        const shares: PublicShareCloudRecord[] = [];
+        snapshot.forEach((docSnap) => {
+          const d = docSnap.data();
+          let parsedChunks: TelegramChunk[] = [];
+          if (typeof d.telegramChunksJson === 'string' && d.telegramChunksJson.trim()) {
+            try {
+              const arr = JSON.parse(d.telegramChunksJson);
+              if (Array.isArray(arr)) parsedChunks = arr;
+            } catch {
+              parsedChunks = [];
+            }
+          }
+          shares.push({
+            id: String(d.id || `shr_${docSnap.id}`),
+            token: String(d.token || docSnap.id),
+            fileId: String(d.fileId || ''),
+            fileName: String(d.fileName || 'Shared-File.bin'),
+            fileSizeBytes: typeof d.fileSizeBytes === 'number' ? d.fileSizeBytes : 0,
+            fileMimeType: String(d.fileMimeType || 'application/octet-stream'),
+            fileSha256: String(d.fileSha256 || ''),
+            creatorId: String(d.creatorId || safeUid),
+            creatorName: String(d.creatorName || fallbackName),
+            hasPassword: Boolean(d.hasPassword),
+            passwordHash: d.passwordHash ? String(d.passwordHash) : null,
+            expiresAt: null,
+            maxDownloads: null,
+            downloadCount: typeof d.downloadCount === 'number' ? d.downloadCount : 0,
+            throttleKbps:
+              typeof d.throttleKbps === 'number' && d.throttleKbps > 0 ? d.throttleKbps : null,
+            bandwidthCapBytes: null,
+            bandwidthUsedBytes: 0,
+            active: d.active !== false,
+            createdAt: toIsoDateString(d.createdAt),
+            lastAccessedAt: null,
+            storageDriver:
+              d.storageDriver === 'telegram' || parsedChunks.length > 0 ? 'telegram' : 'local_vault',
+            telegramChatId: d.telegramChatId ? String(d.telegramChatId) : undefined,
+            telegramChunks: parsedChunks,
+            cloudChunkCount: typeof d.cloudChunkCount === 'number' ? d.cloudChunkCount : 0,
+            previewText: d.previewText ? String(d.previewText) : undefined,
+            previewDataUrl: d.previewDataUrl ? String(d.previewDataUrl) : undefined,
+          });
+        });
+
+        shares.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+        callbacks.onSharesSnapshot?.(shares, removedTokens);
+      },
+      (error) => {
+        handleFirestoreError(error, OperationType.GET, 'publicShares');
+      }
+    );
+  }
+
+  return () => {
+    unsubFiles();
+    unsubFolders();
+    unsubShares();
+  };
+}
+
 export interface CloudStorageNodeCredentials {
+  authMode?: 'mtproto' | 'bot';
   botToken: string;
   chatId: string;
   botUsername: string;
   autoSyncUploads: boolean;
+  apiId?: string;
+  apiHash?: string;
+  phoneNumber?: string;
+  mtprotoSession?: string;
+  accountName?: string;
+  accountUsername?: string;
 }
 
 export async function saveStorageNodeConfigToFirestore(config: {
+  authMode?: 'mtproto' | 'bot';
   botToken?: string;
   chatId?: string;
   botUsername?: string;
   autoSyncUploads?: boolean;
+  apiId?: string;
+  apiHash?: string;
+  phoneNumber?: string;
+  mtprotoSession?: string;
+  accountName?: string;
+  accountUsername?: string;
   clearCredentials?: boolean;
 }): Promise<void> {
   const fbUser = auth.currentUser;
@@ -941,12 +1254,53 @@ export async function saveStorageNodeConfigToFirestore(config: {
         ? config.autoSyncUploads
         : existing.autoSyncUploads !== false;
 
+    const nextAuthMode = config.clearCredentials
+      ? 'bot'
+      : config.authMode || (existing.authMode === 'mtproto' ? 'mtproto' : 'bot');
+    const nextApiId = config.clearCredentials
+      ? ''
+      : config.apiId !== undefined
+      ? String(config.apiId).trim()
+      : String(existing.apiId || '');
+    const nextApiHash = config.clearCredentials
+      ? ''
+      : config.apiHash !== undefined
+      ? String(config.apiHash).trim()
+      : String(existing.apiHash || '');
+    const nextPhone = config.clearCredentials
+      ? ''
+      : config.phoneNumber !== undefined
+      ? String(config.phoneNumber).trim()
+      : String(existing.phoneNumber || '');
+    const nextSession = config.clearCredentials
+      ? ''
+      : config.mtprotoSession !== undefined
+      ? String(config.mtprotoSession).trim()
+      : String(existing.mtprotoSession || '');
+    const nextAccountName = config.clearCredentials
+      ? ''
+      : config.accountName !== undefined
+      ? String(config.accountName).trim()
+      : String(existing.accountName || '');
+    const nextAccountUsername = config.clearCredentials
+      ? ''
+      : config.accountUsername !== undefined
+      ? String(config.accountUsername).trim()
+      : String(existing.accountUsername || '');
+
     await setDoc(ref, {
       id: 'global',
+      authMode: nextAuthMode === 'mtproto' ? 'mtproto' : 'bot',
       botToken: nextBotToken.slice(0, 256),
       chatId: nextChatId.slice(0, 64),
       botUsername: nextBotUsername.slice(0, 120),
       autoSyncUploads: Boolean(nextAutoSync),
+      apiId: nextApiId.slice(0, 32),
+      apiHash: nextApiHash.slice(0, 128),
+      phoneNumber: nextPhone.slice(0, 64),
+      mtprotoSession: nextSession.slice(0, 2048),
+      accountName: nextAccountName.slice(0, 120),
+      accountUsername: nextAccountUsername.slice(0, 120),
       updatedAt: serverTimestamp(),
     });
   } catch (error) {
@@ -961,10 +1315,17 @@ export async function fetchStorageNodeConfigFromFirestore(): Promise<CloudStorag
     if (!snap.exists()) return null;
     const d = snap.data();
     return {
+      authMode: d.authMode === 'mtproto' ? 'mtproto' : 'bot',
       botToken: String(d.botToken || ''),
       chatId: String(d.chatId || ''),
       botUsername: String(d.botUsername || ''),
       autoSyncUploads: d.autoSyncUploads !== false,
+      apiId: d.apiId ? String(d.apiId) : '',
+      apiHash: d.apiHash ? String(d.apiHash) : '',
+      phoneNumber: d.phoneNumber ? String(d.phoneNumber) : '',
+      mtprotoSession: d.mtprotoSession ? String(d.mtprotoSession) : '',
+      accountName: d.accountName ? String(d.accountName) : '',
+      accountUsername: d.accountUsername ? String(d.accountUsername) : '',
     };
   } catch {
     return null;
@@ -972,5 +1333,3 @@ export async function fetchStorageNodeConfigFromFirestore(): Promise<CloudStorag
 }
 
 export const loadStorageNodeConfigFromFirestore = fetchStorageNodeConfigFromFirestore;
-
-

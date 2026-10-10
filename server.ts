@@ -22,6 +22,9 @@ import {
   AuditAction,
   StoragePlanId,
 } from './src/types.ts';
+import { TelegramClient, Api } from 'telegram';
+import { StringSession } from 'telegram/sessions/index.js';
+import { computeCheck } from 'telegram/Password.js';
 
 dotenv.config();
 
@@ -62,12 +65,19 @@ interface DatabaseSchema {
   bandwidthSettings: BandwidthSettings;
   dailyBandwidth: DailyBandwidthPoint[];
   telegramConfig: {
+    authMode?: 'mtproto' | 'bot';
     botToken: string;
     chatId: string;
     botUsername?: string;
     botFirstName?: string;
     autoSyncUploads: boolean;
     lastVerifiedAt?: string;
+    apiId?: string;
+    apiHash?: string;
+    phoneNumber?: string;
+    mtprotoSession?: string;
+    accountName?: string;
+    accountUsername?: string;
   };
 }
 
@@ -77,6 +87,29 @@ function hashPassword(pw: string): string {
 
 function computeSha256(buf: Buffer): string {
   return crypto.createHash('sha256').update(buf).digest('hex');
+}
+
+function computeFastFileSha256(filePath: string, totalSize: number): string {
+  try {
+    if (!fs.existsSync(filePath) || totalSize <= 0) {
+      return crypto.createHash('sha256').update(`${filePath}:${totalSize}`).digest('hex');
+    }
+    const sampleSize = Math.min(65536, totalSize);
+    const buf = Buffer.alloc(sampleSize);
+    const fd = fs.openSync(filePath, 'r');
+    try {
+      fs.readSync(fd, buf, 0, sampleSize, 0);
+    } finally {
+      fs.closeSync(fd);
+    }
+    return crypto
+      .createHash('sha256')
+      .update(buf)
+      .update(`:${totalSize}`)
+      .digest('hex');
+  } catch {
+    return crypto.createHash('sha256').update(`${filePath}:${totalSize}`).digest('hex');
+  }
 }
 
 function getPlanQuotaBytes(planId: StoragePlanId = 'free_25gb'): number {
@@ -439,12 +472,212 @@ class ThrottleStream extends Transform {
   }
 }
 
+// ============================================================================
+// TELEGRAM MTPROTO 2GB USER ACCOUNT ENGINE (GramJS) + BOT API FALLBACK
+// ============================================================================
+
+let cachedMtprotoClient: TelegramClient | null = null;
+let cachedMtprotoSessionKey = '';
+
+const pendingMtprotoLogins = new Map<
+  string,
+  {
+    client: TelegramClient;
+    apiId: number;
+    apiHash: string;
+    phoneNumber: string;
+    phoneCodeHash: string;
+    chatId: string;
+    createdAt: number;
+  }
+>();
+
+async function getActiveMtprotoClient(): Promise<TelegramClient | null> {
+  const { apiId, apiHash, mtprotoSession } = db.telegramConfig;
+  if (!apiId || !apiHash || !mtprotoSession) return null;
+  const numericApiId = Number(apiId);
+  if (!Number.isFinite(numericApiId) || numericApiId <= 0) return null;
+
+  const sessionKey = `${numericApiId}:${apiHash}:${mtprotoSession.slice(0, 48)}`;
+  if (cachedMtprotoClient && cachedMtprotoSessionKey === sessionKey) {
+    try {
+      if (!cachedMtprotoClient.connected) {
+        await cachedMtprotoClient.connect();
+      }
+      return cachedMtprotoClient;
+    } catch {
+      cachedMtprotoClient = null;
+    }
+  }
+
+  try {
+    const client = new TelegramClient(
+      new StringSession(mtprotoSession),
+      numericApiId,
+      apiHash,
+      {
+        connectionRetries: 3,
+        useWSS: false,
+      }
+    );
+    await client.connect();
+    cachedMtprotoClient = client;
+    cachedMtprotoSessionKey = sessionKey;
+    return client;
+  } catch (err) {
+    console.error('[MTProto] Failed to connect saved session:', err);
+    return null;
+  }
+}
+
+function resolveMtprotoPeer(rawChatId?: string): string | number {
+  const clean = String(rawChatId || '').trim();
+  if (!clean || clean.toLowerCase() === 'me' || clean.toLowerCase() === 'saved') {
+    return 'me';
+  }
+  if (/^-?\d+$/.test(clean)) {
+    return clean;
+  }
+  return clean;
+}
+
+async function pushDiskFileToTelegramMtproto(
+  filePath: string,
+  fileName: string,
+  totalSize: number,
+  chatId: string
+): Promise<{ success: boolean; chunks: TelegramChunk[]; error?: string }> {
+  try {
+    const client = await getActiveMtprotoClient();
+    if (!client) {
+      return { success: false, chunks: [], error: 'MTProto client not connected' };
+    }
+
+    const peer = resolveMtprotoPeer(chatId);
+    const partHash = computeFastFileSha256(filePath, totalSize);
+
+    const sentMsg = await client.sendFile(peer, {
+      file: filePath,
+      caption: `[UnlimStorage 2GB Vault] ${fileName} | Size: ${formatBytesServer(
+        totalSize
+      )} | SHA256: ${partHash.slice(0, 16)}`,
+      forceDocument: true,
+      workers: 4,
+    });
+
+    if (!sentMsg || !sentMsg.id) {
+      return {
+        success: false,
+        chunks: [],
+        error: 'MTProto sendFile did not return a message ID',
+      };
+    }
+
+    const peerStr = String(peer);
+    return {
+      success: true,
+      chunks: [
+        {
+          partIndex: 0,
+          messageId: sentMsg.id,
+          fileId: `mtproto:${peerStr}:${sentMsg.id}`,
+          sizeBytes: totalSize,
+          sha256Part: partHash,
+        },
+      ],
+    };
+  } catch (err: unknown) {
+    return {
+      success: false,
+      chunks: [],
+      error: err instanceof Error ? err.message : 'MTProto 2GB upload failed',
+    };
+  }
+}
+
+async function pushBufferToTelegramMtproto(
+  buffer: Buffer,
+  fileName: string,
+  chatId: string
+): Promise<{ success: boolean; chunks: TelegramChunk[]; error?: string }> {
+  const tmpFile = path.join(
+    CHUNKS_DIR,
+    `tmp_mtproto_${Date.now()}_${Math.random().toString(36).slice(2, 6)}_${path.basename(fileName)}`
+  );
+  try {
+    fs.writeFileSync(tmpFile, buffer);
+    return await pushDiskFileToTelegramMtproto(tmpFile, fileName, buffer.length, chatId);
+  } finally {
+    if (fs.existsSync(tmpFile)) {
+      try {
+        fs.unlinkSync(tmpFile);
+      } catch {
+        // ignore
+      }
+    }
+  }
+}
+
+async function fetchBufferFromTelegramMtprotoChunk(
+  chunk: TelegramChunk,
+  fallbackChatId?: string
+): Promise<Buffer | null> {
+  try {
+    const client = await getActiveMtprotoClient();
+    if (!client) return null;
+
+    let peer: string | number = resolveMtprotoPeer(fallbackChatId || db.telegramConfig.chatId);
+    let msgId = chunk.messageId;
+
+    if (chunk.fileId && chunk.fileId.startsWith('mtproto:')) {
+      const parts = chunk.fileId.split(':');
+      if (parts.length >= 3) {
+        peer = resolveMtprotoPeer(parts[1]);
+        const parsedId = Number(parts[2]);
+        if (Number.isFinite(parsedId) && parsedId > 0) {
+          msgId = parsedId;
+        }
+      }
+    }
+
+    if (!msgId || msgId <= 0) return null;
+    const messages = await client.getMessages(peer, { ids: [msgId] });
+    const msg = messages && messages[0];
+    if (!msg) return null;
+
+    const downloaded = await client.downloadMedia(msg, {});
+    if (Buffer.isBuffer(downloaded)) {
+      return downloaded;
+    }
+    if (typeof downloaded === 'string') {
+      return Buffer.from(downloaded);
+    }
+    return null;
+  } catch (err) {
+    console.error('[MTProto] Failed to download media chunk:', err);
+    return null;
+  }
+}
+
 async function pushBufferToTelegram(
   buffer: Buffer,
   fileName: string,
   botToken: string,
   chatId: string
 ): Promise<{ success: boolean; chunks: TelegramChunk[]; error?: string }> {
+  if (db.telegramConfig.mtprotoSession && db.telegramConfig.apiId && db.telegramConfig.apiHash) {
+    const mtRes = await pushBufferToTelegramMtproto(
+      buffer,
+      fileName,
+      chatId || db.telegramConfig.chatId || 'me'
+    );
+    if (mtRes.success) return mtRes;
+  }
+
+  if (!botToken || !chatId) {
+    return { success: false, chunks: [], error: 'Storage node credentials not configured' };
+  }
+
   try {
     const chunks: TelegramChunk[] = [];
     const totalParts = Math.max(1, Math.ceil(buffer.length / TELEGRAM_CHUNK_SIZE));
@@ -515,6 +748,22 @@ async function pushDiskFileToTelegram(
     if (!fs.existsSync(filePath) || totalSize <= 0) {
       return { success: false, chunks: [], error: 'File empty or missing' };
     }
+
+    // 1. Prefer 2GB MTProto User Account direct upload if configured
+    if (db.telegramConfig.mtprotoSession && db.telegramConfig.apiId && db.telegramConfig.apiHash) {
+      const mtRes = await pushDiskFileToTelegramMtproto(
+        filePath,
+        fileName,
+        totalSize,
+        chatId || db.telegramConfig.chatId || 'me'
+      );
+      if (mtRes.success) return mtRes;
+    }
+
+    if (!botToken || !chatId) {
+      return { success: false, chunks: [], error: 'No Telegram Bot or MTProto account connected' };
+    }
+
     const chunks: TelegramChunk[] = [];
     const totalParts = Math.max(1, Math.ceil(totalSize / TELEGRAM_CHUNK_SIZE));
     const fd = fs.openSync(filePath, 'r');
@@ -595,6 +844,20 @@ async function fetchBufferFromTelegramChunks(
     const sorted = [...chunks].sort((a, b) => a.partIndex - b.partIndex);
 
     for (const chunk of sorted) {
+      if (chunk.fileId && chunk.fileId.startsWith('mtproto:')) {
+        const mtBuf = await fetchBufferFromTelegramMtprotoChunk(chunk);
+        if (!mtBuf) return null;
+        buffers.push(mtBuf);
+        continue;
+      }
+
+      if (!botToken) {
+        const mtBuf = await fetchBufferFromTelegramMtprotoChunk(chunk);
+        if (!mtBuf) return null;
+        buffers.push(mtBuf);
+        continue;
+      }
+
       const metaRes = await fetch(
         `https://api.telegram.org/bot${botToken}/getFile?file_id=${encodeURIComponent(chunk.fileId)}`
       );
@@ -603,7 +866,10 @@ async function fetchBufferFromTelegramChunks(
         result?: { file_path?: string };
       };
       if (!metaJson.ok || !metaJson.result?.file_path) {
-        return null;
+        const mtFallback = await fetchBufferFromTelegramMtprotoChunk(chunk);
+        if (!mtFallback) return null;
+        buffers.push(mtFallback);
+        continue;
       }
 
       const fileRes = await fetch(
@@ -1125,7 +1391,16 @@ async function startServer() {
 
   app.post('/api/files/sync-from-cloud', requireAuth, (req, res) => {
     const user = (req as Request & { user: StoredUser }).user;
-    const { profile, files, folders, shares, storageNodeConfig } = req.body as {
+    const {
+      profile,
+      files,
+      folders,
+      shares,
+      storageNodeConfig,
+      deletedFileIds,
+      deletedFolderIds,
+      authoritativeSync,
+    } = req.body as {
       profile?: {
         planId?: StoragePlanId;
         tokenBalance?: number;
@@ -1137,25 +1412,45 @@ async function startServer() {
       folders?: FolderRecord[];
       shares?: Array<ShareLink & { passwordHash?: string | null }>;
       storageNodeConfig?: {
+        authMode?: 'mtproto' | 'bot';
         botToken?: string;
         chatId?: string;
         botUsername?: string;
         autoSyncUploads?: boolean;
+        apiId?: string;
+        apiHash?: string;
+        phoneNumber?: string;
+        mtprotoSession?: string;
+        accountName?: string;
+        accountUsername?: string;
       } | null;
+      deletedFileIds?: string[];
+      deletedFolderIds?: string[];
+      authoritativeSync?: boolean;
     };
 
-    if (
-      storageNodeConfig &&
-      storageNodeConfig.botToken &&
-      storageNodeConfig.chatId &&
-      !db.telegramConfig.botToken
-    ) {
-      db.telegramConfig.botToken = String(storageNodeConfig.botToken).trim();
-      db.telegramConfig.chatId = String(storageNodeConfig.chatId).trim();
-      if (storageNodeConfig.botUsername) {
+    if (storageNodeConfig) {
+      if (storageNodeConfig.botToken && !db.telegramConfig.botToken) {
+        db.telegramConfig.botToken = String(storageNodeConfig.botToken).trim();
+      }
+      if (storageNodeConfig.chatId && !db.telegramConfig.chatId) {
+        db.telegramConfig.chatId = String(storageNodeConfig.chatId).trim();
+      }
+      if (storageNodeConfig.botUsername && !db.telegramConfig.botUsername) {
         db.telegramConfig.botUsername = String(storageNodeConfig.botUsername).trim();
       }
-      db.telegramConfig.autoSyncUploads = storageNodeConfig.autoSyncUploads !== false;
+      if (storageNodeConfig.mtprotoSession && !db.telegramConfig.mtprotoSession) {
+        db.telegramConfig.authMode = 'mtproto';
+        db.telegramConfig.apiId = String(storageNodeConfig.apiId || '').trim();
+        db.telegramConfig.apiHash = String(storageNodeConfig.apiHash || '').trim();
+        db.telegramConfig.phoneNumber = String(storageNodeConfig.phoneNumber || '').trim();
+        db.telegramConfig.mtprotoSession = String(storageNodeConfig.mtprotoSession).trim();
+        db.telegramConfig.accountName = String(storageNodeConfig.accountName || '').trim();
+        db.telegramConfig.accountUsername = String(storageNodeConfig.accountUsername || '').trim();
+      }
+      if (typeof storageNodeConfig.autoSyncUploads === 'boolean') {
+        db.telegramConfig.autoSyncUploads = storageNodeConfig.autoSyncUploads;
+      }
     }
 
     if (profile) {
@@ -1174,9 +1469,39 @@ async function startServer() {
       }
     }
 
+    const delFoldersSet = new Set(Array.isArray(deletedFolderIds) ? deletedFolderIds : []);
+    const delFilesSet = new Set(Array.isArray(deletedFileIds) ? deletedFileIds : []);
+
+    if (delFoldersSet.size > 0) {
+      db.folders = db.folders.filter(
+        (f) => !(f.ownerId === user.id && delFoldersSet.has(f.id))
+      );
+    }
+
+    if (delFilesSet.size > 0) {
+      for (const fId of delFilesSet) {
+        const chunkPath = path.join(CHUNKS_DIR, fId);
+        if (fs.existsSync(chunkPath)) {
+          try {
+            fs.unlinkSync(chunkPath);
+          } catch {
+            // ignore
+          }
+        }
+      }
+      db.files = db.files.filter((f) => !(f.ownerId === user.id && delFilesSet.has(f.id)));
+      db.shares = db.shares.filter((s) => !(s.creatorId === user.id && delFilesSet.has(s.fileId)));
+    }
+
     if (Array.isArray(folders)) {
+      const incomingFolderIds = new Set(folders.map((fl) => fl?.id).filter(Boolean));
+      if (authoritativeSync) {
+        db.folders = db.folders.filter(
+          (f) => f.ownerId !== user.id || incomingFolderIds.has(f.id)
+        );
+      }
       for (const cf of folders) {
-        if (!cf || !cf.id) continue;
+        if (!cf || !cf.id || delFoldersSet.has(cf.id)) continue;
         const existingIdx = db.folders.findIndex((f) => f.id === cf.id && f.ownerId === user.id);
         if (existingIdx === -1) {
           db.folders.push({
@@ -1195,8 +1520,19 @@ async function startServer() {
     }
 
     if (Array.isArray(files)) {
+      const isStarterId = (id: string) =>
+        id.startsWith('file_welcome_') || id === 'file_spec_01' || id === 'file_diagram_02';
+      const incomingFileIds = new Set(files.map((fl) => fl?.id).filter(Boolean));
+      if (authoritativeSync) {
+        db.files = db.files.filter(
+          (f) =>
+            f.ownerId !== user.id ||
+            isStarterId(f.id) ||
+            incomingFileIds.has(f.id)
+        );
+      }
       for (const cf of files) {
-        if (!cf || !cf.id) continue;
+        if (!cf || !cf.id || delFilesSet.has(cf.id)) continue;
         const existingIdx = db.files.findIndex((f) => f.id === cf.id && f.ownerId === user.id);
         if (existingIdx === -1) {
           db.files.unshift({
@@ -1232,7 +1568,7 @@ async function startServer() {
 
     if (Array.isArray(shares)) {
       for (const cs of shares) {
-        if (!cs || !cs.token) continue;
+        if (!cs || !cs.token || delFilesSet.has(cs.fileId)) continue;
         const existingIdx = db.shares.findIndex((s) => s.token === cs.token);
         if (existingIdx === -1) {
           db.shares.unshift({
@@ -1419,9 +1755,11 @@ async function startServer() {
 
       const createdRecords: FileRecord[] = [];
       const hasLiveTelegram = Boolean(
-        db.telegramConfig.botToken &&
-          db.telegramConfig.chatId &&
-          db.telegramConfig.autoSyncUploads
+        db.telegramConfig.autoSyncUploads &&
+          ((db.telegramConfig.mtprotoSession &&
+            db.telegramConfig.apiId &&
+            db.telegramConfig.apiHash) ||
+            (db.telegramConfig.botToken && db.telegramConfig.chatId))
       );
 
       for (const rawFile of uploadedFiles) {
@@ -1618,9 +1956,11 @@ async function startServer() {
     fs.writeFileSync(chunkPath, Buffer.alloc(0));
 
     const hasLiveTelegram = Boolean(
-      db.telegramConfig.botToken &&
-        db.telegramConfig.chatId &&
-        db.telegramConfig.autoSyncUploads
+      db.telegramConfig.autoSyncUploads &&
+        ((db.telegramConfig.mtprotoSession &&
+          db.telegramConfig.apiId &&
+          db.telegramConfig.apiHash) ||
+          (db.telegramConfig.botToken && db.telegramConfig.chatId))
     );
 
     const job: TransferJob = {
@@ -1717,9 +2057,11 @@ async function startServer() {
     const sha256 = computeFastFileSha256(finalChunkPath, finalSize);
 
     const hasLiveTelegram = Boolean(
-      db.telegramConfig.botToken &&
-        db.telegramConfig.chatId &&
-        db.telegramConfig.autoSyncUploads
+      db.telegramConfig.autoSyncUploads &&
+        ((db.telegramConfig.mtprotoSession &&
+          db.telegramConfig.apiId &&
+          db.telegramConfig.apiHash) ||
+          (db.telegramConfig.botToken && db.telegramConfig.chatId))
     );
 
     const storageDriver: 'telegram' | 'local_vault' = 'local_vault';
@@ -1966,7 +2308,7 @@ async function startServer() {
       !fs.existsSync(chunkPath) &&
       file.telegramChunks &&
       file.telegramChunks.length > 0 &&
-      db.telegramConfig.botToken
+      (db.telegramConfig.botToken || db.telegramConfig.mtprotoSession)
     ) {
       const restoredBuf = await fetchBufferFromTelegramChunks(
         file.telegramChunks,
@@ -2044,7 +2386,7 @@ async function startServer() {
     if (
       file.storageDriver === 'telegram' &&
       file.telegramChunks.length > 0 &&
-      db.telegramConfig.botToken
+      (db.telegramConfig.botToken || db.telegramConfig.mtprotoSession)
     ) {
       buffer = await fetchBufferFromTelegramChunks(
         file.telegramChunks,
@@ -2824,7 +3166,7 @@ async function startServer() {
       file &&
       file.telegramChunks &&
       file.telegramChunks.length > 0 &&
-      db.telegramConfig.botToken
+      (db.telegramConfig.botToken || db.telegramConfig.mtprotoSession)
     ) {
       buffer = await fetchBufferFromTelegramChunks(
         file.telegramChunks,
@@ -2934,21 +3276,43 @@ async function startServer() {
   // ============================================================================
 
   function getTelegramState(): TelegramConfigState {
-    const hasCreds = Boolean(db.telegramConfig.botToken && db.telegramConfig.chatId);
+    const mtprotoConnected = Boolean(
+      db.telegramConfig.mtprotoSession &&
+        db.telegramConfig.apiId &&
+        db.telegramConfig.apiHash
+    );
+    const hasBotCreds = Boolean(db.telegramConfig.botToken && db.telegramConfig.chatId);
+    const connected = mtprotoConnected || hasBotCreds;
     const tok = db.telegramConfig.botToken || '';
     const masked =
       tok.length > 10 ? `${tok.slice(0, 6)}••••••••${tok.slice(-4)}` : tok ? '••••••••' : '';
 
+    const rawHash = db.telegramConfig.apiHash || '';
+    const maskedHash =
+      rawHash.length > 8
+        ? `${rawHash.slice(0, 4)}••••••••${rawHash.slice(-4)}`
+        : rawHash
+        ? '••••••••'
+        : '';
+
     return {
-      connected: hasCreds,
-      mode: hasCreds ? 'telegram_live' : 'hybrid_fallback',
+      connected,
+      mode: connected ? 'telegram_live' : 'hybrid_fallback',
+      authMode: mtprotoConnected ? 'mtproto' : db.telegramConfig.authMode || 'bot',
       botUsername: db.telegramConfig.botUsername,
       botFirstName: db.telegramConfig.botFirstName,
-      chatId: db.telegramConfig.chatId || '',
+      chatId: db.telegramConfig.chatId || (mtprotoConnected ? 'me' : ''),
       maskedToken: masked,
-      chunkSizeBytes: TELEGRAM_CHUNK_SIZE,
+      chunkSizeBytes: mtprotoConnected ? 2000 * 1024 * 1024 : TELEGRAM_CHUNK_SIZE,
+      maxFileSizeBytes: mtprotoConnected ? 2000 * 1024 * 1024 : 50 * 1024 * 1024,
       autoSyncUploads: db.telegramConfig.autoSyncUploads,
       lastVerifiedAt: db.telegramConfig.lastVerifiedAt,
+      mtprotoConnected,
+      apiId: db.telegramConfig.apiId || '',
+      maskedApiHash: maskedHash,
+      phoneNumber: db.telegramConfig.phoneNumber || '',
+      accountName: db.telegramConfig.accountName || '',
+      accountUsername: db.telegramConfig.accountUsername || '',
     };
   }
 
@@ -2961,6 +3325,222 @@ async function startServer() {
     res.json({ config: getTelegramState() });
   });
 
+  // STEP 1: Send Telegram Login OTP Code via MTProto (2GB User Account)
+  app.post('/api/telegram/mtproto/send-code', requireAuth, async (req, res) => {
+    const user = (req as Request & { user: StoredUser }).user;
+    if (user.email.toLowerCase() !== 'titumamma2425@gmail.com' || user.role !== 'admin') {
+      res.status(403).json({ error: 'Administrator access required.' });
+      return;
+    }
+
+    const { apiId, apiHash, phoneNumber, chatId } = req.body as {
+      apiId?: string;
+      apiHash?: string;
+      phoneNumber?: string;
+      chatId?: string;
+    };
+
+    const cleanApiId = Number(String(apiId || db.telegramConfig.apiId || '').trim());
+    const cleanApiHash = String(apiHash || db.telegramConfig.apiHash || '').trim();
+    const cleanPhone = String(phoneNumber || '').trim();
+    const cleanChatId = String(chatId || db.telegramConfig.chatId || 'me').trim() || 'me';
+
+    if (!Number.isFinite(cleanApiId) || cleanApiId <= 0 || !cleanApiHash) {
+      res.status(400).json({
+        error: 'Please enter a valid Telegram API ID and API Hash from my.telegram.org.',
+      });
+      return;
+    }
+
+    if (!cleanPhone || !/^\+?[0-9]{7,16}$/.test(cleanPhone.replace(/[\s-]/g, ''))) {
+      res.status(400).json({
+        error: 'Please enter your Telegram phone number in international format (e.g. +88017...).',
+      });
+      return;
+    }
+
+    const normalizedPhone = cleanPhone.startsWith('+')
+      ? cleanPhone.replace(/[\s-]/g, '')
+      : `+${cleanPhone.replace(/[\s-]/g, '')}`;
+
+    try {
+      const existingPending = pendingMtprotoLogins.get(normalizedPhone);
+      if (existingPending) {
+        await existingPending.client.disconnect().catch(() => null);
+        pendingMtprotoLogins.delete(normalizedPhone);
+      }
+
+      const client = new TelegramClient(new StringSession(''), cleanApiId, cleanApiHash, {
+        connectionRetries: 3,
+        useWSS: false,
+      });
+
+      await client.connect();
+      const sendResult = await client.sendCode(
+        { apiId: cleanApiId, apiHash: cleanApiHash },
+        normalizedPhone
+      );
+
+      pendingMtprotoLogins.set(normalizedPhone, {
+        client,
+        apiId: cleanApiId,
+        apiHash: cleanApiHash,
+        phoneNumber: normalizedPhone,
+        phoneCodeHash: sendResult.phoneCodeHash,
+        chatId: cleanChatId,
+        createdAt: Date.now(),
+      });
+
+      db.telegramConfig.apiId = String(cleanApiId);
+      db.telegramConfig.apiHash = cleanApiHash;
+      db.telegramConfig.phoneNumber = normalizedPhone;
+      if (cleanChatId) {
+        db.telegramConfig.chatId = cleanChatId;
+      }
+      saveDb();
+
+      res.json({
+        ok: true,
+        phoneNumber: normalizedPhone,
+        phoneCodeHash: sendResult.phoneCodeHash,
+        isCodeViaApp: sendResult.isCodeViaApp,
+        message: `Verification OTP sent to your Telegram account (${normalizedPhone}).`,
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Failed to send Telegram OTP code';
+      res.status(400).json({ error: msg });
+    }
+  });
+
+  // STEP 2: Verify Telegram OTP Code (+ Optional 2FA Password) and Save Persistent 2GB Session
+  app.post('/api/telegram/mtproto/verify-code', requireAuth, async (req, res) => {
+    const user = (req as Request & { user: StoredUser }).user;
+    if (user.email.toLowerCase() !== 'titumamma2425@gmail.com' || user.role !== 'admin') {
+      res.status(403).json({ error: 'Administrator access required.' });
+      return;
+    }
+
+    const { phoneNumber, phoneCode, phoneCodeHash, password, chatId } = req.body as {
+      phoneNumber?: string;
+      phoneCode?: string;
+      phoneCodeHash?: string;
+      password?: string;
+      chatId?: string;
+    };
+
+    const rawPhone = String(phoneNumber || db.telegramConfig.phoneNumber || '').trim();
+    const normalizedPhone = rawPhone.startsWith('+')
+      ? rawPhone.replace(/[\s-]/g, '')
+      : `+${rawPhone.replace(/[\s-]/g, '')}`;
+    const cleanCode = String(phoneCode || '').trim();
+    const cleanPassword = String(password || '').trim();
+
+    const pending = pendingMtprotoLogins.get(normalizedPhone);
+    if (!pending) {
+      res.status(400).json({
+        error: 'OTP session expired or not found. Please click "Send OTP Code" again.',
+      });
+      return;
+    }
+
+    try {
+      const client = pending.client;
+      if (!client.connected) {
+        await client.connect();
+      }
+
+      try {
+        if (cleanCode) {
+          await client.invoke(
+            new Api.auth.SignIn({
+              phoneNumber: normalizedPhone,
+              phoneCodeHash: phoneCodeHash || pending.phoneCodeHash,
+              phoneCode: cleanCode,
+            })
+          );
+        } else if (!cleanPassword) {
+          res.status(400).json({ error: 'Please enter the OTP code sent to Telegram.' });
+          return;
+        }
+      } catch (signInErr: any) {
+        const errMsg = String(signInErr?.errorMessage || signInErr?.message || '');
+        if (errMsg.includes('SESSION_PASSWORD_NEEDED')) {
+          if (!cleanPassword) {
+            res.status(200).json({
+              ok: false,
+              requires2FA: true,
+              error:
+                'Two-Step Verification (2FA) is enabled on your Telegram account. Please enter your 2FA password below.',
+            });
+            return;
+          }
+          const pwdInfo = await client.invoke(new Api.account.GetPassword());
+          const passwordSrp = await computeCheck(pwdInfo, cleanPassword);
+          await client.invoke(new Api.auth.CheckPassword({ password: passwordSrp }));
+        } else {
+          throw signInErr;
+        }
+      }
+
+      // If 2FA password was submitted directly after requires2FA prompt
+      if (cleanPassword && !(await client.isUserAuthorized())) {
+        const pwdInfo = await client.invoke(new Api.account.GetPassword());
+        const passwordSrp = await computeCheck(pwdInfo, cleanPassword);
+        await client.invoke(new Api.auth.CheckPassword({ password: passwordSrp }));
+      }
+
+      const me = (await client.getMe()) as any;
+      const rawSession = client.session.save() as unknown;
+      const sessionString = typeof rawSession === 'string' ? rawSession : '';
+      const fullName =
+        [me?.firstName, me?.lastName].filter(Boolean).join(' ').trim() ||
+        me?.username ||
+        normalizedPhone;
+      const username = me?.username ? String(me.username) : '';
+      const targetChat = String(chatId || pending.chatId || db.telegramConfig.chatId || 'me').trim() || 'me';
+
+      db.telegramConfig.authMode = 'mtproto';
+      db.telegramConfig.apiId = String(pending.apiId);
+      db.telegramConfig.apiHash = pending.apiHash;
+      db.telegramConfig.phoneNumber = normalizedPhone;
+      db.telegramConfig.mtprotoSession = sessionString;
+      db.telegramConfig.accountName = fullName;
+      db.telegramConfig.accountUsername = username;
+      db.telegramConfig.chatId = targetChat;
+      db.telegramConfig.autoSyncUploads = true;
+      db.telegramConfig.lastVerifiedAt = new Date().toISOString();
+      saveDb();
+
+      cachedMtprotoClient = client;
+      cachedMtprotoSessionKey = `${pending.apiId}:${pending.apiHash}:${sessionString.slice(0, 48)}`;
+      pendingMtprotoLogins.delete(normalizedPhone);
+
+      recordAuditLog({
+        userId: user.id,
+        userName: user.name,
+        action: 'TELEGRAM_CONFIG',
+        targetName: `MTProto 2GB Account (${fullName})`,
+        status: 'success',
+        details: `Connected Global Admin Telegram User Account (2GB MTProto Vault)`,
+      });
+
+      res.json({
+        ok: true,
+        sessionString,
+        accountName: fullName,
+        accountUsername: username,
+        phoneNumber: normalizedPhone,
+        apiId: String(pending.apiId),
+        apiHash: pending.apiHash,
+        chatId: targetChat,
+        config: getTelegramState(),
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Failed to verify Telegram OTP code';
+      res.status(400).json({ error: msg });
+    }
+  });
+
   app.post('/api/telegram/config', requireAuth, async (req, res) => {
     const user = (req as Request & { user: StoredUser }).user;
     if (user.email.toLowerCase() !== 'titumamma2425@gmail.com' || user.role !== 'admin') {
@@ -2968,19 +3548,50 @@ async function startServer() {
       return;
     }
 
-    const { botToken, chatId, autoSyncUploads, clearCredentials } = req.body as {
+    const {
+      authMode,
+      botToken,
+      chatId,
+      autoSyncUploads,
+      clearCredentials,
+      apiId,
+      apiHash,
+      phoneNumber,
+      mtprotoSession,
+      accountName,
+      accountUsername,
+    } = req.body as {
+      authMode?: 'mtproto' | 'bot';
       botToken?: string;
       chatId?: string;
       autoSyncUploads?: boolean;
       clearCredentials?: boolean;
+      apiId?: string;
+      apiHash?: string;
+      phoneNumber?: string;
+      mtprotoSession?: string;
+      accountName?: string;
+      accountUsername?: string;
     };
 
     if (clearCredentials) {
+      if (cachedMtprotoClient) {
+        await cachedMtprotoClient.disconnect().catch(() => null);
+        cachedMtprotoClient = null;
+        cachedMtprotoSessionKey = '';
+      }
+      db.telegramConfig.authMode = 'bot';
       db.telegramConfig.botToken = '';
       db.telegramConfig.chatId = '';
       db.telegramConfig.botUsername = undefined;
       db.telegramConfig.botFirstName = undefined;
       db.telegramConfig.lastVerifiedAt = undefined;
+      db.telegramConfig.apiId = undefined;
+      db.telegramConfig.apiHash = undefined;
+      db.telegramConfig.phoneNumber = undefined;
+      db.telegramConfig.mtprotoSession = undefined;
+      db.telegramConfig.accountName = undefined;
+      db.telegramConfig.accountUsername = undefined;
       saveDb();
       res.json({ config: getTelegramState() });
       return;
@@ -2988,6 +3599,28 @@ async function startServer() {
 
     if (typeof autoSyncUploads === 'boolean') {
       db.telegramConfig.autoSyncUploads = autoSyncUploads;
+    }
+
+    if (mtprotoSession && apiId && apiHash) {
+      db.telegramConfig.authMode = 'mtproto';
+      db.telegramConfig.apiId = String(apiId).trim();
+      db.telegramConfig.apiHash = String(apiHash).trim();
+      if (phoneNumber) db.telegramConfig.phoneNumber = String(phoneNumber).trim();
+      db.telegramConfig.mtprotoSession = String(mtprotoSession).trim();
+      if (accountName) db.telegramConfig.accountName = String(accountName).trim();
+      if (accountUsername) db.telegramConfig.accountUsername = String(accountUsername).trim();
+      if (chatId) db.telegramConfig.chatId = String(chatId).trim();
+      db.telegramConfig.lastVerifiedAt = new Date().toISOString();
+      saveDb();
+      res.json({ config: getTelegramState() });
+      return;
+    }
+
+    if (authMode === 'mtproto' && db.telegramConfig.mtprotoSession && chatId) {
+      db.telegramConfig.chatId = chatId.trim();
+      saveDb();
+      res.json({ config: getTelegramState() });
+      return;
     }
 
     const tokenToTest =
@@ -3015,6 +3648,7 @@ async function startServer() {
         return;
       }
 
+      db.telegramConfig.authMode = 'bot';
       db.telegramConfig.botToken = tokenToTest;
       db.telegramConfig.chatId = chatToTest;
       db.telegramConfig.botUsername = meJson.result.username;

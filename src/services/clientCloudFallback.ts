@@ -19,6 +19,15 @@ import {
   fetchPublicShareBinaryChunksFromFirestore,
   fetchStorageNodeConfigFromFirestore,
   PublicShareCloudRecord,
+  CloudStorageNodeCredentials,
+  markCloudFileDeletedTombstone,
+  isCloudFileDeletedTombstone,
+  markCloudFolderDeletedTombstone,
+  isCloudFolderDeletedTombstone,
+  recordKnownCloudFileIds,
+  wasCloudFilePreviouslySynced,
+  recordKnownCloudFolderIds,
+  wasCloudFolderPreviouslySynced,
 } from '../firebase';
 
 const STORAGE_KEY = 'unlimcloud_client_db_v4';
@@ -83,10 +92,17 @@ interface ClientDatabase {
   logs: AuditLog[];
   bandwidthSettings: BandwidthSettings;
   telegramConfig: {
+    authMode?: 'mtproto' | 'bot';
     botToken: string;
     chatId: string;
     botUsername?: string;
     autoSyncUploads: boolean;
+    apiId?: string;
+    apiHash?: string;
+    phoneNumber?: string;
+    mtprotoSession?: string;
+    accountName?: string;
+    accountUsername?: string;
   };
 }
 
@@ -1323,6 +1339,7 @@ async function handleClientApi(urlStr: string, init?: RequestInit): Promise<Resp
 
   if (path.startsWith('/api/folders/') && method === 'DELETE') {
     const folderId = decodeURIComponent(path.slice('/api/folders/'.length));
+    markCloudFolderDeletedTombstone(folderId);
     const target = db.folders.find((f) => f.id === folderId && f.ownerId === currentUser.id);
     db.files.forEach((f) => {
       if (f.ownerId === currentUser.id && f.folderId === folderId) {
@@ -1561,6 +1578,7 @@ async function handleClientApi(urlStr: string, init?: RequestInit): Promise<Resp
 
   if (path.startsWith('/api/files/') && method === 'DELETE') {
     const fileId = decodeURIComponent(path.slice('/api/files/'.length));
+    markCloudFileDeletedTombstone(fileId);
     db.files = db.files.filter((f) => !(f.id === fileId && f.ownerId === currentUser.id));
     db.shares = db.shares.filter((s) => s.fileId !== fileId);
     const blobs = getBlobStore();
@@ -1868,15 +1886,31 @@ async function handleClientApi(urlStr: string, init?: RequestInit): Promise<Resp
     if (currentUser.email.toLowerCase() !== 'titumamma2425@gmail.com' || currentUser.role !== 'admin') {
       return jsonResponse({ error: 'Administrator access required.' }, 403);
     }
-    const connected = Boolean(db.telegramConfig.botToken && db.telegramConfig.chatId);
+    const mtprotoConnected = Boolean(
+      db.telegramConfig.apiId &&
+        db.telegramConfig.apiHash &&
+        db.telegramConfig.mtprotoSession
+    );
+    const botConnected = Boolean(db.telegramConfig.botToken && db.telegramConfig.chatId);
+    const connected = mtprotoConnected || botConnected;
+    const authMode: 'mtproto' | 'bot' =
+      db.telegramConfig.authMode === 'mtproto' || mtprotoConnected ? 'mtproto' : 'bot';
     const state: TelegramConfigState = {
       connected,
       mode: connected ? 'telegram_live' : 'hybrid_fallback',
+      authMode,
       botUsername: db.telegramConfig.botUsername,
-      chatId: db.telegramConfig.chatId,
-      maskedToken: connected ? '••••••••' : '',
-      chunkSizeBytes: 19 * 1024 * 1024,
+      chatId: db.telegramConfig.chatId || (mtprotoConnected ? 'me' : ''),
+      maskedToken: botConnected ? '••••••••' : '',
+      chunkSizeBytes: mtprotoConnected ? 2 * 1024 * 1024 * 1024 : 19 * 1024 * 1024,
+      maxFileSizeBytes: mtprotoConnected ? 2 * 1024 * 1024 * 1024 : 19 * 1024 * 1024,
       autoSyncUploads: true,
+      mtprotoConnected,
+      apiId: db.telegramConfig.apiId,
+      maskedApiHash: db.telegramConfig.apiHash ? '••••••••' : '',
+      phoneNumber: db.telegramConfig.phoneNumber,
+      accountName: db.telegramConfig.accountName,
+      accountUsername: db.telegramConfig.accountUsername,
     };
     return jsonResponse({ config: state });
   }
@@ -1887,9 +1921,16 @@ async function handleClientApi(urlStr: string, init?: RequestInit): Promise<Resp
     }
     const body = await parseBody();
     if (body.clearCredentials) {
+      db.telegramConfig.authMode = 'bot';
       db.telegramConfig.botToken = '';
       db.telegramConfig.chatId = '';
       db.telegramConfig.botUsername = undefined;
+      db.telegramConfig.apiId = '';
+      db.telegramConfig.apiHash = '';
+      db.telegramConfig.phoneNumber = '';
+      db.telegramConfig.mtprotoSession = '';
+      db.telegramConfig.accountName = '';
+      db.telegramConfig.accountUsername = '';
       saveClientDb(db);
     } else if (body.botToken && body.chatId) {
       const meRes = await originalFetch(
@@ -1902,21 +1943,41 @@ async function handleClientApi(urlStr: string, init?: RequestInit): Promise<Resp
           400
         );
       }
+      db.telegramConfig.authMode = 'bot';
       db.telegramConfig.botToken = String(body.botToken).trim();
       db.telegramConfig.chatId = String(body.chatId).trim();
       db.telegramConfig.botUsername = meJson.result?.username;
       saveClientDb(db);
+    } else if (body.chatId !== undefined) {
+      db.telegramConfig.chatId = String(body.chatId).trim() || 'me';
+      saveClientDb(db);
     }
 
-    const connected = Boolean(db.telegramConfig.botToken && db.telegramConfig.chatId);
+    const mtprotoConnected = Boolean(
+      db.telegramConfig.apiId &&
+        db.telegramConfig.apiHash &&
+        db.telegramConfig.mtprotoSession
+    );
+    const botConnected = Boolean(db.telegramConfig.botToken && db.telegramConfig.chatId);
+    const connected = mtprotoConnected || botConnected;
+    const authMode: 'mtproto' | 'bot' =
+      db.telegramConfig.authMode === 'mtproto' || mtprotoConnected ? 'mtproto' : 'bot';
     const state: TelegramConfigState = {
       connected,
       mode: connected ? 'telegram_live' : 'hybrid_fallback',
+      authMode,
       botUsername: db.telegramConfig.botUsername,
-      chatId: db.telegramConfig.chatId,
-      maskedToken: connected ? '••••••••' : '',
-      chunkSizeBytes: 19 * 1024 * 1024,
+      chatId: db.telegramConfig.chatId || (mtprotoConnected ? 'me' : ''),
+      maskedToken: botConnected ? '••••••••' : '',
+      chunkSizeBytes: mtprotoConnected ? 2 * 1024 * 1024 * 1024 : 19 * 1024 * 1024,
+      maxFileSizeBytes: mtprotoConnected ? 2 * 1024 * 1024 * 1024 : 19 * 1024 * 1024,
       autoSyncUploads: true,
+      mtprotoConnected,
+      apiId: db.telegramConfig.apiId,
+      maskedApiHash: db.telegramConfig.apiHash ? '••••••••' : '',
+      phoneNumber: db.telegramConfig.phoneNumber,
+      accountName: db.telegramConfig.accountName,
+      accountUsername: db.telegramConfig.accountUsername,
     };
     return jsonResponse({ config: state });
   }
@@ -2379,12 +2440,7 @@ export async function syncClientDbWithFirestoreDrive(params: {
   cloudFiles: FileRecord[];
   cloudFolders: FolderRecord[];
   cloudShares?: PublicShareCloudRecord[];
-  storageNodeConfig?: {
-    botToken: string;
-    chatId: string;
-    botUsername: string;
-    autoSyncUploads: boolean;
-  } | null;
+  storageNodeConfig?: CloudStorageNodeCredentials | null;
 }): Promise<{
   unsyncedLocalFiles: FileRecord[];
   unsyncedLocalFolders: FolderRecord[];
@@ -2393,16 +2449,33 @@ export async function syncClientDbWithFirestoreDrive(params: {
   const db = loadClientDb();
   const isAdminEmail = (params.email || '').toLowerCase() === 'titumamma2425@gmail.com';
 
-  // 1. Sync global Telegram Storage Node credentials if present in Firestore
-  if (
-    params.storageNodeConfig &&
-    params.storageNodeConfig.botToken &&
-    params.storageNodeConfig.chatId
-  ) {
-    db.telegramConfig.botToken = params.storageNodeConfig.botToken;
-    db.telegramConfig.chatId = params.storageNodeConfig.chatId;
-    db.telegramConfig.botUsername = params.storageNodeConfig.botUsername;
-    db.telegramConfig.autoSyncUploads = params.storageNodeConfig.autoSyncUploads;
+  // 1. Sync global Telegram Storage Node credentials (both Bot & 2GB MTProto) if present in Firestore
+  if (params.storageNodeConfig) {
+    if (params.storageNodeConfig.authMode) {
+      db.telegramConfig.authMode = params.storageNodeConfig.authMode;
+    }
+    if (params.storageNodeConfig.botToken && params.storageNodeConfig.chatId) {
+      db.telegramConfig.botToken = params.storageNodeConfig.botToken;
+      db.telegramConfig.chatId = params.storageNodeConfig.chatId;
+      db.telegramConfig.botUsername = params.storageNodeConfig.botUsername;
+      db.telegramConfig.autoSyncUploads = params.storageNodeConfig.autoSyncUploads;
+    }
+    if (
+      params.storageNodeConfig.apiId &&
+      params.storageNodeConfig.apiHash &&
+      params.storageNodeConfig.mtprotoSession
+    ) {
+      db.telegramConfig.authMode = 'mtproto';
+      db.telegramConfig.apiId = params.storageNodeConfig.apiId;
+      db.telegramConfig.apiHash = params.storageNodeConfig.apiHash;
+      db.telegramConfig.phoneNumber = params.storageNodeConfig.phoneNumber;
+      db.telegramConfig.mtprotoSession = params.storageNodeConfig.mtprotoSession;
+      db.telegramConfig.accountName = params.storageNodeConfig.accountName;
+      db.telegramConfig.accountUsername = params.storageNodeConfig.accountUsername;
+      if (params.storageNodeConfig.chatId) {
+        db.telegramConfig.chatId = params.storageNodeConfig.chatId;
+      }
+    }
   }
 
   // 2. Ensure user exists in client DB & sync profile plan / token balance from Firestore
@@ -2459,9 +2532,20 @@ export async function syncClientDbWithFirestoreDrive(params: {
     }
   }
 
-  // 3. Merge cloudFolders from Firestore into local db.folders
+  // 3. Reconcile cloudFolders (purge folders deleted on another device + merge active folders)
   const cloudFolderIds = new Set(params.cloudFolders.map((f) => f.id));
+  db.folders = db.folders.filter((f) => {
+    if (f.ownerId !== params.uid) return true;
+    if (cloudFolderIds.has(f.id)) return true;
+    if (isCloudFolderDeletedTombstone(f.id) || wasCloudFolderPreviouslySynced(f.id)) {
+      markCloudFolderDeletedTombstone(f.id);
+      return false;
+    }
+    return true;
+  });
+
   for (const cf of params.cloudFolders) {
+    if (isCloudFolderDeletedTombstone(cf.id)) continue;
     const existingIdx = db.folders.findIndex((f) => f.id === cf.id && f.ownerId === params.uid);
     if (existingIdx === -1) {
       db.folders.push(cf);
@@ -2473,16 +2557,56 @@ export async function syncClientDbWithFirestoreDrive(params: {
       };
     }
   }
+  recordKnownCloudFolderIds(params.cloudFolders.map((f) => f.id));
 
   const unsyncedLocalFolders = db.folders.filter(
-    (f) => f.ownerId === params.uid && !cloudFolderIds.has(f.id)
+    (f) =>
+      f.ownerId === params.uid &&
+      !cloudFolderIds.has(f.id) &&
+      !isCloudFolderDeletedTombstone(f.id)
   );
 
-  // 4. Merge cloudFiles from Firestore into local db.files
+  // 4. Reconcile cloudFiles (purge files deleted on another device + merge active files)
+  const isStarter = (id: string) =>
+    id.startsWith('file_welcome_') || id === 'file_spec_01' || id === 'file_diagram_02';
+
   const cloudFileMap = new Map<string, FileRecord>();
-  params.cloudFiles.forEach((cf) => cloudFileMap.set(cf.id, cf));
+  params.cloudFiles.forEach((cf) => {
+    if (!isCloudFileDeletedTombstone(cf.id)) {
+      cloudFileMap.set(cf.id, cf);
+    }
+  });
+
+  const purgedFileIds: string[] = [];
+  db.files = db.files.filter((f) => {
+    if (f.ownerId !== params.uid) return true;
+    if (cloudFileMap.has(f.id)) return true;
+    if (isStarter(f.id)) return true;
+    if (isCloudFileDeletedTombstone(f.id) || wasCloudFilePreviouslySynced(f.id)) {
+      markCloudFileDeletedTombstone(f.id);
+      purgedFileIds.push(f.id);
+      return false;
+    }
+    return true;
+  });
+
+  if (purgedFileIds.length > 0) {
+    const purgedSet = new Set(purgedFileIds);
+    db.shares = db.shares.filter((s) => !purgedSet.has(s.fileId));
+    const blobs = getBlobStore();
+    let blobsChanged = false;
+    for (const pid of purgedFileIds) {
+      if (blobs[pid]) {
+        delete blobs[pid];
+        blobsChanged = true;
+      }
+      void deleteClientBinaryBlob(pid).catch(() => null);
+    }
+    if (blobsChanged) saveBlobStore(blobs);
+  }
 
   for (const cf of params.cloudFiles) {
+    if (isCloudFileDeletedTombstone(cf.id)) continue;
     const existingIdx = db.files.findIndex((f) => f.id === cf.id && f.ownerId === params.uid);
     if (existingIdx === -1) {
       db.files.unshift(cf);
@@ -2508,18 +2632,17 @@ export async function syncClientDbWithFirestoreDrive(params: {
       };
     }
   }
+  recordKnownCloudFileIds(params.cloudFiles.map((f) => f.id));
 
   // Sort user files newest first
   db.files.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
 
-  const isStarter = (id: string) =>
-    id.startsWith('file_welcome_') || id === 'file_spec_01' || id === 'file_diagram_02';
-
   const unsyncedLocalFiles = db.files.filter((f) => {
-    if (f.ownerId !== params.uid || isStarter(f.id)) return false;
+    if (f.ownerId !== params.uid || isStarter(f.id) || isCloudFileDeletedTombstone(f.id)) {
+      return false;
+    }
     const inCloud = cloudFileMap.get(f.id);
     if (!inCloud) return true;
-    // Also re-sync if local has Telegram chunks that Firestore doesn't have yet
     if (
       f.telegramChunks &&
       f.telegramChunks.length > 0 &&
@@ -2536,6 +2659,7 @@ export async function syncClientDbWithFirestoreDrive(params: {
   cloudSharesList.forEach((cs) => cloudShareMap.set(cs.token, cs));
 
   for (const cs of cloudSharesList) {
+    if (isCloudFileDeletedTombstone(cs.fileId)) continue;
     const existingIdx = db.shares.findIndex((s) => s.token === cs.token);
     if (existingIdx === -1) {
       db.shares.unshift({
@@ -2558,7 +2682,9 @@ export async function syncClientDbWithFirestoreDrive(params: {
   }
 
   const unsyncedLocalShares = db.shares.filter((s) => {
-    if (s.creatorId !== params.uid || !s.active) return false;
+    if (s.creatorId !== params.uid || !s.active || isCloudFileDeletedTombstone(s.fileId)) {
+      return false;
+    }
     const inCloud = cloudShareMap.get(s.token);
     if (!inCloud) return true;
     const linkedFile = db.files.find((f) => f.id === s.fileId);
@@ -2576,7 +2702,7 @@ export async function syncClientDbWithFirestoreDrive(params: {
   evaluateClientQuotaAndLocks(db, user);
   saveClientDb(db);
 
-  // 6. If Express backend is active, push the merged Firestore state to the server so /api/files, /api/shares, and /api/public/share/:token know all files & Telegram chunks
+  // 6. Push reconciled state to Express backend (with authoritativeCloudSync so deleted files are purged on the server too)
   if (staticFallbackMode !== true) {
     try {
       await originalFetch('/api/files/sync-from-cloud', {
@@ -2586,6 +2712,7 @@ export async function syncClientDbWithFirestoreDrive(params: {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
+          authoritativeCloudSync: true,
           profile: params.profile,
           files: db.files.filter((f) => f.ownerId === params.uid),
           folders: db.folders.filter((f) => f.ownerId === params.uid),
@@ -2604,4 +2731,218 @@ export async function syncClientDbWithFirestoreDrive(params: {
     unsyncedLocalShares,
   };
 }
+
+/**
+ * Applies real-time Firestore onSnapshot changes (additions, updates, and deletions)
+ * immediately to the local client database, IndexedDB binary cache, and Express server.
+ */
+export async function applyCloudDriveRealtimeSnapshot(params: {
+  uid: string;
+  headers?: Record<string, string>;
+  cloudFiles?: FileRecord[];
+  removedFileIds?: string[];
+  cloudFolders?: FolderRecord[];
+  removedFolderIds?: string[];
+  cloudShares?: PublicShareCloudRecord[];
+  removedShareTokens?: string[];
+}): Promise<{
+  files: FileRecord[];
+  folders: FolderRecord[];
+  shares: ClientStoredShare[];
+  user: User | null;
+}> {
+  const db = loadClientDb();
+  const isStarter = (id: string) =>
+    id.startsWith('file_welcome_') || id === 'file_spec_01' || id === 'file_diagram_02';
+
+  let needsServerSync = false;
+
+  // 1. Handle folder snapshot & removals
+  if (params.cloudFolders !== undefined) {
+    const removedFoldersSet = new Set(params.removedFolderIds || []);
+    for (const rfId of removedFoldersSet) {
+      markCloudFolderDeletedTombstone(rfId);
+    }
+
+    const cloudFolderIds = new Set(params.cloudFolders.map((f) => f.id));
+    const beforeFolderCount = db.folders.length;
+    db.folders = db.folders.filter((f) => {
+      if (f.ownerId !== params.uid) return true;
+      if (removedFoldersSet.has(f.id)) return false;
+      if (cloudFolderIds.has(f.id)) return true;
+      if (isCloudFolderDeletedTombstone(f.id) || wasCloudFolderPreviouslySynced(f.id)) {
+        markCloudFolderDeletedTombstone(f.id);
+        return false;
+      }
+      return true;
+    });
+    if (db.folders.length !== beforeFolderCount || removedFoldersSet.size > 0) {
+      needsServerSync = true;
+    }
+
+    for (const cf of params.cloudFolders) {
+      if (isCloudFolderDeletedTombstone(cf.id)) continue;
+      const idx = db.folders.findIndex((f) => f.id === cf.id && f.ownerId === params.uid);
+      if (idx === -1) {
+        db.folders.push(cf);
+        needsServerSync = true;
+      } else {
+        db.folders[idx] = {
+          ...db.folders[idx],
+          name: cf.name,
+          parentId: cf.parentId,
+        };
+      }
+    }
+  }
+
+  // 2. Handle file snapshot & removals
+  if (params.cloudFiles !== undefined) {
+    const removedFilesSet = new Set(params.removedFileIds || []);
+    for (const rfId of removedFilesSet) {
+      markCloudFileDeletedTombstone(rfId);
+    }
+
+    const cloudFileMap = new Map<string, FileRecord>();
+    params.cloudFiles.forEach((cf) => {
+      if (!isCloudFileDeletedTombstone(cf.id)) {
+        cloudFileMap.set(cf.id, cf);
+      }
+    });
+
+    const purgedIds: string[] = Array.from(removedFilesSet);
+    const beforeFileCount = db.files.length;
+    db.files = db.files.filter((f) => {
+      if (f.ownerId !== params.uid) return true;
+      if (removedFilesSet.has(f.id)) return false;
+      if (cloudFileMap.has(f.id)) return true;
+      if (isStarter(f.id)) return true;
+      if (isCloudFileDeletedTombstone(f.id) || wasCloudFilePreviouslySynced(f.id)) {
+        markCloudFileDeletedTombstone(f.id);
+        purgedIds.push(f.id);
+        return false;
+      }
+      return true;
+    });
+
+    if (db.files.length !== beforeFileCount || purgedIds.length > 0) {
+      needsServerSync = true;
+    }
+
+    if (purgedIds.length > 0) {
+      const purgedSet = new Set(purgedIds);
+      db.shares = db.shares.filter((s) => !purgedSet.has(s.fileId));
+      const blobs = getBlobStore();
+      let blobsChanged = false;
+      for (const pid of purgedIds) {
+        if (blobs[pid]) {
+          delete blobs[pid];
+          blobsChanged = true;
+        }
+        void deleteClientBinaryBlob(pid).catch(() => null);
+      }
+      if (blobsChanged) saveBlobStore(blobs);
+    }
+
+    for (const cf of params.cloudFiles) {
+      if (isCloudFileDeletedTombstone(cf.id)) continue;
+      const idx = db.files.findIndex((f) => f.id === cf.id && f.ownerId === params.uid);
+      if (idx === -1) {
+        db.files.unshift(cf);
+        needsServerSync = true;
+      } else {
+        const local = db.files[idx];
+        db.files[idx] = {
+          ...local,
+          name: cf.name || local.name,
+          folderId: cf.folderId,
+          starred: cf.starred,
+          downloadCount: Math.max(local.downloadCount || 0, cf.downloadCount || 0),
+          storageDriver:
+            cf.telegramChunks && cf.telegramChunks.length > 0
+              ? 'telegram'
+              : local.storageDriver || cf.storageDriver,
+          telegramChatId: cf.telegramChatId || local.telegramChatId,
+          telegramChunks:
+            cf.telegramChunks && cf.telegramChunks.length > 0
+              ? cf.telegramChunks
+              : local.telegramChunks || [],
+          previewText: local.previewText || cf.previewText,
+          previewDataUrl: local.previewDataUrl || cf.previewDataUrl,
+        };
+      }
+    }
+
+    db.files.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  }
+
+  // 3. Handle shares snapshot & removals
+  if (params.cloudShares !== undefined) {
+    const removedTokensSet = new Set(params.removedShareTokens || []);
+    if (removedTokensSet.size > 0) {
+      db.shares = db.shares.filter((s) => !removedTokensSet.has(s.token));
+      needsServerSync = true;
+    }
+    for (const cs of params.cloudShares) {
+      if (isCloudFileDeletedTombstone(cs.fileId)) continue;
+      const idx = db.shares.findIndex((s) => s.token === cs.token);
+      if (idx === -1) {
+        db.shares.unshift({
+          ...cs,
+          passwordHash: cs.passwordHash || null,
+        });
+      } else {
+        const localShare = db.shares[idx];
+        db.shares[idx] = {
+          ...localShare,
+          ...cs,
+          passwordHash: cs.passwordHash ?? localShare.passwordHash ?? null,
+          downloadCount: Math.max(localShare.downloadCount || 0, cs.downloadCount || 0),
+          telegramChunks:
+            cs.telegramChunks && cs.telegramChunks.length > 0
+              ? cs.telegramChunks
+              : localShare.telegramChunks || [],
+        };
+      }
+    }
+  }
+
+  const user = db.users.find((u) => u.id === params.uid) || null;
+  if (user) {
+    evaluateClientQuotaAndLocks(db, user);
+  }
+  saveClientDb(db);
+
+  const userFiles = db.files.filter((f) => f.ownerId === params.uid);
+  const userFolders = db.folders.filter((f) => f.ownerId === params.uid);
+  const userShares = db.shares.filter((s) => s.creatorId === params.uid);
+
+  if (needsServerSync && staticFallbackMode !== true && params.headers) {
+    try {
+      await originalFetch('/api/files/sync-from-cloud', {
+        method: 'POST',
+        headers: {
+          ...params.headers,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          authoritativeCloudSync: true,
+          files: userFiles,
+          folders: userFolders,
+          shares: userShares,
+        }),
+      });
+    } catch {
+      // ignore if on static host
+    }
+  }
+
+  return {
+    files: userFiles,
+    folders: userFolders,
+    shares: userShares,
+    user,
+  };
+}
+
 

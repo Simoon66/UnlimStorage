@@ -72,7 +72,9 @@ export interface FileRecord {
   storageDriver: StorageDriver;
   telegramChatId?: string;
   telegramChunks: TelegramChunk[];
+  telegramFileId?: string;
   starred: boolean;
+  trashed?: boolean;
   downloadCount: number;
   createdAt: string;
   updatedAt: string;
@@ -122,6 +124,7 @@ export interface TransferJob {
   fileId?: string;
   sha256?: string;
   error?: string;
+  errorMessage?: string;
   createdAt: string;
   completedAt?: string;
 }
@@ -178,13 +181,23 @@ export interface DailyBandwidthPoint {
 export interface TelegramConfigState {
   connected: boolean;
   mode: 'telegram_live' | 'hybrid_fallback';
+  authMode?: 'mtproto' | 'bot';
   botUsername?: string;
   botFirstName?: string;
   chatId: string;
   maskedToken: string;
   chunkSizeBytes: number;
+  maxFileSizeBytes?: number;
   autoSyncUploads: boolean;
   lastVerifiedAt?: string;
+  // MTProto 2GB User Account fields
+  mtprotoConnected?: boolean;
+  apiId?: string;
+  maskedApiHash?: string;
+  phoneNumber?: string;
+  accountName?: string;
+  accountUsername?: string;
+  mtprotoUser?: string;
 }
 
 export interface RealtimeNotification {
@@ -198,3 +211,4 @@ export interface RealtimeNotification {
   sha256?: string;
   storageDriver?: StorageDriver;
 }
+

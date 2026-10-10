@@ -17,6 +17,9 @@ import {
   Sparkles,
   HardDrive,
   AlertTriangle,
+  Code2,
+  Smartphone,
+  KeyRound,
 } from 'lucide-react';
 import {
   ShareLink,
@@ -47,12 +50,21 @@ export const SharedLinksView: React.FC<SharedLinksViewProps> = ({
   onOpenPublicPortal,
 }) => {
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [copiedEmbedId, setCopiedEmbedId] = useState<string | null>(null);
 
   const handleCopy = (share: ShareLink) => {
     const url = `${window.location.origin}/?share=${encodeURIComponent(share.token)}`;
     navigator.clipboard.writeText(url);
     setCopiedId(share.id);
     setTimeout(() => setCopiedId(null), 1800);
+  };
+
+  const handleCopyEmbed = (share: ShareLink) => {
+    const embedUrl = `${window.location.origin}/?share=${encodeURIComponent(share.token)}&embed=1`;
+    const snippet = `<iframe src="${embedUrl}" width="100%" height="480" frameborder="0" allowfullscreen allow="autoplay; fullscreen"></iframe>`;
+    navigator.clipboard.writeText(snippet);
+    setCopiedEmbedId(share.id);
+    setTimeout(() => setCopiedEmbedId(null), 1800);
   };
 
   return (
@@ -136,25 +148,47 @@ export const SharedLinksView: React.FC<SharedLinksViewProps> = ({
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-2.5 pt-2">
-                <button
-                  onClick={() => handleCopy(s)}
-                  className="min-h-[44px] py-2.5 px-3 text-xs font-bold bg-[#D97757] text-[#141311] hover:bg-[#E08568] flex items-center justify-center gap-1.5 cursor-pointer"
-                >
-                  {copiedId === s.id ? (
-                    <Check className="w-4 h-4" />
-                  ) : (
-                    <Copy className="w-4 h-4" />
-                  )}
-                  {copiedId === s.id ? 'Copied!' : 'Copy Link'}
-                </button>
-                <button
-                  onClick={() => onOpenPublicPortal(s.token)}
-                  className="min-h-[44px] py-2.5 px-3 text-xs font-semibold bg-[#24211D] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center justify-center gap-1.5 cursor-pointer"
-                >
-                  <ExternalLink className="w-4 h-4" />
-                  Open Page
-                </button>
+              <div className="space-y-2 pt-2">
+                <div className="grid grid-cols-2 gap-2.5">
+                  <button
+                    onClick={() => handleCopy(s)}
+                    className="min-h-[44px] py-2.5 px-3 text-xs font-bold bg-[#D97757] text-[#141311] hover:bg-[#E08568] flex items-center justify-center gap-1.5 cursor-pointer"
+                  >
+                    {copiedId === s.id ? (
+                      <Check className="w-4 h-4" />
+                    ) : (
+                      <Copy className="w-4 h-4" />
+                    )}
+                    {copiedId === s.id ? 'Copied!' : 'Copy Link'}
+                  </button>
+                  <button
+                    onClick={() => onOpenPublicPortal(s.token)}
+                    className="min-h-[44px] py-2.5 px-3 text-xs font-semibold bg-[#24211D] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center justify-center gap-1.5 cursor-pointer"
+                  >
+                    <ExternalLink className="w-4 h-4" />
+                    Open Page
+                  </button>
+                </div>
+
+                {(s.fileMimeType.startsWith('video/') ||
+                  /\.(mp4|webm|mov|mkv|avi|m4v)$/i.test(s.fileName)) && (
+                  <button
+                    type="button"
+                    onClick={() => handleCopyEmbed(s)}
+                    className="w-full min-h-[38px] py-2 px-3 text-xs font-semibold bg-[#141311] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center justify-center gap-1.5 cursor-pointer"
+                  >
+                    {copiedEmbedId === s.id ? (
+                      <Check className="w-3.5 h-3.5 text-[#2E9E6B]" />
+                    ) : (
+                      <Code2 className="w-3.5 h-3.5 text-[#D97757]" />
+                    )}
+                    <span>
+                      {copiedEmbedId === s.id
+                        ? 'Copied JW Player Iframe!'
+                        : 'Copy JW Player Iframe'}
+                    </span>
+                  </button>
+                )}
               </div>
             </div>
           ))}
@@ -764,25 +798,66 @@ interface TelegramStorageViewProps {
     autoSyncUploads?: boolean;
     clearCredentials?: boolean;
   }) => Promise<void>;
+  onSendMtprotoCode?: (payload: {
+    apiId: number;
+    apiHash: string;
+    phoneNumber: string;
+    chatId?: string;
+  }) => Promise<{ phoneCodeHash: string; message?: string }>;
+  onVerifyMtprotoCode?: (payload: {
+    phoneCode: string;
+    password?: string;
+    chatId?: string;
+  }) => Promise<void>;
+  onDisconnectMtproto?: () => Promise<void>;
 }
 
 export const TelegramStorageView: React.FC<TelegramStorageViewProps> = ({
   config,
   onSaveConfig,
+  onSendMtprotoCode,
+  onVerifyMtprotoCode,
+  onDisconnectMtproto,
 }) => {
+  const [activeTab, setActiveTab] = useState<'mtproto' | 'bot'>(
+    config.authMode === 'bot' && !config.mtprotoConnected ? 'bot' : 'mtproto'
+  );
+
+  // Bot API state
   const [botToken, setBotToken] = useState('');
   const [chatId, setChatId] = useState(config.chatId || '');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
 
+  // MTProto User Account (2 GB) state
+  const [apiIdInput, setApiIdInput] = useState(config.apiId ? String(config.apiId) : '');
+  const [apiHashInput, setApiHashInput] = useState('');
+  const [phoneInput, setPhoneInput] = useState(config.phoneNumber || '');
+  const [mtprotoChatId, setMtprotoChatId] = useState(config.chatId || 'me');
+  const [otpStep, setOtpStep] = useState<'request' | 'verify'>('request');
+  const [otpCode, setOtpCode] = useState('');
+  const [twoFaPassword, setTwoFaPassword] = useState('');
+  const [mtprotoBusy, setMtprotoBusy] = useState(false);
+  const [mtprotoError, setMtprotoError] = useState<string | null>(null);
+  const [mtprotoSuccess, setMtprotoSuccess] = useState<string | null>(null);
+
   React.useEffect(() => {
     if (config.chatId && !chatId) {
       setChatId(config.chatId);
     }
-  }, [config.chatId, chatId]);
+    if (config.chatId && mtprotoChatId === 'me') {
+      setMtprotoChatId(config.chatId);
+    }
+    if (config.apiId && !apiIdInput) {
+      setApiIdInput(String(config.apiId));
+    }
+    if (config.phoneNumber && !phoneInput) {
+      setPhoneInput(config.phoneNumber);
+    }
+  }, [config.chatId, config.apiId, config.phoneNumber, chatId, mtprotoChatId, apiIdInput, phoneInput]);
 
-  const handleConnect = async (e: React.FormEvent) => {
+  const handleConnectBot = async (e: React.FormEvent) => {
     e.preventDefault();
     setSaving(true);
     setError(null);
@@ -804,6 +879,91 @@ export const TelegramStorageView: React.FC<TelegramStorageViewProps> = ({
     }
   };
 
+  const handleRequestOtp = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!onSendMtprotoCode) return;
+    setMtprotoBusy(true);
+    setMtprotoError(null);
+    setMtprotoSuccess(null);
+    try {
+      const parsedApiId = Number(apiIdInput.trim());
+      if (!parsedApiId || Number.isNaN(parsedApiId)) {
+        throw new Error('Please enter a valid numeric Telegram API ID from my.telegram.org.');
+      }
+      if (!apiHashInput.trim()) {
+        throw new Error('Please enter your Telegram API Hash from my.telegram.org.');
+      }
+      if (!phoneInput.trim()) {
+        throw new Error('Please enter your phone number in international format (e.g. +8801...).');
+      }
+      const res = await onSendMtprotoCode({
+        apiId: parsedApiId,
+        apiHash: apiHashInput.trim(),
+        phoneNumber: phoneInput.trim(),
+        chatId: mtprotoChatId.trim() || 'me',
+      });
+      setOtpStep('verify');
+      setMtprotoSuccess(
+        res.message ||
+          'OTP code sent to your Telegram app! Enter the 5-digit login code below.'
+      );
+    } catch (err: unknown) {
+      setMtprotoError(
+        err instanceof Error ? err.message : 'Failed to request Telegram OTP login code'
+      );
+    } finally {
+      setMtprotoBusy(false);
+    }
+  };
+
+  const handleVerifyOtp = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!onVerifyMtprotoCode) return;
+    setMtprotoBusy(true);
+    setMtprotoError(null);
+    setMtprotoSuccess(null);
+    try {
+      if (!otpCode.trim()) {
+        throw new Error('Please enter the 5-digit OTP code sent to your Telegram app.');
+      }
+      await onVerifyMtprotoCode({
+        phoneCode: otpCode.trim(),
+        password: twoFaPassword.trim() || undefined,
+        chatId: mtprotoChatId.trim() || 'me',
+      });
+      setOtpCode('');
+      setTwoFaPassword('');
+      setOtpStep('request');
+      setMtprotoSuccess(
+        'Telegram User Account connected via MTProto! Direct uploads and streams up to 2 GB per file are now active.'
+      );
+    } catch (err: unknown) {
+      setMtprotoError(
+        err instanceof Error ? err.message : 'Failed to verify Telegram OTP code'
+      );
+    } finally {
+      setMtprotoBusy(false);
+    }
+  };
+
+  const handleDisconnectMtprotoClick = async () => {
+    if (!onDisconnectMtproto) return;
+    setMtprotoBusy(true);
+    setMtprotoError(null);
+    setMtprotoSuccess(null);
+    try {
+      await onDisconnectMtproto();
+      setOtpStep('request');
+      setMtprotoSuccess('Disconnected Telegram MTProto user session.');
+    } catch (err: unknown) {
+      setMtprotoError(
+        err instanceof Error ? err.message : 'Could not disconnect MTProto session'
+      );
+    } finally {
+      setMtprotoBusy(false);
+    }
+  };
+
   return (
     <div className="max-w-2xl space-y-6">
       <div className="border-b border-[#2C2824] pb-4">
@@ -811,113 +971,362 @@ export const TelegramStorageView: React.FC<TelegramStorageViewProps> = ({
           Administrator Only — Strictly Hidden from Public Users
         </div>
         <h1 className="text-lg sm:text-xl font-bold text-[#F2EFE9] mt-0.5">
-          Permanent Cross-Device Storage Node Setup
+          Global Telegram Cloud Storage Vault (2 GB MTProto &amp; Bot Node)
         </h1>
         <p className="text-xs text-[#9E978E] mt-1">
-          Connect your private Telegram Bot &amp; Channel below to store uploaded binary files
-          permanently across all devices. Regular users never see this panel or any mention of
-          Telegram.
+          Sign in with your Telegram User Account via MTProto to unlock single-file uploads up to{' '}
+          <strong className="text-[#F2EFE9]">2 GB</strong> without 20 MB bot limits, or use a
+          standard Bot Token. Regular users never see this panel.
         </p>
       </div>
 
+      {/* Active Connection Status Card */}
       <div className="p-4 sm:p-5 bg-[#1C1A17] border border-[#2C2824] flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div className="flex items-start sm:items-center gap-3">
           <ShieldCheck
             className={`w-5 h-5 shrink-0 mt-0.5 sm:mt-0 ${
-              config.connected ? 'text-[#2E9E6B]' : 'text-[#D99B26]'
+              config.mtprotoConnected || config.connected ? 'text-[#2E9E6B]' : 'text-[#D99B26]'
             }`}
           />
           <div>
             <div className="text-sm font-bold text-[#F2EFE9]">
-              {config.connected
-                ? `Permanent Storage Active (@${config.botUsername || 'Connected'})`
-                : 'Local Vault Active — Connect Bot for Cross-Device Binary Sync'}
+              {config.mtprotoConnected
+                ? `2 GB MTProto User Vault Active (${
+                    config.accountName ||
+                    config.accountUsername ||
+                    config.mtprotoUser ||
+                    config.phoneNumber ||
+                    'Connected'
+                  })`
+                : config.connected
+                ? `Bot Storage Node Active (@${config.botUsername || 'Connected'})`
+                : 'Local Vault Active — Connect Telegram Account for 2 GB Cross-Device Sync'}
             </div>
-            <div className="text-xs text-[#9E978E]">
-              {config.connected
+            <div className="text-xs text-[#9E978E] mt-0.5">
+              {config.mtprotoConnected
+                ? `Direct un-split file uploads up to 2,000 MB (2 GB) to target chat: ${
+                    config.chatId || 'me (Saved Messages)'
+                  }`
+                : config.connected
                 ? `Auto-splitting & syncing files in 19 MB chunks to Channel ${config.chatId}`
-                : 'File list syncs via Firestore; connect Bot Token + Channel ID below so file payloads download on any device'}
+                : 'Log in with your Telegram phone number + OTP below to enable 2 GB direct uploads.'}
             </div>
           </div>
         </div>
 
-        {config.connected && (
+        {config.mtprotoConnected ? (
+          <button
+            type="button"
+            disabled={mtprotoBusy}
+            onClick={handleDisconnectMtprotoClick}
+            className="min-h-[40px] px-4 py-2 text-xs font-semibold text-[#D94848] border border-[#2C2824] hover:border-[#D94848] bg-[#141311] shrink-0 cursor-pointer"
+          >
+            Disconnect 2 GB Vault
+          </button>
+        ) : config.connected ? (
           <button
             type="button"
             onClick={() => onSaveConfig({ clearCredentials: true })}
-            className="min-h-[44px] px-4 py-2 text-xs font-medium text-[#D94848] border border-[#2C2824] bg-[#141311] cursor-pointer"
+            className="min-h-[40px] px-4 py-2 text-xs font-medium text-[#D94848] border border-[#2C2824] bg-[#141311] shrink-0 cursor-pointer"
           >
-            Disconnect
+            Disconnect Bot
           </button>
-        )}
+        ) : null}
       </div>
 
-      <div className="p-4 bg-[#141311] border border-[#2C2824] space-y-2 text-xs text-[#9E978E]">
-        <div className="font-bold text-[#F2EFE9]">Quick 2-Step Setup for Permanent Files:</div>
-        <div>
-          1. Open <strong className="text-[#F2EFE9]">@BotFather</strong> on Telegram, send{' '}
-          <code className="text-[#D97757]">/newbot</code>, and copy the HTTP API Token.
-        </div>
-        <div>
-          2. Create a <strong className="text-[#F2EFE9]">Private Channel</strong>, add your Bot as
-          an <strong className="text-[#F2EFE9]">Administrator</strong> (with Post Messages
-          enabled), and paste the Channel Chat ID (starts with{' '}
-          <code className="text-[#D97757]">-100...</code>).
-        </div>
+      {/* Mode Switcher Tabs */}
+      <div className="grid grid-cols-2 border border-[#2C2824] bg-[#141311] p-1 gap-1">
+        <button
+          type="button"
+          onClick={() => setActiveTab('mtproto')}
+          className={`min-h-[42px] px-3 py-2 text-xs font-bold flex items-center justify-center gap-2 transition-colors cursor-pointer ${
+            activeTab === 'mtproto'
+              ? 'bg-[#D97757] text-[#141311]'
+              : 'text-[#9E978E] hover:text-[#F2EFE9]'
+          }`}
+        >
+          <Smartphone className="w-4 h-4 shrink-0" />
+          <span>Telegram Account (2 GB MTProto)</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => setActiveTab('bot')}
+          className={`min-h-[42px] px-3 py-2 text-xs font-bold flex items-center justify-center gap-2 transition-colors cursor-pointer ${
+            activeTab === 'bot'
+              ? 'bg-[#D97757] text-[#141311]'
+              : 'text-[#9E978E] hover:text-[#F2EFE9]'
+          }`}
+        >
+          <KeyRound className="w-4 h-4 shrink-0" />
+          <span>Bot Token (20 MB Chunked)</span>
+        </button>
       </div>
 
-      <form
-        onSubmit={handleConnect}
-        className="p-5 sm:p-6 bg-[#1C1A17] border border-[#2C2824] space-y-4"
-      >
-        <div className="space-y-1.5">
-          <label className="block text-xs font-semibold text-[#F2EFE9]">
-            1. Bot Token (From @BotFather)
-          </label>
-          <input
-            type="password"
-            value={botToken}
-            onChange={(e) => setBotToken(e.target.value)}
-            placeholder={
-              config.connected
-                ? `Saved (${config.maskedToken || '••••••••'}) — paste new token to update`
-                : 'e.g. 7123456789:AAHxyz...'
-            }
-            className="w-full min-h-[44px] bg-[#141311] border border-[#2C2824] px-3.5 py-2.5 text-sm text-[#F2EFE9] focus:outline-none focus:border-[#D97757]"
-          />
+      {activeTab === 'mtproto' ? (
+        <div className="space-y-4">
+          <div className="p-4 bg-[#141311] border border-[#2C2824] space-y-2 text-xs text-[#9E978E]">
+            <div className="font-bold text-[#F2EFE9]">
+              How to Connect Your Telegram Account for 2 GB Uploads:
+            </div>
+            <div>
+              1. Go to{' '}
+              <a
+                href="https://my.telegram.org"
+                target="_blank"
+                rel="noreferrer"
+                className="text-[#D97757] underline font-semibold"
+              >
+                my.telegram.org
+              </a>
+              , log in with your phone number, open{' '}
+              <strong className="text-[#F2EFE9]">API development tools</strong>, and copy your{' '}
+              <code className="text-[#D97757]">App api_id</code> and{' '}
+              <code className="text-[#D97757]">App api_hash</code>.
+            </div>
+            <div>
+              2. Enter your API ID, API Hash, and Phone Number below, then enter the 5-digit OTP
+              code sent to your Telegram app.
+            </div>
+            <div>
+              3. Set Target Chat ID to <code className="text-[#D97757]">me</code> to store files in
+              your personal <strong className="text-[#F2EFE9]">Saved Messages</strong>, or paste your
+              private Channel ID (<code className="text-[#D97757]">-100...</code>).
+            </div>
+          </div>
+
+          {otpStep === 'request' ? (
+            <form
+              onSubmit={handleRequestOtp}
+              className="p-5 sm:p-6 bg-[#1C1A17] border border-[#2C2824] space-y-4"
+            >
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div className="space-y-1.5">
+                  <label className="block text-xs font-semibold text-[#F2EFE9]">
+                    1. Telegram API ID (my.telegram.org)
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={apiIdInput}
+                    onChange={(e) => setApiIdInput(e.target.value)}
+                    placeholder="e.g. 24819204"
+                    className="w-full min-h-[44px] bg-[#141311] border border-[#2C2824] px-3.5 py-2.5 text-sm text-[#F2EFE9] focus:outline-none focus:border-[#D97757]"
+                  />
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="block text-xs font-semibold text-[#F2EFE9]">
+                    2. Telegram API Hash
+                  </label>
+                  <input
+                    type="password"
+                    required
+                    value={apiHashInput}
+                    onChange={(e) => setApiHashInput(e.target.value)}
+                    placeholder={
+                      config.maskedApiHash
+                        ? `Saved (${config.maskedApiHash}) — paste to re-auth`
+                        : 'e.g. a1b2c3d4e5f6...'
+                    }
+                    className="w-full min-h-[44px] bg-[#141311] border border-[#2C2824] px-3.5 py-2.5 text-sm text-[#F2EFE9] focus:outline-none focus:border-[#D97757]"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div className="space-y-1.5">
+                  <label className="block text-xs font-semibold text-[#F2EFE9]">
+                    3. Telegram Phone Number (With Country Code)
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={phoneInput}
+                    onChange={(e) => setPhoneInput(e.target.value)}
+                    placeholder="e.g. +8801712345678"
+                    className="w-full min-h-[44px] bg-[#141311] border border-[#2C2824] px-3.5 py-2.5 text-sm text-[#F2EFE9] focus:outline-none focus:border-[#D97757]"
+                  />
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="block text-xs font-semibold text-[#F2EFE9]">
+                    4. Target Storage Chat / Channel ID
+                  </label>
+                  <input
+                    type="text"
+                    value={mtprotoChatId}
+                    onChange={(e) => setMtprotoChatId(e.target.value)}
+                    placeholder="me (Saved Messages) or -100..."
+                    className="w-full min-h-[44px] bg-[#141311] border border-[#2C2824] px-3.5 py-2.5 text-sm text-[#F2EFE9] focus:outline-none focus:border-[#D97757]"
+                  />
+                </div>
+              </div>
+
+              {mtprotoError && <p className="text-xs text-[#D94848]">{mtprotoError}</p>}
+              {mtprotoSuccess && <p className="text-xs text-[#2E9E6B]">{mtprotoSuccess}</p>}
+
+              <div className="flex items-center justify-end pt-2 border-t border-[#2C2824]">
+                <button
+                  type="submit"
+                  disabled={mtprotoBusy}
+                  className="w-full sm:w-auto min-h-[44px] flex items-center justify-center gap-2 px-5 py-2.5 text-xs font-bold bg-[#D97757] text-[#141311] hover:bg-[#E08568] cursor-pointer disabled:opacity-50"
+                >
+                  {mtprotoBusy ? (
+                    <RefreshCw className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <Send className="w-4 h-4" />
+                  )}
+                  <span>
+                    {mtprotoBusy ? 'Sending OTP Code...' : 'Send Login OTP to Telegram'}
+                  </span>
+                </button>
+              </div>
+            </form>
+          ) : (
+            <form
+              onSubmit={handleVerifyOtp}
+              className="p-5 sm:p-6 bg-[#1C1A17] border border-[#D97757] space-y-4"
+            >
+              <div className="flex items-center justify-between border-b border-[#2C2824] pb-3">
+                <div>
+                  <div className="text-sm font-bold text-[#F2EFE9]">
+                    Enter Telegram Login Code (OTP)
+                  </div>
+                  <div className="text-xs text-[#9E978E]">
+                    Check the official Telegram app on {phoneInput} for your 5-digit login code.
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setOtpStep('request')}
+                  className="px-3 py-1.5 text-xs text-[#9E978E] hover:text-[#F2EFE9] border border-[#2C2824] bg-[#141311] cursor-pointer"
+                >
+                  Back
+                </button>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div className="space-y-1.5">
+                  <label className="block text-xs font-semibold text-[#F2EFE9]">
+                    Telegram 5-Digit OTP Code
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={otpCode}
+                    onChange={(e) => setOtpCode(e.target.value)}
+                    placeholder="e.g. 48291"
+                    className="w-full min-h-[44px] bg-[#141311] border border-[#2C2824] px-3.5 py-2.5 text-sm font-mono tracking-widest text-[#F2EFE9] focus:outline-none focus:border-[#D97757]"
+                  />
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="block text-xs font-semibold text-[#F2EFE9]">
+                    2FA Cloud Password (Only if enabled)
+                  </label>
+                  <input
+                    type="password"
+                    value={twoFaPassword}
+                    onChange={(e) => setTwoFaPassword(e.target.value)}
+                    placeholder="Leave blank if no 2FA password"
+                    className="w-full min-h-[44px] bg-[#141311] border border-[#2C2824] px-3.5 py-2.5 text-sm text-[#F2EFE9] focus:outline-none focus:border-[#D97757]"
+                  />
+                </div>
+              </div>
+
+              {mtprotoError && <p className="text-xs text-[#D94848]">{mtprotoError}</p>}
+              {mtprotoSuccess && <p className="text-xs text-[#2E9E6B]">{mtprotoSuccess}</p>}
+
+              <div className="flex items-center justify-end pt-2 border-t border-[#2C2824]">
+                <button
+                  type="submit"
+                  disabled={mtprotoBusy}
+                  className="w-full sm:w-auto min-h-[44px] flex items-center justify-center gap-2 px-6 py-2.5 text-xs font-bold bg-[#D97757] text-[#141311] hover:bg-[#E08568] cursor-pointer disabled:opacity-50"
+                >
+                  {mtprotoBusy ? (
+                    <RefreshCw className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <Check className="w-4 h-4" />
+                  )}
+                  <span>
+                    {mtprotoBusy ? 'Verifying & Connecting...' : 'Verify OTP & Connect 2 GB Vault'}
+                  </span>
+                </button>
+              </div>
+            </form>
+          )}
         </div>
+      ) : (
+        <div className="space-y-4">
+          <div className="p-4 bg-[#141311] border border-[#2C2824] space-y-2 text-xs text-[#9E978E]">
+            <div className="font-bold text-[#F2EFE9]">Standard Bot Token Setup (19 MB Chunks):</div>
+            <div>
+              1. Open <strong className="text-[#F2EFE9]">@BotFather</strong> on Telegram, send{' '}
+              <code className="text-[#D97757]">/newbot</code>, and copy the HTTP API Token.
+            </div>
+            <div>
+              2. Create a <strong className="text-[#F2EFE9]">Private Channel</strong>, add your Bot
+              as an <strong className="text-[#F2EFE9]">Administrator</strong> (with Post Messages
+              enabled), and paste the Channel Chat ID (starts with{' '}
+              <code className="text-[#D97757]">-100...</code>).
+            </div>
+          </div>
 
-        <div className="space-y-1.5">
-          <label className="block text-xs font-semibold text-[#F2EFE9]">
-            2. Private Storage Channel Chat ID
-          </label>
-          <input
-            type="text"
-            value={chatId}
-            onChange={(e) => setChatId(e.target.value)}
-            placeholder="e.g. -1002198471092"
-            className="w-full min-h-[44px] bg-[#141311] border border-[#2C2824] px-3.5 py-2.5 text-sm text-[#F2EFE9] focus:outline-none focus:border-[#D97757]"
-          />
-        </div>
-
-        {error && <p className="text-xs text-[#D94848]">{error}</p>}
-        {successMsg && <p className="text-xs text-[#2E9E6B]">{successMsg}</p>}
-
-        <div className="flex items-center justify-end pt-2 border-t border-[#2C2824]">
-          <button
-            type="submit"
-            disabled={saving}
-            className="w-full sm:w-auto min-h-[44px] flex items-center justify-center gap-2 px-5 py-2.5 text-xs font-bold bg-[#D97757] text-[#141311] hover:bg-[#E08568] cursor-pointer disabled:opacity-50"
+          <form
+            onSubmit={handleConnectBot}
+            className="p-5 sm:p-6 bg-[#1C1A17] border border-[#2C2824] space-y-4"
           >
-            {saving ? (
-              <RefreshCw className="w-4 h-4 animate-spin" />
-            ) : (
-              <Send className="w-4 h-4" />
-            )}
-            {saving ? 'Verifying & Syncing...' : 'Save & Sync Storage Node'}
-          </button>
+            <div className="space-y-1.5">
+              <label className="block text-xs font-semibold text-[#F2EFE9]">
+                1. Bot Token (From @BotFather)
+              </label>
+              <input
+                type="password"
+                value={botToken}
+                onChange={(e) => setBotToken(e.target.value)}
+                placeholder={
+                  config.connected
+                    ? `Saved (${config.maskedToken || '••••••••'}) — paste new token to update`
+                    : 'e.g. 7123456789:AAHxyz...'
+                }
+                className="w-full min-h-[44px] bg-[#141311] border border-[#2C2824] px-3.5 py-2.5 text-sm text-[#F2EFE9] focus:outline-none focus:border-[#D97757]"
+              />
+            </div>
+
+            <div className="space-y-1.5">
+              <label className="block text-xs font-semibold text-[#F2EFE9]">
+                2. Private Storage Channel Chat ID
+              </label>
+              <input
+                type="text"
+                value={chatId}
+                onChange={(e) => setChatId(e.target.value)}
+                placeholder="e.g. -1002198471092"
+                className="w-full min-h-[44px] bg-[#141311] border border-[#2C2824] px-3.5 py-2.5 text-sm text-[#F2EFE9] focus:outline-none focus:border-[#D97757]"
+              />
+            </div>
+
+            {error && <p className="text-xs text-[#D94848]">{error}</p>}
+            {successMsg && <p className="text-xs text-[#2E9E6B]">{successMsg}</p>}
+
+            <div className="flex items-center justify-end pt-2 border-t border-[#2C2824]">
+              <button
+                type="submit"
+                disabled={saving}
+                className="w-full sm:w-auto min-h-[44px] flex items-center justify-center gap-2 px-5 py-2.5 text-xs font-bold bg-[#D97757] text-[#141311] hover:bg-[#E08568] cursor-pointer disabled:opacity-50"
+              >
+                {saving ? (
+                  <RefreshCw className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Send className="w-4 h-4" />
+                )}
+                {saving ? 'Verifying & Syncing...' : 'Save & Sync Bot Node'}
+              </button>
+            </div>
+          </form>
         </div>
-      </form>
+      )}
     </div>
   );
 };
+

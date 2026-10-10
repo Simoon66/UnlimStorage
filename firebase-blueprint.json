@@ -240,7 +240,7 @@
     },
     "StorageNodeConfig": {
       "title": "StorageNodeConfig",
-      "description": "Admin-configured Telegram storage bridge credentials for cross-device binary persistence.",
+      "description": "Admin-configured Telegram storage bridge credentials (Bot API or 2GB MTProto User Account) for cross-device binary persistence.",
       "type": "object",
       "properties": {
         "id": {
@@ -250,6 +250,12 @@
           "maxLength": 128,
           "pattern": "^[a-zA-Z0-9_\\-]+$"
         },
+        "authMode": {
+          "type": "string",
+          "description": "Active Telegram authentication mode ('mtproto' or 'bot').",
+          "enum": ["mtproto", "bot"],
+          "maxLength": 32
+        },
         "botToken": {
           "type": "string",
           "description": "Telegram Bot HTTP API token.",
@@ -257,7 +263,7 @@
         },
         "chatId": {
           "type": "string",
-          "description": "Private Telegram channel or group chat ID.",
+          "description": "Private Telegram channel, Saved Messages ('me'), or group chat ID.",
           "maxLength": 64
         },
         "botUsername": {
@@ -268,6 +274,36 @@
         "autoSyncUploads": {
           "type": "boolean",
           "description": "Whether uploads automatically sync to Telegram."
+        },
+        "apiId": {
+          "type": "string",
+          "description": "Telegram MTProto App API ID from my.telegram.org.",
+          "maxLength": 32
+        },
+        "apiHash": {
+          "type": "string",
+          "description": "Telegram MTProto App API Hash from my.telegram.org.",
+          "maxLength": 128
+        },
+        "phoneNumber": {
+          "type": "string",
+          "description": "Admin Telegram user account phone number.",
+          "maxLength": 64
+        },
+        "mtprotoSession": {
+          "type": "string",
+          "description": "Authorized GramJS StringSession for 2GB MTProto file transfers.",
+          "maxLength": 2048
+        },
+        "accountName": {
+          "type": "string",
+          "description": "Connected Telegram user account display name.",
+          "maxLength": 120
+        },
+        "accountUsername": {
+          "type": "string",
+          "description": "Connected Telegram user account @username.",
+          "maxLength": 120
         },
         "updatedAt": {
           "type": "string",

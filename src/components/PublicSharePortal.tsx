@@ -10,9 +10,12 @@ import {
   Music,
   CheckCircle2,
   Loader2,
+  Code2,
+  Check,
 } from 'lucide-react';
 import { formatBytes, formatShortDate } from '../utils/format';
 import { apiFetch } from '../services/clientCloudFallback';
+import { YouTubeIframePlayer } from './YouTubeIframePlayer';
 
 interface PublicShareMetadata {
   token: string;
@@ -49,6 +52,11 @@ export const PublicSharePortal: React.FC<PublicSharePortalProps> = ({
   token,
   onExitPublicPortal,
 }) => {
+  const isEmbedMode = React.useMemo(() => {
+    const params = new URLSearchParams(window.location.search);
+    return params.get('embed') === '1' || params.get('embed') === 'true';
+  }, []);
+
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [share, setShare] = useState<PublicShareMetadata | null>(null);
@@ -59,6 +67,19 @@ export const PublicSharePortal: React.FC<PublicSharePortalProps> = ({
   const [downloading, setDownloading] = useState(false);
   const [downloadError, setDownloadError] = useState<string | null>(null);
   const [downloadProgress, setDownloadProgress] = useState<DownloadProgressState | null>(null);
+
+  // Video stream state for JW Player style playback
+  const [videoStreamUrl, setVideoStreamUrl] = useState<string | null>(null);
+  const [loadingVideoStream, setLoadingVideoStream] = useState(false);
+  const [copiedEmbedCode, setCopiedEmbedCode] = useState(false);
+
+  const isVideoShare = React.useMemo(() => {
+    if (!share) return false;
+    return (
+      share.fileMimeType.startsWith('video/') ||
+      /\.(mp4|webm|mov|mkv|avi|m4v)$/i.test(share.fileName)
+    );
+  }, [share]);
 
   useEffect(() => {
     let active = true;
@@ -90,6 +111,53 @@ export const PublicSharePortal: React.FC<PublicSharePortalProps> = ({
       active = false;
     };
   }, [token]);
+
+  // Automatically prepare video stream URL when unlocked and share is a video
+  useEffect(() => {
+    if (!share || !unlockedKey || !isVideoShare) return;
+    let active = true;
+    let createdBlobUrl: string | null = null;
+
+    const loadStream = async () => {
+      setLoadingVideoStream(true);
+      try {
+        const streamEndpoint = `/api/public/share/${encodeURIComponent(
+          share.token
+        )}/download?key=${encodeURIComponent(unlockedKey)}&password=${encodeURIComponent(
+          passwordInput
+        )}`;
+        const res = await apiFetch(streamEndpoint);
+        if (!res.ok) return;
+        const rawBlob = await res.blob();
+        if (rawBlob.size <= 64) return;
+        const normalizedMime =
+          share.fileName.toLowerCase().endsWith('.mkv') ||
+          share.fileMimeType === 'video/x-matroska'
+            ? 'video/webm'
+            : share.fileMimeType.startsWith('video/')
+            ? share.fileMimeType
+            : 'video/mp4';
+        const videoBlob = new Blob([rawBlob], { type: normalizedMime });
+        createdBlobUrl = URL.createObjectURL(videoBlob);
+        if (active) {
+          setVideoStreamUrl(createdBlobUrl);
+        }
+      } catch {
+        // ignore preview stream failure; download button still works
+      } finally {
+        if (active) setLoadingVideoStream(false);
+      }
+    };
+
+    loadStream();
+
+    return () => {
+      active = false;
+      if (createdBlobUrl) {
+        URL.revokeObjectURL(createdBlobUrl);
+      }
+    };
+  }, [share, unlockedKey, isVideoShare, passwordInput]);
 
   useEffect(() => {
     const handleProgress = (event: Event) => {
@@ -173,7 +241,8 @@ export const PublicSharePortal: React.FC<PublicSharePortalProps> = ({
       }
 
       let blob: Blob;
-      const contentType = res.headers.get('Content-Type') || share.fileMimeType || 'application/octet-stream';
+      const contentType =
+        res.headers.get('Content-Type') || share.fileMimeType || 'application/octet-stream';
       const totalBytes = Number(res.headers.get('Content-Length')) || share.fileSizeBytes || 0;
 
       if (res.body && typeof res.body.getReader === 'function') {
@@ -258,6 +327,93 @@ export const PublicSharePortal: React.FC<PublicSharePortalProps> = ({
     return <FileText className="w-5 h-5 sm:w-6 sm:h-6 text-[#D97757]" />;
   };
 
+  // ============================================================================
+  // CLEAN JW PLAYER IFRAME EMBED MODE (?share=TOKEN&embed=1)
+  // ============================================================================
+  if (isEmbedMode) {
+    if (loading || loadingVideoStream) {
+      return (
+        <div className="w-screen h-screen bg-black flex items-center justify-center text-white">
+          <div className="w-9 h-9 rounded-full border-2 border-white/20 border-t-[#D97757] animate-spin" />
+        </div>
+      );
+    }
+
+    if (error || !share) {
+      return (
+        <div className="w-screen h-screen bg-black flex flex-col items-center justify-center text-white p-4 text-center space-y-2">
+          <AlertTriangle className="w-7 h-7 text-[#D94848]" />
+          <div className="text-sm font-semibold">Video Unavailable</div>
+          <div className="text-xs text-white/60">
+            {error || 'This embedded stream link has expired or been removed.'}
+          </div>
+        </div>
+      );
+    }
+
+    if (share.hasPassword && !unlockedKey) {
+      return (
+        <div className="w-screen h-screen bg-black flex items-center justify-center p-4 text-white">
+          <form
+            onSubmit={handleVerifyPassword}
+            className="w-full max-w-sm bg-[#141311] border border-[#2C2824] p-5 space-y-3"
+          >
+            <div className="flex items-center gap-2 text-xs font-semibold text-[#F2EFE9]">
+              <Lock className="w-4 h-4 text-[#D97757]" />
+              <span>Protected Video Stream</span>
+            </div>
+            <div className="flex gap-2">
+              <input
+                type="password"
+                value={passwordInput}
+                onChange={(e) => setPasswordInput(e.target.value)}
+                placeholder="Enter password..."
+                className="flex-1 min-h-[40px] bg-black border border-[#2C2824] px-3 py-2 text-xs text-white focus:outline-none focus:border-[#D97757]"
+                required
+              />
+              <button
+                type="submit"
+                disabled={verifying}
+                className="min-h-[40px] px-4 py-2 text-xs font-bold bg-[#D97757] text-[#141311] cursor-pointer"
+              >
+                {verifying ? '...' : 'Unlock'}
+              </button>
+            </div>
+            {authError && <p className="text-[11px] text-[#D94848]">{authError}</p>}
+          </form>
+        </div>
+      );
+    }
+
+    if (videoStreamUrl) {
+      return (
+        <div className="w-screen h-screen bg-black overflow-hidden">
+          <YouTubeIframePlayer
+            fileId={share.token}
+            fileName={share.fileName}
+            srcUrl={videoStreamUrl}
+            rawBlob={null}
+            isMkv={share.fileName.toLowerCase().endsWith('.mkv')}
+            fullViewport={true}
+          />
+        </div>
+      );
+    }
+
+    return (
+      <div className="w-screen h-screen bg-black flex flex-col items-center justify-center text-white p-4 gap-3">
+        <div className="text-xs text-white/70">{share.fileName}</div>
+        <button
+          onClick={handleStartDownload}
+          disabled={downloading}
+          className="px-5 py-2.5 text-xs font-bold bg-[#D97757] text-[#141311] cursor-pointer"
+        >
+          {downloading ? 'Downloading...' : `Download (${formatBytes(share.fileSizeBytes)})`}
+        </button>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-[#141311] text-[#F2EFE9] flex flex-col justify-between">
       {/* Clean Phone-Friendly Header */}
@@ -286,7 +442,11 @@ export const PublicSharePortal: React.FC<PublicSharePortalProps> = ({
 
       {/* Centered Friendly File Card */}
       <main className="flex-1 flex items-center justify-center p-4 sm:p-6">
-        <div className="w-full max-w-lg bg-[#1C1A17] border border-[#2C2824]">
+        <div
+          className={`w-full ${
+            isVideoShare && unlockedKey ? 'max-w-3xl' : 'max-w-lg'
+          } bg-[#1C1A17] border border-[#2C2824]`}
+        >
           {loading ? (
             <div className="p-5 sm:p-8 space-y-4">
               <div className="h-12 w-12 bg-[#24211D] border border-[#2C2824] animate-pulse" />
@@ -333,6 +493,53 @@ export const PublicSharePortal: React.FC<PublicSharePortalProps> = ({
                   </div>
                 </div>
               </div>
+
+              {/* Clean JW Player Video Preview when unlocked */}
+              {isVideoShare && unlockedKey && (
+                <div className="space-y-2.5">
+                  {loadingVideoStream ? (
+                    <div className="w-full aspect-video bg-black border border-[#2C2824] flex flex-col items-center justify-center gap-2 text-xs text-[#9E978E]">
+                      <Loader2 className="w-6 h-6 text-[#D97757] animate-spin" />
+                      <span>Loading video stream...</span>
+                    </div>
+                  ) : videoStreamUrl ? (
+                    <YouTubeIframePlayer
+                      fileId={share.token}
+                      fileName={share.fileName}
+                      srcUrl={videoStreamUrl}
+                      rawBlob={null}
+                      isMkv={share.fileName.toLowerCase().endsWith('.mkv')}
+                      fullViewport={false}
+                    />
+                  ) : null}
+
+                  <div className="flex items-center justify-between gap-2 pt-1">
+                    <span className="text-[11px] text-[#9E978E]">
+                      Clean JW Player stream · Speed &amp; Fullscreen controls
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const embedUrl = `${window.location.origin}/?share=${encodeURIComponent(
+                          share.token
+                        )}&embed=1`;
+                        const snippet = `<iframe src="${embedUrl}" width="100%" height="480" frameborder="0" allowfullscreen allow="autoplay; fullscreen"></iframe>`;
+                        navigator.clipboard.writeText(snippet);
+                        setCopiedEmbedCode(true);
+                        setTimeout(() => setCopiedEmbedCode(false), 2000);
+                      }}
+                      className="min-h-[32px] px-3 py-1 text-[11px] font-semibold bg-[#141311] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center gap-1.5 cursor-pointer"
+                    >
+                      {copiedEmbedCode ? (
+                        <Check className="w-3.5 h-3.5 text-[#2E9E6B]" />
+                      ) : (
+                        <Code2 className="w-3.5 h-3.5 text-[#D97757]" />
+                      )}
+                      <span>{copiedEmbedCode ? 'Copied Iframe!' : 'Copy Embed Iframe'}</span>
+                    </button>
+                  </div>
+                </div>
+              )}
 
               {/* Password Box or Download Button */}
               <div className="pt-4 border-t border-[#2C2824]">
@@ -442,3 +649,4 @@ export const PublicSharePortal: React.FC<PublicSharePortalProps> = ({
     </div>
   );
 };
+

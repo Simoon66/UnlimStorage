@@ -244,6 +244,7 @@ export const CreateShareModal: React.FC<CreateShareModalProps> = ({
   const [share, setShare] = useState<ShareLink | null>(existingShare || null);
   const [creating, setCreating] = useState(!existingShare);
   const [copied, setCopied] = useState(false);
+  const [copiedEmbed, setCopiedEmbed] = useState(false);
 
   const [usePassword, setUsePassword] = useState<boolean>(
     existingShare ? existingShare.hasPassword : false
@@ -252,6 +253,10 @@ export const CreateShareModal: React.FC<CreateShareModalProps> = ({
   const [savingSettings, setSavingSettings] = useState(false);
   const [savedNotice, setSavedNotice] = useState<string | null>(null);
   const [createError, setCreateError] = useState<string | null>(null);
+
+  const isVideoFile =
+    file.mimeType.startsWith('video/') ||
+    /\.(mp4|webm|mov|mkv|avi|m4v)$/i.test(file.name);
 
   useEffect(() => {
     let active = true;
@@ -285,11 +290,22 @@ export const CreateShareModal: React.FC<CreateShareModalProps> = ({
     ? `${window.location.origin}/?share=${encodeURIComponent(share.token)}`
     : '';
 
+  const embedIframeCode = share
+    ? `<iframe src="${window.location.origin}/?share=${encodeURIComponent(share.token)}&embed=1" width="100%" height="480" frameborder="0" allow="autoplay; fullscreen" allowfullscreen></iframe>`
+    : '';
+
   const copyShareUrl = () => {
     if (!shareUrl) return;
     navigator.clipboard.writeText(shareUrl);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
+  };
+
+  const copyEmbedCode = () => {
+    if (!embedIframeCode) return;
+    navigator.clipboard.writeText(embedIframeCode);
+    setCopiedEmbed(true);
+    setTimeout(() => setCopiedEmbed(false), 2000);
   };
 
   const handleTogglePassword = async (checked: boolean) => {
@@ -394,6 +410,31 @@ export const CreateShareModal: React.FC<CreateShareModalProps> = ({
                 </button>
               </div>
             </div>
+
+            {isVideoFile && !usePassword && (
+              <div className="space-y-2">
+                <label className="block text-xs font-medium text-[#F2EFE9]">
+                  JW Player Iframe Embed Code
+                </label>
+                <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+                  <input
+                    type="text"
+                    readOnly
+                    value={embedIframeCode}
+                    onClick={(e) => (e.target as HTMLInputElement).select()}
+                    className="flex-1 min-h-[44px] bg-[#141311] border border-[#2C2824] px-3.5 py-2.5 text-xs font-mono text-[#9E978E]"
+                  />
+                  <button
+                    type="button"
+                    onClick={copyEmbedCode}
+                    className="min-h-[44px] px-4 py-2.5 text-xs font-semibold bg-[#24211D] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center justify-center gap-1.5 shrink-0 cursor-pointer"
+                  >
+                    {copiedEmbed ? <Check className="w-4 h-4 text-[#2E9E6B]" /> : <Copy className="w-4 h-4 text-[#D97757]" />}
+                    {copiedEmbed ? 'Iframe Copied!' : 'Copy Iframe'}
+                  </button>
+                </div>
+              </div>
+            )}
 
             <div className="p-4 bg-[#141311] border border-[#2C2824] space-y-3">
               <label className="flex items-center justify-between gap-3 cursor-pointer min-h-[44px]">
@@ -670,20 +711,6 @@ export const FileDetailDrawer: React.FC<FileDetailDrawerProps> = ({
             </div>
           ) : isVideo ? (
             <div className="space-y-2.5">
-              <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-[#9E978E]">
-                <div className="flex items-center gap-2 font-medium">
-                  <Film className="w-3.5 h-3.5 text-[#D97757]" />
-                  <span>
-                    {isMkv
-                      ? 'YouTube-Style MKV Iframe Player (Multi-Audio & Multi-Subtitle CC)'
-                      : 'YouTube-Style HD Video Iframe Player'}
-                  </span>
-                </div>
-                <span className="text-[11px] font-mono text-[#D97757]">
-                  Use Audio / CC buttons in player to switch tracks
-                </span>
-              </div>
-
               <YouTubeIframePlayer
                 key={`${file.id}_${videoContainerFallback}_${Boolean(localBlobUrl)}`}
                 fileId={file.id}

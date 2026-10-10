@@ -1,79 +1,77 @@
-# UnlimStorage — Permanent Cross-Device Cloud Sync, Hidden Telegram Storage Engine, Live MKV Multi-Track Demuxer & Interactive Toast Notifications
+# UnlimStorage — 2GB Telegram MTProto User Account Vault, Minimal JW Player Iframe & Real-Time Cross-Device Deletion Sync
 
-This upgrade makes uploaded files and folders permanently accessible across any device or browser signed into the same Google account, connects the hidden Telegram Bot storage engine for permanent multi-chunk binary persistence, adds real-time Matroska (`.mkv`) audio and subtitle stream demuxing inside the custom YouTube-style iframe player, and upgrades notifications with 4-second auto-dismiss, swipe gestures, and a close (`X`) button.
+This upgrade replaces the 20 MB Bot API limitation with a Global Admin Telegram User Account (MTProto) connection supporting up to 2 GB single-file uploads via direct Phone Number + OTP authentication in the Admin panel, streamlines the video embed into a clean JW Player-style interface with playback speed and fullscreen controls, and enforces real-time cross-device deletion synchronization so deleted files disappear immediately on all logged-in devices.
 
 ### User Review & Critical Decisions
 
 > [!IMPORTANT]
-> The following product and architectural choices have been confirmed from your answers and will guide the implementation:
+> The following architectural and UX choices have been confirmed from your answers and will govern the implementation:
 
-- **Confirmed Decision 1 — Hidden Telegram Storage Configuration**: Provide an Admin-only Storage Node configuration panel (visible strictly to `titumamma2425@gmail.com` and synced to Firestore so all devices share the active storage node) requiring only two credentials from Telegram:
-  1. **Bot Token** (from `@BotFather`, e.g., `123456789:AAF...`)
-  2. **Private Channel / Group Chat ID** (where the bot is an Admin, e.g., `-100...`)
-  Regular users never see any mention of Telegram anywhere in the UI.
-- **Confirmed Decision 2 — Cross-Device Permanent File & Folder Sync**: Synchronize every uploaded file's metadata, SHA-256 hash, folder location, and encrypted storage chunk manifest to Firestore, and automatically hydrate the user's full cloud drive (`cloudFiles` and `cloudFolders`) on login from any device or deployment URL.
-- **Confirmed Decision 3 — Interactive Toast Notifications**: Every notification toast automatically vanishes after **4 seconds** with a smooth visual countdown bar, and can also be dismissed immediately by **swiping left/right/up** or clicking the **Close (`X`) button**.
-- **Confirmed Decision 4 — Real-Time MKV Multi-Audio & Multi-Subtitle Demuxing**: Upgrade the custom YouTube-style iframe player with a real Matroska (`EBML` Cluster / `SimpleBlock` / `BlockGroup`) binary demuxer and WebAudio track synthesizer so switching between embedded audio tracks or subtitle tracks immediately changes the active audio output and subtitle overlay.
+- **Confirmed Decision 1 — Global Admin Telegram Account (2 GB MTProto Storage)**: A single Global Admin Telegram User Account powers the storage vault for the entire platform, allowing files up to **2 GB** (or 4 GB with Telegram Premium) to be transferred using Telegram's MTProto protocol (`GramJS`) into the Admin's private storage channel or Saved Messages without hitting the 20 MB Bot API wall.
+- **Confirmed Decision 2 — Direct Phone Number & OTP Login in Admin Panel**: The Admin panel includes a dedicated **Telegram MTProto Account Login** wizard where the administrator enters their Telegram API ID, API Hash, and Phone Number, receives the 5-digit Telegram login OTP (plus optional 2FA password), and saves the persistent `StringSession` to the server and Firestore.
+- **Confirmed Decision 3 — Minimal JW Player Style Iframe Video Player**: Both the in-app video preview and public `/embed` iframe use a clean, distraction-free **JW Player-style** dark player featuring only a smooth timeline scrubber, Play/Pause, Volume, Playback Speed selector (`0.5x` – `2x`), and Fullscreen toggle—removing extra headers, badges, and surrounding chrome.
+- **Confirmed Decision 4 — Real-Time Multi-Device File Deletion Sync (`onSnapshot` + Tombstones)**: Live Firestore `onSnapshot` listeners on `cloudFiles` and `cloudFolders`, paired with a persistent deleted-ID tombstone registry, guarantee that deleting a file or folder on Device A immediately purges it from Device B's state, localStorage, and IndexedDB cache without ever re-uploading it back.
 
 ---
 
 ### 1. Overview & Core Concept
 
 - **What It Does**:
-  1. **Cross-Device Permanent Cloud Vault**: When a user uploads a file on one device and logs in with the same Google account on another phone, PC, or deployment URL, their entire file list, folders, starred statuses, and storage quota load automatically from Firestore, while binary file chunks stream directly from the connected Telegram storage channel (or cloud chunk vault).
-  2. **Zero-Trace Admin Storage Node Setup**: Only the administrator (`titumamma2425@gmail.com`) can view and configure the Telegram Bot Token and Channel Chat ID. Once verified and saved in the Admin panel, the credentials are persisted in Firestore so both server and serverless/static deployments can push and pull 19 MB file chunks transparently.
-  3. **Real MKV Multi-Audio & Multi-Subtitle Switching**: Parses Matroska `Tracks`, `Cues`, and `Cluster` blocks directly from the `.mkv` binary stream, extracting embedded subtitle cues (`S_TEXT/UTF8`, `S_TEXT/ASS`, `S_TEXT/SSA`) across the entire file timeline and decoding/routing distinct audio tracks via WebAudio (`AudioContext` + multi-track buffer/decoder pipeline) so selecting Track 1, Track 2, or any subtitle language immediately changes playback.
-  4. **Dismissible & Swipeable Toast Stack**: Replaces static alerts with an interactive notification stack supporting a 4-second auto-vanish timer (paused on hover), touch/pointer swipe-to-dismiss gestures, and an explicit `X` close button.
-- **Target Audience / Persona**: Everyday cloud storage users who expect a clean, fast, Google Drive-style vault (`UnlimStorage`) with instant video streaming and cross-device file access, alongside an administrator who manages the underlying unlimited storage node privately.
-- **Key Value**: True permanent multi-device cloud storage, genuine multi-audio/subtitle MKV playback inside a YouTube-grade custom iframe player, and non-intrusive toast notifications.
+  1. **2 GB Telegram User Account (MTProto) Engine**: Connects the administrator's real Telegram account via MTProto (`GramJS`) so large videos and archives up to 2 GB stream directly in high-speed 512 KB MTProto parts without 20 MB Bot API limits, while retaining automatic fallback to chunked storage when needed.
+  2. **In-Dashboard Phone + OTP Authentication**: Allows the admin (`titumamma2425@gmail.com`) to sign into Telegram directly inside the **Storage Node** view using Phone Number -> OTP Code -> optional 2FA Password, generating a reusable encrypted MTProto session string.
+  3. **Simple JW Player Iframe Experience**: Replaces cluttered embed frames with a sleek, zero-distraction JW Player-inspired video canvas containing a responsive center play indicator, fluid red/terracotta progress bar, time display, playback speed menu, and fullscreen button.
+  4. **Instant Cross-Device Deletion & Sync**: Subscribes every logged-in browser/device to real-time Firestore change streams (`docChanges()`) so file creations, renames, folder changes, and deletions propagate live across all active sessions within milliseconds.
+- **Target Audience / Persona**: An administrator and authorized cloud vault users managing large multi-hundred-megabyte and multi-gigabyte media files across multiple devices who need fast uploads, clean embeddable video playback, and reliable multi-device state consistency.
+- **Key Value**: Unlocks up to 2 GB file transfers via Telegram MTProto, eliminates stale deleted files reappearing on secondary devices, and delivers a fast, distraction-free JW Player embed experience.
 
 ---
 
 ### 2. User Experience & Visual Design
 
 - **Key User Flows**:
-  1. **Connecting Permanent Storage (Admin Only)**:
-     - The Admin opens **Storage Node** in the sidebar -> enters the **Telegram Bot Token** (`@BotFather`) and **Channel Chat ID** (`-100...`) -> clicks **Verify & Save Permanently**.
-     - The app tests the bot connection, verifies channel write access, saves the configuration to Firestore, and activates automatic chunked cloud backup across all sessions.
-  2. **Uploading & Opening Files on Another Device**:
-     - A user uploads a file (with real chunked byte progress and a working **Cancel** button). The file is chunked into the permanent storage node and its record + chunk manifest is written to Firestore.
-     - When the user signs in on another browser or device, `UnlimStorage` queries Firestore for their `cloudFiles` and `cloudFolders`, populates their drive immediately, and streams/reassembles binary chunks on demand when previewing or downloading.
-  3. **Switching Audio & Subtitles in Custom YouTube Iframe Player**:
-     - Opening any `.mkv` or video file launches the custom YouTube-style `<iframe>` player.
-     - Clicking the **Audio Track (Headphones)** button opens the track selector showing all embedded Matroska audio streams (language, codec, channel layout). Selecting another track immediately switches the active audio decoder/WebAudio routing pipeline and confirms the switch on-screen.
-     - Clicking the **Subtitles (CC)** button lists all embedded MKV subtitle tracks plus an option to load `.srt`/`.ass`/`.vtt` files. Selecting any subtitle track renders live synchronized captions over the video frame.
-  4. **Interacting with Notifications**:
-     - Whenever an action completes (upload, move, plan claim, folder creation, track switch), a toast slides in at the bottom-right with a 4-second progress indicator, an `X` close button, and pointer/touch drag support so swiping > 60px smoothly flings it off-screen.
+  1. **Admin Telegram Account Login (Phone + OTP)**:
+     - The Admin opens **Storage Node** in the left sidebar and switches to **Telegram Account (2 GB MTProto)**.
+     - Enters **API ID** & **API Hash** (from `my.telegram.org`) and **Phone Number** (e.g., `+8801...`), then clicks **Send OTP Code**.
+     - Enters the **OTP Code** received in the Telegram app (and 2FA password if enabled) -> clicks **Verify & Connect 2 GB Vault**.
+     - The connected Telegram account name, phone number, and active `MTProto 2 GB Ready` status appear immediately and persist across restarts.
+  2. **High-Speed Large File Upload & Processing Screen**:
+     - When uploading large files (up to 2 GB), the user sees a clean, high-speed progress bar for the upload phase followed by a smooth **"Finalizing your file for instant streaming..."** processing screen (hiding all underlying chunking/MTProto encoding mechanics from end users).
+  3. **Minimal JW Player Style Video Playback**:
+     - Opening a video or loading an `/embed/{token}` iframe renders a full-bleed black video viewport.
+     - Moving the pointer reveals a minimal bottom control bar inspired by JW Player: Play/Pause, 10s Skip, Volume slider, tabular current/total time (`04:12 / 24:50`), Playback Speed selector (`0.5x`, `0.75x`, `1x`, `1.25x`, `1.5x`, `2x`), and Fullscreen toggle.
+  4. **Deleting a File While Logged In on Two Devices**:
+     - When the user deletes a file on Device 1, it is immediately deleted from the server, Firestore `cloudFiles/{fileId}`, and local IndexedDB, while recording a deletion tombstone.
+     - Device 2 (logged into the same account) receives the real-time `removed` event from Firestore `onSnapshot`, immediately removes the file from the UI table, and purges its local cache so the deleted file never lingers or re-syncs.
 - **Visual Identity & Theme**:
-  - *Aesthetic Direction*: Utilitarian Enterprise SaaS Vault (`UnlimStorage`) with high-contrast dark surfaces, clean 1px structural borders, and zero AI-slop clutter.
-  - *Color Palette & Mood*:
-    - Dominant 60% Neutral Canvas: Deep Obsidian (`#141311`) and Charcoal Surface (`#1C1A17`).
-    - Structural 30% Surfaces: Warm Slate Hairlines (`#2C2824`), Muted Stone Text (`#9E978E`), Primary Crisp Alabaster (`#F2EFE9`).
-    - Accent 10% Budget: Terracotta Action Accent (`#D97757`), Semantic Emerald (`#2E9E6B`) for verified storage states, Amber (`#D99B26`) for warnings, Crimson (`#D94E4E`) for errors/YouTube scrub bar (`#FF0000`).
+  - *Aesthetic Direction*: Utilitarian Enterprise SaaS Dashboard (`UnlimStorage`) paired with a minimalist cinema-black JW Player media viewport.
+  - *Color Palette & Mood* (60-30-10 Discipline):
+    - **60% Dominant Neutral Canvas**: Deep Obsidian (`#141311`) and Charcoal Workspace Surface (`#1C1A17`).
+    - **30% Structural Surfaces**: Hairline Slate Borders (`#2C2824`), Muted Stone Metadata (`#9E978E`), Crisp Alabaster Primary Text (`#F2EFE9`).
+    - **10% Accent Budget**: Terracotta Primary Accent (`#D97757`), Semantic Emerald (`#16A34A`) for connected MTProto status, Amber (`#D97706`) for OTP verification state, Crimson (`#DC2626`) for destructive actions.
   - *Typography & Hierarchy*:
-    - Display & Navigation: `Plus Jakarta Sans` / `Outfit` (600–700 weight, tight tracking).
-    - Body UI: `DM Sans` / `Plus Jakarta Sans` (400/500 weight, 14px–15px).
-    - Telemetry, File Sizes, Timestamps & Hash Digests: Monospace with strict `font-variant-numeric: tabular-nums` (`JetBrains Mono`).
+    - Display & Workspace Navigation: `Plus Jakarta Sans` (600–700 weight, tight tracking).
+    - Dense Table & Control Copy: `DM Sans` (400–500 weight, 13px–14px, single-line `whitespace-nowrap`).
+    - File Sizes, Timestamps, Speed Multipliers & OTP Inputs: `JetBrains Mono` with strict `font-variant-numeric: tabular-nums`.
   - *Component Styling & Layout*:
-    - 1440px full-viewport SaaS workspace with a 256px left navigation sidebar, single-row contextual header bar, and single-elevation data cards (`border border-[#2C2824]`, no nested card-in-card borders or thick left accent bars).
+    - Full 1440px desktop SaaS layout with a 256px sidebar, single-row contextual top header, compact 40px–44px table rows, and flat 1px structural borders (`border border-[#2C2824]`, zero nested card sandwiches or decorative pulsing dots).
 - **Interactive Feedback & Motion**:
-  - Compositor-only (`transform`, `opacity`) transitions under `180ms` (`cubic-bezier(0.16, 1, 0.3, 1)`).
-  - Toast swipe gestures track pointer delta in real time (`translateX(${deltaX}px)`) with opacity fade and instant dismissal on release or `X` click.
+  - Routine control transitions settle within `150ms` (`cubic-bezier(0.16, 1, 0.3, 1)`) using compositor-only `transform` and `opacity`.
+  - Video player controls auto-hide after 2.5 seconds of pointer inactivity during playback for an unobstructed viewing frame.
 
 ---
 
 ### 3. Key Product Decisions & Trade-Offs
 
-- **Decision 1 — Cross-Device Metadata + Chunk Manifest in Firestore with Binary Chunks in Telegram**:
-  - *Chosen Approach*: Store structured file & folder records (including the `telegramChunks` array of `file_id`s and `sha256` hashes) in Firestore (`cloudFiles` and `cloudFolders`), while storing the heavy binary payloads (up to multiple GBs) as 19 MB chunks in the private Telegram storage channel.
-  - *Why*: Firestore documents have a 1 MB limit and are designed for fast real-time metadata queries across devices, whereas Telegram's Bot API supports unlimited document chunks up to 20 MB per part for free permanent storage. Combining Firestore metadata sync with Telegram chunk storage makes files appear and download on any device worldwide.
-  - *Alternatives Considered*: Browser-only IndexedDB was fast on a single device, but data stayed trapped on the local browser and never appeared when logging in from another device.
-- **Decision 2 — In-Browser Matroska (`EBML`) Cluster Demuxer + Multi-Track Audio Engine**:
-  - *Chosen Approach*: Parse both the Matroska `Tracks` header and `Cluster` (`SimpleBlock` / `BlockGroup`) payloads across the `.mkv` binary to extract complete embedded subtitle timelines (`UTF8` / `ASS` / `SSA` -> WebVTT cues) and demux secondary audio track packets into a synchronized WebAudio playback node (`AudioContext` + `HTMLMediaElement` / `AudioBuffer` / channel demuxer) inside the YouTube iframe player.
-  - *Why*: Standard Chromium `<video>` tags often ignore secondary audio tracks and embedded MKV text tracks. Demuxing the MKV container streams in JavaScript guarantees that switching audio or subtitle tracks produces an immediate, audible and visual change.
-- **Decision 3 — Auto-Vanishing Swipeable Toast Controller**:
-  - *Chosen Approach*: Build a dedicated toast notification component with an individual 4000ms lifecycle timer, hover-pause, pointer-events swipe tracking (`onPointerDown` / `onPointerMove` / `onPointerUp`), and an accessible `X` close button.
-  - *Why*: Prevents old notifications from lingering or blocking workspace controls on desktop and mobile screens.
+- **Decision 1 — Server + Client Coordinated Telegram MTProto (`GramJS`) with StringSession Persistence**:
+  - *Chosen Approach*: Authenticate the Admin's Telegram User Account via MTProto (`telegram` / GramJS) using Phone Number + OTP, and persist the authorized `StringSession` in the server database and `systemConfig/storageNode` in Firestore.
+  - *Why*: Standard Telegram Bot API (`api.telegram.org/bot...`) enforces a hard 20 MB download limit (`getFile`) and 50 MB upload limit per request. A real Telegram User Account using MTProto supports single-file documents up to **2 GB** (and 4 GB for Premium accounts) with parallel worker connections.
+  - *Alternatives Considered*: Per-user Telegram login was rejected so regular users don't have to connect their personal Telegram accounts; the Global Admin account handles all storage transparently behind the scenes.
+- **Decision 2 — Real-Time Firestore `onSnapshot` + Deletion Tombstone Registry**:
+  - *Chosen Approach*: Replace one-time startup fetches with continuous `onSnapshot` listeners on `cloudFiles` and `cloudFolders`, and track deleted file/folder IDs in a tombstone set (`deletedCloudIds`) before running any local-to-cloud reconciliation.
+  - *Why*: Previously, when Device A deleted a file, Device B still held that file in its `localStorage` fallback state and would either keep showing it or re-upload its metadata back to Firestore on refresh. Real-time `onSnapshot` `removed` events + tombstones prevent stale local copies from ever resurrecting deleted files.
+- **Decision 3 — Streamlined JW Player Style Iframe**:
+  - *Chosen Approach*: Strip away multi-tab debug overlays, top metadata ribbons, and complex filter panels inside the video player in favor of a clean JW Player control bar (Play/Pause, Seek bar, Volume, Speed selector, Fullscreen).
+  - *Why*: Matches the user's request for a fast, lightweight, familiar JW Player embed that loads immediately on any site or share page.
 
 ---
 
@@ -85,45 +83,36 @@ This upgrade makes uploaded files and folders permanently accessible across any 
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │                        UnlimStorage Client Workspace                         │
 │                                                                              │
-│  ┌──────────────────────┐   ┌───────────────────────┐   ┌─────────────────┐  │
-│  │  Swipeable Toast Bar │   │  Drive Explorer View  │   │ Admin Vault UI  │  │
-│  │  • 4s Auto-Dismiss   │   │  • Real Byte Progress │   │ (Admin Email    │  │
-│  │  • Touch/Mouse Swipe │   │  • AbortController    │   │  Only)          │  │
-│  │  • Explicit X Close  │   │  • Drag & Drop Move   │   │ • Bot Token     │  │
-│  └──────────────────────┘   └───────────┬───────────┘   │ • Chat ID       │  │
-│                                         │               └────────┬────────┘  │
-│                                         ▼                        │           │
-│  ┌──────────────────────────────────────────────────┐            │           │
-│  │     Custom YouTube Iframe Video Player           │            │           │
-│  │  • Sandboxed <iframe> + React Portal UI          │            │           │
-│  │  • Matroska (EBML) Cluster & Block Demuxer       │            │           │
-│  │  • Live Multi-Audio Track Switcher (WebAudio)    │            │           │
-│  │  • Live Multi-Subtitle Cue Renderer (SRT/ASS)    │            │           │
-│  └──────────────────────────┬───────────────────────┘            │           │
-└─────────────────────────────┼────────────────────────────────────┼───────────┘
-                              │                                    │
-              ┌───────────────┴────────────────┐                   │
-              ▼                                ▼                   ▼
-┌───────────────────────────────┐    ┌─────────────────────────────────────────┐
-│   Firebase Cloud Firestore    │    │   Hidden Telegram Storage Engine        │
-│ • /userProfiles/{uid}         │    │ • Splits files into ≤19 MB binary parts │
-│ • /cloudFiles/{fileId}        │◄──▶│ • Sends parts via Bot API sendDocument  │
-│   (includes chunk manifest)   │    │ • Reassembles via getFile on any device │
-│ • /cloudFolders/{folderId}    │    │ • Local IndexedDB cache for instant     │
-│ • /systemConfig/storageNode   │    │   zero-latency repeat playback          │
-└───────────────────────────────┘    └─────────────────────────────────────────┘
+│  ┌──────────────────────────┐  ┌──────────────────────┐  ┌────────────────┐  │
+│  │   Drive Explorer View    │  │  Admin MTProto Panel │  │ JW Player      │  │
+│  │  • Fast Upload + Hidden  │  │  • API ID & API Hash │  │ Iframe Embed   │  │
+│  │    Processing Loader     │  │  • Phone -> OTP Code │  │ • Clean Video  │  │
+│  │  • Real-Time File Table  │  │  • 2FA Password Step │  │ • Speed Menu   │  │
+│  │  • Instant Delete Action │  │  • Session Status    │  │ • Fullscreen   │  │
+│  └────────────┬─────────────┘  └──────────┬───────────┘  └────────┬───────┘  │
+└───────────────┼───────────────────────────┼───────────────────────┼──────────┘
+                │                           │                       │
+                ▼                           ▼                       ▼
+┌───────────────────────────────┐  ┌───────────────────────────────────────────┐
+│   Firebase Cloud Firestore    │  │    Backend & Telegram MTProto Engine      │
+│ • Real-Time onSnapshot Sync   │  │ • GramJS TelegramClient (StringSession)   │
+│ • /cloudFiles/{fileId}        │  │ • /api/telegram/mtproto/send-code         │
+│ • /cloudFolders/{folderId}    │  │ • /api/telegram/mtproto/verify-code       │
+│ • Deletion Tombstone Guard    │  │ • Up to 2 GB Direct MTProto File Upload   │
+│ • /systemConfig/storageNode   │  │ • HTTP Range Stream Proxy for JW Player   │
+└───────────────────────────────┘  └───────────────────────────────────────────┘
 ```
 
 - **Data Model & State**:
-  - **`cloudFiles/{fileId}` (Firestore)**: Stores `id`, `ownerId`, `ownerName`, `folderId`, `name`, `sizeBytes`, `mimeType`, `sha256`, `storageDriver` (`telegram` or `local_vault`), `chunksJson` (serialized array of `{ partIndex, messageId, fileId, sizeBytes, sha256Part }`), `starred`, `downloadCount`, `createdAt`, and `updatedAt`.
-  - **`cloudFolders/{folderId}` (Firestore)**: Stores `id`, `ownerId`, `ownerName`, `name`, `parentId`, `createdAt`, and `updatedAt` so custom folders also sync across devices.
-  - **`systemConfig/storageNode` (Firestore)**: Stores the active `botToken`, `chatId`, `botUsername`, `autoSyncUploads`, and `updatedAt` so the connected Telegram storage node persists across page reloads, devices, and serverless deployments.
+  - **`systemConfig/storageNode`**: Extended to store `mode` (`mtproto` | `bot`), `apiId`, `apiHash`, `phoneNumber`, `mtprotoSession` (encrypted/persisted `StringSession`), `accountName`, `accountUsername`, alongside existing `botToken` and `chatId` fallback fields.
+  - **`cloudFiles/{fileId}` & `cloudFolders/{folderId}`**: Synchronized in real time via Firestore `onSnapshot`. Includes storage driver metadata (`mtproto` | `telegram` | `local_vault`), message/document identifiers, and file size up to 2 GB+.
+  - **Deletion Tombstone Registry**: Local + cloud-synced set of deleted file and folder IDs ensuring that once an item is deleted on any device, no other open tab or device can re-insert it from local cache.
 - **Interactive Component & State Mapping**:
-  - **Cross-Device Hydration on Auth**: When `onAuthStateChanged` fires for an authenticated Google user, the app fetches both their `userProfiles/{uid}` document and queries `cloudFiles` and `cloudFolders` where `ownerId == uid`, merging them into the active workspace state so uploaded files appear on every device immediately.
-  - **Permanent Upload Pipeline**: During chunked file upload, if the Telegram Storage Node is configured, each 19 MB segment is transmitted to Telegram (`sendDocument`) with live byte-level progress (`xhr.upload.onprogress`), returning permanent `file_id` handles that are saved to `cloudFiles/{fileId}` in Firestore.
-  - **Cross-Device Download & Stream Pipeline**: When a user previews or downloads a file on a second device where local IndexedDB does not yet have the binary, the engine reads `telegramChunks` from the synced file record, fetches the segments from the storage node (`getFile`), caches the reassembled `Blob` in IndexedDB, and plays or downloads the full binary.
-  - **MKV Multi-Audio & Subtitle Switching**:
-    - The EBML parser scans `Segment -> Tracks` and `Cluster -> SimpleBlock / BlockGroup` across the video blob/stream to extract all embedded subtitle cues and audio track frames.
-    - Selecting a different **Audio Track** in the YouTube iframe menu switches the active audio stream (using native `audioTracks` where available plus a synchronized secondary `<audio>` / WebAudio frequency & channel demux pipeline per track index so every track produces distinct audio output and never stays stuck on one track).
-    - Selecting a different **Subtitle Track** switches the active cue list rendered in the custom YouTube caption overlay.
-  - **Toast Notification Lifecycle**: Each toast stores `{ id, message, type, createdAt, durationMs: 4000 }`. A timer auto-removes the toast after 4 seconds (pausing if hovered), clicking the `X` button removes it immediately, and pointer drag gestures (`deltaX`) allow swiping any notification away on touch or desktop.
+  - **Admin MTProto OTP Flow**:
+    1. `Step 1 (Credentials & Phone)`: Admin inputs `apiId`, `apiHash`, `phoneNumber`, and target `chatId` (defaulting to `me` / Saved Messages or private storage channel) -> triggers `/api/telegram/mtproto/send-code` -> transitions UI to `Step 2 (OTP Input)`.
+    2. `Step 2 (OTP & Optional 2FA)`: Admin inputs the Telegram login code (and 2FA cloud password if prompted) -> triggers `/api/telegram/mtproto/verify-code` -> receives authorized `StringSession` -> saves to backend and Firestore `systemConfig/storageNode` -> transitions UI to `Connected (2 GB MTProto Active)`.
+  - **Real-Time Multi-Device Sync & Delete**:
+    - An active `subscribeToUserCloudDrive(uid, callbacks)` listener in Firestore watches `cloudFiles` and `cloudFolders` where `ownerId == uid`.
+    - When `change.type === 'removed'` fires on any device, the client immediately purges the file/folder from React state, removes it from `localStorage` fallback DB, deletes its binary from IndexedDB, and adds the ID to the tombstone list.
+  - **JW Player Style Embed Component**:
+    - Renders a clean `<iframe>` housing a dark HTML5 video surface with pointer-activity auto-hide controls, smooth scrub bar with hover time preview, Play/Pause, Mute/Volume slider, Speed popover (`0.5x`, `0.75x`, `1x`, `1.25x`, `1.5x`, `2x`), and Fullscreen button.

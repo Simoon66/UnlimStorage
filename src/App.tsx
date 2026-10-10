@@ -49,6 +49,7 @@ import {
   uploadFilesWithProgress,
   getClientBinaryBlob,
   syncClientDbWithFirestoreDrive,
+  applyCloudDriveRealtimeSnapshot,
 } from './services/clientCloudFallback';
 import {
   auth,
@@ -62,6 +63,7 @@ import {
   syncCloudFolderToFirestore,
   deleteCloudFolderFromFirestore,
   fetchUserCloudDriveFromFirestore,
+  subscribeToUserCloudDrive,
   fetchStorageNodeConfigFromFirestore,
   saveStorageNodeConfigToFirestore,
   syncPublicShareToFirestore,
@@ -406,7 +408,35 @@ export default function App() {
           syncCloudFolderToFirestore(fl).catch(() => null);
         }
         for (const sh of unsyncedLocalShares) {
-          syncPublicShareToFirestore(sh.share, sh.file, sh.creatorName).catch(() => null);
+          const linkedFile = cloudDrive.files.find((cf) => cf.id === sh.fileId);
+          syncPublicShareToFirestore({
+            share: sh,
+            file: linkedFile || null,
+            passwordHash: sh.passwordHash || null,
+          }).catch(() => null);
+        }
+
+        // Restore persisted MTProto 2 GB session on backend if admin
+        if (
+          isAdminEmail &&
+          nodeConfig?.mtprotoSession &&
+          nodeConfig?.apiId &&
+          nodeConfig?.apiHash
+        ) {
+          await apiFetch('/api/telegram/config', {
+            method: 'POST',
+            headers: authHeaders({ 'Content-Type': 'application/json' }),
+            body: JSON.stringify({
+              authMode: 'mtproto',
+              mtprotoSession: nodeConfig.mtprotoSession,
+              apiId: nodeConfig.apiId,
+              apiHash: nodeConfig.apiHash,
+              phoneNumber: nodeConfig.phoneNumber,
+              accountName: nodeConfig.accountName,
+              accountUsername: nodeConfig.accountUsername,
+              chatId: nodeConfig.chatId || 'me',
+            }),
+          }).catch(() => null);
         }
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : '';
@@ -456,8 +486,6 @@ export default function App() {
       }
 
       // Ensure all files with Telegram chunks and all shares are synced to Firestore for cross-device public access
-      const creatorName =
-        loadedUser?.name || firebaseUser.displayName || 'UnlimStorage User';
       for (const f of loadedFiles) {
         if (f.ownerId === firebaseUser.uid && f.telegramChunks && f.telegramChunks.length > 0) {
           syncCloudFileToFirestore(f).catch(() => null);
@@ -467,7 +495,10 @@ export default function App() {
         if (s.creatorId === firebaseUser.uid) {
           const matchingFile = loadedFiles.find((f) => f.id === s.fileId && !f.trashed);
           if (matchingFile) {
-            syncPublicShareToFirestore(s, matchingFile, creatorName).catch(() => null);
+            syncPublicShareToFirestore({
+              share: s,
+              file: matchingFile,
+            }).catch(() => null);
           }
         }
       }
@@ -494,6 +525,59 @@ export default function App() {
       loadWorkspaceData();
     }
   }, [firebaseUser, loadWorkspaceData]);
+
+  // Real-time Firestore cross-device sync for files, folders, and shares (instant deletion & additions across devices)
+  useEffect(() => {
+    if (!firebaseUser) return;
+
+    const unsubscribe = subscribeToUserCloudDrive(firebaseUser, {
+      onFilesSnapshot: async (cloudFiles, removedFileIds) => {
+        const reconciled = await applyCloudDriveRealtimeSnapshot({
+          uid: firebaseUser.uid,
+          headers: authHeaders(),
+          cloudFiles,
+          removedFileIds,
+        });
+        setFiles(reconciled.files.filter((f) => !f.trashed));
+        setShares(reconciled.shares);
+        if (reconciled.user) {
+          setCurrentUser(reconciled.user);
+        }
+        if (removedFileIds.length > 0) {
+          const removedSet = new Set(removedFileIds);
+          setInspectedFile((prev) => (prev && removedSet.has(prev.id) ? null : prev));
+          setShareModalFile((prev) => (prev && removedSet.has(prev.id) ? null : prev));
+          setMoveModalFile((prev) => (prev && removedSet.has(prev.id) ? null : prev));
+        }
+      },
+      onFoldersSnapshot: async (cloudFolders, removedFolderIds) => {
+        const reconciled = await applyCloudDriveRealtimeSnapshot({
+          uid: firebaseUser.uid,
+          headers: authHeaders(),
+          cloudFolders,
+          removedFolderIds,
+        });
+        setFolders(reconciled.folders);
+        if (removedFolderIds.length > 0) {
+          const removedFolderSet = new Set(removedFolderIds);
+          setCurrentFolderId((prev) => (prev && removedFolderSet.has(prev) ? null : prev));
+        }
+      },
+      onSharesSnapshot: async (cloudShares, removedShareTokens) => {
+        const reconciled = await applyCloudDriveRealtimeSnapshot({
+          uid: firebaseUser.uid,
+          headers: authHeaders(),
+          cloudShares,
+          removedShareTokens,
+        });
+        setShares(reconciled.shares);
+      },
+    });
+
+    return () => {
+      unsubscribe();
+    };
+  }, [firebaseUser, authHeaders]);
 
   // Real-time WebSocket updates for transfers & notifications
   useEffect(() => {
@@ -575,11 +659,10 @@ export default function App() {
               setShares((prevShares) => {
                 for (const s of prevShares) {
                   if (s.fileId === updatedFile.id) {
-                    syncPublicShareToFirestore(
-                      s,
-                      updatedFile,
-                      'UnlimStorage User'
-                    ).catch(() => null);
+                    syncPublicShareToFirestore({
+                      share: s,
+                      file: updatedFile,
+                    }).catch(() => null);
                   }
                 }
                 return prevShares;
@@ -854,38 +937,55 @@ export default function App() {
   const executeDeleteTarget = async () => {
     if (!deleteTarget) return;
     if (deleteTarget.type === 'folder') {
-      const res = await apiFetch(`/api/folders/${encodeURIComponent(deleteTarget.id)}`, {
+      const folderId = deleteTarget.id;
+      const folderName = deleteTarget.name;
+      await deleteCloudFolderFromFirestore(folderId).catch(() => null);
+      const res = await apiFetch(`/api/folders/${encodeURIComponent(folderId)}`, {
         method: 'DELETE',
         headers: authHeaders(),
       });
       if (res.ok) {
-        if (currentFolderId === deleteTarget.id) setCurrentFolderId(null);
-        deleteCloudFolderFromFirestore(deleteTarget.id).catch(() => null);
-        await loadWorkspaceData();
+        if (currentFolderId === folderId) setCurrentFolderId(null);
+        setFolders((prev) => prev.filter((fl) => fl.id !== folderId));
+        setFiles((prev) =>
+          prev.map((f) => (f.folderId === folderId ? { ...f, folderId: null } : f))
+        );
         pushNotification({
           id: `del_${Date.now()}`,
           timestamp: new Date().toISOString(),
           title: 'Folder Deleted',
-          message: `"${deleteTarget.name}" was removed.`,
+          message: `"${folderName}" was removed across all devices.`,
           type: 'info',
         });
       }
     } else {
-      const res = await apiFetch(`/api/files/${encodeURIComponent(deleteTarget.id)}`, {
+      const fileId = deleteTarget.id;
+      const fileName = deleteTarget.name;
+      const relatedShares = shares.filter((s) => s.fileId === fileId);
+
+      // Delete from Firestore first so real-time listeners on all devices purge immediately
+      await deleteCloudFileFromFirestore(fileId).catch(() => null);
+      for (const sh of relatedShares) {
+        deletePublicShareFromFirestore(sh.token).catch(() => null);
+      }
+
+      const res = await apiFetch(`/api/files/${encodeURIComponent(fileId)}`, {
         method: 'DELETE',
         headers: authHeaders(),
       });
       if (res.ok) {
         const data = await res.json();
         if (data.user) setCurrentUser(data.user);
-        setFiles((prev) => prev.filter((f) => f.id !== deleteTarget.id));
-        setShares((prev) => prev.filter((s) => s.fileId !== deleteTarget.id));
-        deleteCloudFileFromFirestore(deleteTarget.id).catch(() => null);
+        setFiles((prev) => prev.filter((f) => f.id !== fileId));
+        setShares((prev) => prev.filter((s) => s.fileId !== fileId));
+        if (inspectedFile?.id === fileId) setInspectedFile(null);
+        if (shareModalFile?.id === fileId) setShareModalFile(null);
+        if (moveModalFile?.id === fileId) setMoveModalFile(null);
         pushNotification({
           id: `del_${Date.now()}`,
           timestamp: new Date().toISOString(),
           title: 'File Deleted',
-          message: `"${deleteTarget.name}" was permanently deleted from your cloud drive.`,
+          message: `"${fileName}" was permanently deleted across all devices.`,
           type: 'info',
         });
       }
@@ -1031,11 +1131,10 @@ export default function App() {
         files.find((f) => f.id === payload.fileId) ||
         (shareModalFile?.id === payload.fileId ? shareModalFile : null);
       if (targetFile) {
-        await syncPublicShareToFirestore(
-          createdShare,
-          targetFile,
-          currentUser?.name || firebaseUser?.displayName || 'UnlimStorage User'
-        ).catch(() => null);
+        await syncPublicShareToFirestore({
+          share: createdShare,
+          file: targetFile,
+        }).catch(() => null);
 
         if (
           targetFile.sizeBytes > 0 &&
@@ -1046,11 +1145,17 @@ export default function App() {
           getClientBinaryBlob(targetFile.id)
             .then(async (localBlob) => {
               if (localBlob && localBlob.size > 64) {
-                await syncPublicShareBinaryChunksToFirestore(
-                  createdShare.token,
-                  createdShare.creatorId,
+                const chunkCount = await syncPublicShareBinaryChunksToFirestore(
+                  targetFile.id,
                   localBlob
                 );
+                if (chunkCount > 0) {
+                  await syncPublicShareToFirestore({
+                    share: createdShare,
+                    file: targetFile,
+                    cloudChunkCount: chunkCount,
+                  });
+                }
               } else {
                 const dlRes = await apiFetch(
                   `/api/files/${encodeURIComponent(targetFile.id)}/download`,
@@ -1059,11 +1164,17 @@ export default function App() {
                 if (dlRes.ok) {
                   const serverBlob = await dlRes.blob();
                   if (serverBlob.size > 64) {
-                    await syncPublicShareBinaryChunksToFirestore(
-                      createdShare.token,
-                      createdShare.creatorId,
+                    const chunkCount = await syncPublicShareBinaryChunksToFirestore(
+                      targetFile.id,
                       serverBlob
                     );
+                    if (chunkCount > 0) {
+                      await syncPublicShareToFirestore({
+                        share: createdShare,
+                        file: targetFile,
+                        cloudChunkCount: chunkCount,
+                      });
+                    }
                   }
                 }
               }
@@ -1074,7 +1185,7 @@ export default function App() {
 
       return createdShare;
     },
-    [authHeaders, currentUser?.name, files, firebaseUser?.displayName, shareModalFile]
+    [authHeaders, files, shareModalFile]
   );
 
   const handleUpdateShare = useCallback(
@@ -1098,16 +1209,15 @@ export default function App() {
 
       const targetFile = files.find((f) => f.id === updatedShare.fileId);
       if (targetFile) {
-        await syncPublicShareToFirestore(
-          updatedShare,
-          targetFile,
-          currentUser?.name || firebaseUser?.displayName || 'UnlimStorage User'
-        ).catch(() => null);
+        await syncPublicShareToFirestore({
+          share: updatedShare,
+          file: targetFile,
+        }).catch(() => null);
       }
 
       return updatedShare;
     },
-    [authHeaders, currentUser?.name, files, firebaseUser?.displayName]
+    [authHeaders, files]
   );
 
   const handleToggleShareActive = async (share: ShareLink) => {
@@ -1179,6 +1289,92 @@ export default function App() {
         ? 'Reverted to local disk storage fallback.'
         : `Permanent cross-device Telegram storage active (${data.config.chatId}).`,
       type: 'completed',
+    });
+  };
+
+  const handleSendMtprotoCode = async (payload: {
+    apiId: number;
+    apiHash: string;
+    phoneNumber: string;
+    chatId?: string;
+  }): Promise<{ phoneCodeHash: string; message?: string }> => {
+    const res = await apiFetch('/api/telegram/mtproto/send-code', {
+      method: 'POST',
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data.error || 'Failed to send Telegram OTP code');
+    }
+    await saveStorageNodeConfigToFirestore({
+      apiId: String(payload.apiId),
+      apiHash: payload.apiHash,
+      phoneNumber: payload.phoneNumber,
+      chatId: payload.chatId || 'me',
+    }).catch(() => null);
+    return {
+      phoneCodeHash: data.phoneCodeHash,
+      message: data.message,
+    };
+  };
+
+  const handleVerifyMtprotoCode = async (payload: {
+    phoneCode: string;
+    password?: string;
+    chatId?: string;
+  }): Promise<void> => {
+    const res = await apiFetch('/api/telegram/mtproto/verify-code', {
+      method: 'POST',
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data.error || 'Failed to verify Telegram OTP code');
+    }
+    setTelegramConfig(data.config);
+    await saveStorageNodeConfigToFirestore({
+      authMode: 'mtproto',
+      mtprotoSession: data.mtprotoSession || '',
+      accountName: data.config?.accountName || data.config?.mtprotoUser || '',
+      accountUsername: data.config?.accountUsername || '',
+      chatId: data.config?.chatId || payload.chatId || 'me',
+      autoSyncUploads: true,
+    }).catch(() => null);
+    pushNotification({
+      id: `tg_mtproto_${Date.now()}`,
+      timestamp: new Date().toISOString(),
+      title: '2 GB Telegram MTProto Connected',
+      message: `Logged in as ${
+        data.config?.accountName || data.config?.mtprotoUser || 'User'
+      } — 2 GB single-file uploads active!`,
+      type: 'completed',
+    });
+  };
+
+  const handleDisconnectMtproto = async (): Promise<void> => {
+    const res = await apiFetch('/api/telegram/mtproto/disconnect', {
+      method: 'POST',
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data.error || 'Failed to disconnect MTProto session');
+    }
+    setTelegramConfig(data.config);
+    await saveStorageNodeConfigToFirestore({
+      authMode: 'bot',
+      mtprotoSession: '',
+      accountName: '',
+      accountUsername: '',
+    }).catch(() => null);
+    pushNotification({
+      id: `tg_mtproto_disc_${Date.now()}`,
+      timestamp: new Date().toISOString(),
+      title: '2 GB MTProto Vault Disconnected',
+      message: 'Telegram user session was disconnected.',
+      type: 'info',
     });
   };
 
@@ -2246,6 +2442,9 @@ export default function App() {
           <TelegramStorageView
             config={telegramConfig}
             onSaveConfig={handleSaveTelegramConfig}
+            onSendMtprotoCode={handleSendMtprotoCode}
+            onVerifyMtprotoCode={handleVerifyMtprotoCode}
+            onDisconnectMtproto={handleDisconnectMtproto}
           />
         )}
       </main>
