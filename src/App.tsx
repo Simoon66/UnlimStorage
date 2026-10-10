@@ -29,6 +29,7 @@ import {
   ShieldCheck,
   LogIn,
   FolderInput,
+  Loader2,
 } from 'lucide-react';
 import {
   User,
@@ -282,7 +283,7 @@ export default function App() {
   const [newFolderName, setNewFolderName] = useState('');
   const [isDraggingOver, setIsDraggingOver] = useState(false);
 
-  // Live File Upload Progress Bar State
+  // Live File Upload Progress Bar & Post-Upload Processing State
   const [uploadingFiles, setUploadingFiles] = useState(false);
   const [uploadProgress, setUploadProgress] = useState<{
     fileName: string;
@@ -290,6 +291,9 @@ export default function App() {
     loadedBytes: number;
     totalBytes: number;
     speedBps: number;
+  } | null>(null);
+  const [postUploadProcessing, setPostUploadProcessing] = useState<{
+    fileName: string;
   } | null>(null);
 
   // Modals & Drag-and-Drop Move State
@@ -333,15 +337,29 @@ export default function App() {
   // Listen to Firebase Auth state changes
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (fbUser) => {
-      setFirebaseUser(fbUser);
-      setAuthLoading(false);
       if (fbUser) {
         try {
           await ensureFirestoreUserProfile(fbUser);
-        } catch {
-          // ignore if offline or unverified
+          setFirebaseUser(fbUser);
+          setAuthLoading(false);
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : '';
+          if (msg.includes('REGISTRATION_CLOSED')) {
+            await signOutFirebaseUser().catch(() => null);
+            setFirebaseUser(null);
+            setCurrentUser(null);
+            setAuthGateError(
+              'New account registration is currently closed. Only existing registered accounts can sign in.'
+            );
+            setAuthLoading(false);
+            return;
+          }
+          setFirebaseUser(fbUser);
+          setAuthLoading(false);
         }
       } else {
+        setFirebaseUser(null);
+        setAuthLoading(false);
         setCurrentUser(null);
         setFolders([]);
         setFiles([]);
@@ -383,7 +401,17 @@ export default function App() {
         for (const fl of unsyncedLocalFolders) {
           syncCloudFolderToFirestore(fl).catch(() => null);
         }
-      } catch {
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : '';
+        if (msg.includes('REGISTRATION_CLOSED')) {
+          await signOutFirebaseUser().catch(() => null);
+          setFirebaseUser(null);
+          setCurrentUser(null);
+          setAuthGateError(
+            'New account registration is currently closed. Only existing registered accounts can sign in.'
+          );
+          return;
+        }
         // Proceed with local/server state if Firestore query fails
       }
 
@@ -533,12 +561,29 @@ export default function App() {
     setAuthGateError(null);
     try {
       const fbUser = await signInWithGooglePopup();
+      try {
+        await ensureFirestoreUserProfile(fbUser);
+      } catch (profileErr: unknown) {
+        const pMsg = profileErr instanceof Error ? profileErr.message : '';
+        if (pMsg.includes('REGISTRATION_CLOSED')) {
+          await signOutFirebaseUser().catch(() => null);
+          setFirebaseUser(null);
+          setCurrentUser(null);
+          const closedMsg =
+            'New account registration is currently closed. Only existing registered accounts can sign in.';
+          setAuthGateError(closedMsg);
+          throw new Error(closedMsg);
+        }
+      }
       setFirebaseUser(fbUser);
+      const isAdmin = fbUser.email?.toLowerCase() === 'titumamma2425@gmail.com';
       pushNotification({
         id: `auth_${Date.now()}`,
         timestamp: new Date().toISOString(),
         title: 'Signed In with Google',
-        message: `Welcome, ${fbUser.displayName || fbUser.email}! Your private 25 GB cloud drive is ready.`,
+        message: isAdmin
+          ? `Welcome back, ${fbUser.displayName || fbUser.email}! Your Unlimited Admin cloud drive is ready.`
+          : `Welcome back, ${fbUser.displayName || fbUser.email}! Your private cloud drive is ready.`,
         type: 'completed',
       });
     } catch (err: unknown) {
@@ -574,6 +619,7 @@ export default function App() {
     uploadAbortControllerRef.current = abortController;
 
     setUploadingFiles(true);
+    setPostUploadProcessing(null);
     setUploadProgress({
       fileName: label,
       percent: 0,
@@ -597,9 +643,14 @@ export default function App() {
             speedBps: info.speedBps,
           });
         },
+        onProcessingStart: () => {
+          setUploadProgress(null);
+          setPostUploadProcessing({ fileName: label });
+        },
       });
 
       if (result.cancelled || abortController.signal.aborted) {
+        setPostUploadProcessing(null);
         pushNotification({
           id: `cancel_${Date.now()}`,
           timestamp: new Date().toISOString(),
@@ -611,6 +662,7 @@ export default function App() {
       }
 
       if (!result.ok) {
+        setPostUploadProcessing(null);
         pushNotification({
           id: `err_${Date.now()}`,
           timestamp: new Date().toISOString(),
@@ -621,19 +673,31 @@ export default function App() {
         return;
       }
 
+      // Ensure the clean Processing screen shows smoothly before revealing the finalized file
+      setPostUploadProcessing({ fileName: label });
+
       if (result.data?.user) setCurrentUser(result.data.user);
       if (Array.isArray(result.data?.files)) {
-        for (const uploaded of result.data.files as FileRecord[]) {
+        const uploadedList = result.data.files as FileRecord[];
+        setFiles((prev) => {
+          const existingIds = new Set(uploadedList.map((u) => u.id));
+          return [...uploadedList, ...prev.filter((f) => !existingIds.has(f.id))];
+        });
+        for (const uploaded of uploadedList) {
           syncCloudFileToFirestore(uploaded).catch(() => null);
         }
       }
-      await loadWorkspaceData();
+
+      await new Promise((r) => setTimeout(r, 180));
+      setPostUploadProcessing(null);
+
+      // Refresh workspace data asynchronously in the background without blocking UI
+      loadWorkspaceData().catch(() => null);
     } finally {
       uploadAbortControllerRef.current = null;
-      setTimeout(() => {
-        setUploadingFiles(false);
-        setUploadProgress(null);
-      }, 250);
+      setUploadingFiles(false);
+      setUploadProgress(null);
+      setPostUploadProcessing(null);
     }
   };
 
@@ -644,6 +708,7 @@ export default function App() {
     }
     setUploadingFiles(false);
     setUploadProgress(null);
+    setPostUploadProcessing(null);
   };
 
   const handleCancelRemoteTransfer = async (jobId: string) => {
@@ -1176,20 +1241,19 @@ export default function App() {
                 Sign in to UnlimStorage
               </h1>
               <p className="text-xs sm:text-sm text-[#9E978E] leading-relaxed">
-                Sign in with your Google account to unlock your private{' '}
-                <strong className="text-[#F2EFE9]">25 GB Free encrypted cloud drive</strong>.
-                Authentication is required to upload, preview, or manage files.
+                Sign in with your registered Google account to access your private encrypted cloud
+                drive. New account registration is currently closed.
               </p>
             </div>
 
             <div className="p-4 bg-[#141311] border border-[#2C2824] space-y-2 text-xs text-[#9E978E]">
               <div className="flex items-center justify-between">
-                <span>Starter Storage Included</span>
-                <strong className="text-[#2E9E6B]">25 GB Free Forever</strong>
+                <span>Access Status</span>
+                <strong className="text-[#D97757]">Existing Members Only</strong>
               </div>
               <div className="flex items-center justify-between">
-                <span>Pro &amp; Ultra Plans</span>
-                <strong className="text-[#F2EFE9]">50 GB (500 T) · 1 TB (1024 T)</strong>
+                <span>New Registration</span>
+                <strong className="text-[#9E978E]">Temporarily Closed</strong>
               </div>
               <div className="flex items-center justify-between">
                 <span>Account Privacy</span>
@@ -1250,17 +1314,26 @@ export default function App() {
     return true;
   });
 
+  const isUnlimitedAdmin =
+    isAdminUser ||
+    currentUser?.role === 'admin' ||
+    currentUser?.planId === 'unlimited_admin';
   const totalStorageBytes = files.reduce((acc, f) => acc + f.sizeBytes, 0);
   const quotaLimitBytes = currentUser?.bandwidthLimitBytes || 25 * 1024 * 1024 * 1024;
-  const quotaPct = Math.min(100, Math.round((totalStorageBytes / quotaLimitBytes) * 100));
-  const lockedFilesCount = files.filter((f) => f.lockedOverQuota).length;
+  const quotaPct = isUnlimitedAdmin
+    ? Math.min(100, Math.max(totalStorageBytes > 0 ? 2 : 0, Math.round((totalStorageBytes / (10 * 1024 * 1024 * 1024 * 1024)) * 100)))
+    : Math.min(100, Math.round((totalStorageBytes / quotaLimitBytes) * 100));
+  const lockedFilesCount = isUnlimitedAdmin
+    ? 0
+    : files.filter((f) => f.lockedOverQuota).length;
   const tokenBalance = currentUser?.tokenBalance || 0;
-  const planBadge =
-    currentUser?.planId === 'ultra_1tb'
-      ? '1 TB Ultra'
-      : currentUser?.planId === 'pro_50gb'
-      ? '50 GB Pro'
-      : '25 GB Free';
+  const planBadge = isUnlimitedAdmin
+    ? 'Unlimited Admin'
+    : currentUser?.planId === 'ultra_1tb'
+    ? '1 TB Ultra'
+    : currentUser?.planId === 'pro_50gb'
+    ? '50 GB Pro'
+    : '25 GB Free';
 
   const activeStreamingJobs = transfers.filter(
     (t) => t.status === 'queued' || t.status === 'streaming' || t.status === 'syncing_telegram'
@@ -1405,7 +1478,12 @@ export default function App() {
                 </div>
                 <div className="text-xs text-[#9E978E] tabular-nums">
                   <strong className="text-[#F2EFE9]">{formatBytes(totalStorageBytes)}</strong> used
-                  of <strong className="text-[#F2EFE9]">{formatBytes(quotaLimitBytes)}</strong>
+                  of{' '}
+                  {isUnlimitedAdmin ? (
+                    <strong className="text-[#2E9E6B]">Unlimited Storage</strong>
+                  ) : (
+                    <strong className="text-[#F2EFE9]">{formatBytes(quotaLimitBytes)}</strong>
+                  )}
                 </div>
               </div>
               <div className="h-2 w-full bg-[#141311] border border-[#2C2824]">
@@ -1453,9 +1531,9 @@ export default function App() {
         </div>
 
         {/* LIVE FILE UPLOAD PROGRESS BAR (Determinate 0% -> 100% + Cancel Button) */}
-        {(uploadProgress || activeStreamingJobs.length > 0) && (
+        {(uploadProgress || postUploadProcessing || activeStreamingJobs.length > 0) && (
           <div className="p-4 bg-[#1C1A17] border border-[#D97757] space-y-3">
-            {uploadProgress && (
+            {uploadProgress && !postUploadProcessing && (
               <div className="space-y-2">
                 <div className="flex flex-wrap items-center justify-between gap-2 text-xs tabular-nums">
                   <span className="font-bold text-[#F2EFE9] truncate">
@@ -1482,6 +1560,25 @@ export default function App() {
                     style={{ width: `${uploadProgress.percent}%` }}
                     className="h-full bg-[#D97757] transition-all duration-100"
                   />
+                </div>
+              </div>
+            )}
+
+            {postUploadProcessing && (
+              <div className="space-y-2">
+                <div className="flex items-center justify-between gap-3 text-xs">
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <Loader2 className="w-4 h-4 text-[#D97757] animate-spin shrink-0" />
+                    <span className="font-bold text-[#F2EFE9] truncate">
+                      Processing: {postUploadProcessing.fileName}
+                    </span>
+                  </div>
+                  <span className="text-[#D97757] font-semibold shrink-0">
+                    Please wait...
+                  </span>
+                </div>
+                <div className="h-2 w-full bg-[#141311] border border-[#2C2824] overflow-hidden">
+                  <div className="h-full w-full bg-[#D97757] animate-pulse" />
                 </div>
               </div>
             )}
@@ -1518,6 +1615,29 @@ export default function App() {
                 </div>
               );
             })}
+          </div>
+        )}
+
+        {/* DEDICATED POST-UPLOAD PROCESSING LOADING SCREEN OVERLAY */}
+        {postUploadProcessing && (
+          <div className="fixed inset-0 z-50 bg-black/75 flex items-center justify-center p-4">
+            <div className="w-full max-w-sm bg-[#1C1A17] border border-[#D97757] p-6 space-y-4 text-center shadow-2xl">
+              <div className="w-12 h-12 mx-auto bg-[#24211D] border border-[#2C2824] flex items-center justify-center">
+                <Loader2 className="w-6 h-6 text-[#D97757] animate-spin" />
+              </div>
+              <div className="space-y-1">
+                <div className="text-base font-bold text-[#F2EFE9]">Processing...</div>
+                <p className="text-xs text-[#9E978E] truncate px-2">
+                  {postUploadProcessing.fileName}
+                </p>
+                <p className="text-[11px] text-[#9E978E]">
+                  Finalizing your file for instant cloud access...
+                </p>
+              </div>
+              <div className="h-2 w-full bg-[#141311] border border-[#2C2824] overflow-hidden">
+                <div className="h-full w-full bg-[#D97757] animate-pulse" />
+              </div>
+            </div>
           </div>
         )}
 

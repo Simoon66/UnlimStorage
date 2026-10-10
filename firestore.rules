@@ -63,7 +63,8 @@ service cloud.firestore {
       data.uid is string && data.uid.size() >= 1 && data.uid.size() <= 128 && data.uid.matches('^[a-zA-Z0-9_\\-]+$') &&
       data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 120 &&
       data.planId is string && data.planId.size() >= 1 && data.planId.size() <= 32 &&
-      data.planId in ['free_25gb', 'pro_50gb', 'ultra_1tb'] &&
+      data.planId in ['free_25gb', 'pro_50gb', 'ultra_1tb', 'unlimited_admin'] &&
+      (data.planId != 'unlimited_admin' || isAdmin()) &&
       data.tokenBalance is number && data.tokenBalance >= 0 && data.tokenBalance <= 100000000 &&
       data.planExpiresAt is string && data.planExpiresAt.size() <= 64 &&
       data.graceEndsAt is string && data.graceEndsAt.size() <= 64 &&
@@ -111,7 +112,7 @@ service cloud.firestore {
       data.ownerName is string && data.ownerName.size() >= 1 && data.ownerName.size() <= 120 &&
       data.folderId is string && data.folderId.size() >= 1 && data.folderId.size() <= 128 && data.folderId.matches('^[a-zA-Z0-9_\\-]+$') &&
       data.name is string && data.name.size() >= 1 && data.name.size() <= 255 &&
-      data.sizeBytes is number && data.sizeBytes >= 0 && data.sizeBytes <= 1099511627776 &&
+      data.sizeBytes is number && data.sizeBytes >= 0 && data.sizeBytes <= 54975581388800 &&
       data.mimeType is string && data.mimeType.size() >= 1 && data.mimeType.size() <= 128 &&
       data.starred is bool &&
       data.downloadCount is number && data.downloadCount >= 0 && data.downloadCount <= 100000000 &&
@@ -190,7 +191,8 @@ service cloud.firestore {
       allow get: if isSignedIn() && isValidId(userId) && (request.auth.uid == userId || isAdmin());
       allow list: if isAdmin();
 
-      allow create: if isVerifiedUser() &&
+      // Registration closed: only admin can create new userProfiles; existing users already have their document
+      allow create: if isAdmin() &&
         isValidId(userId) &&
         request.auth.uid == userId &&
         isValidUserProfile(incoming()) &&

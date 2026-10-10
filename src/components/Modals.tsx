@@ -32,6 +32,7 @@ import { FileRecord, FolderRecord, ShareLink, User } from '../types';
 import { formatBytes, formatShortDate } from '../utils/format';
 import {
   getClientBinaryBlob,
+  getMemoryBinaryBlobSync,
   resolveClientMimeType,
 } from '../services/clientCloudFallback';
 import { YouTubeIframePlayer } from './YouTubeIframePlayer';
@@ -544,26 +545,35 @@ export const FileDetailDrawer: React.FC<FileDetailDrawerProps> = ({
     let cancelled = false;
     setVideoPlaybackError(null);
 
-    getClientBinaryBlob(file.id, file)
-      .then((blob) => {
-        if (cancelled || !blob) return;
-        setRawBlob(blob);
-        let targetBlob = blob;
-        if (isMkv) {
-          // Wrap Matroska (.mkv) blob in a zero-copy WebM/MP4 MIME view so HTML5 <video> demuxes it natively
-          const containerType =
-            videoContainerFallback === 'mp4' ? 'video/mp4' : 'video/webm';
-          targetBlob = new Blob([blob], { type: containerType });
-        } else if (!blob.type || blob.type === 'application/octet-stream') {
-          targetBlob = new Blob([blob], {
-            type: resolveClientMimeType(file.name, file.mimeType),
-          });
-        }
-        const objUrl = URL.createObjectURL(targetBlob);
-        revokedUrl = objUrl;
-        setLocalBlobUrl(objUrl);
-      })
-      .catch(() => null);
+    const applyBlob = (blob: Blob) => {
+      if (cancelled) return;
+      setRawBlob(blob);
+      let targetBlob = blob;
+      if (isMkv) {
+        const containerType =
+          videoContainerFallback === 'mp4' ? 'video/mp4' : 'video/webm';
+        targetBlob = new Blob([blob], { type: containerType });
+      } else if (!blob.type || blob.type === 'application/octet-stream') {
+        targetBlob = new Blob([blob], {
+          type: resolveClientMimeType(file.name, file.mimeType),
+        });
+      }
+      const objUrl = URL.createObjectURL(targetBlob);
+      revokedUrl = objUrl;
+      setLocalBlobUrl(objUrl);
+    };
+
+    const memBlob = getMemoryBinaryBlobSync(file.id);
+    if (memBlob && memBlob.size > 0) {
+      applyBlob(memBlob);
+    } else {
+      getClientBinaryBlob(file.id, file)
+        .then((blob) => {
+          if (cancelled || !blob) return;
+          applyBlob(blob);
+        })
+        .catch(() => null);
+    }
 
     return () => {
       cancelled = true;
@@ -1493,7 +1503,9 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   };
 
   const planLabel =
-    currentUser.planId === 'ultra_1tb'
+    isAdmin || currentUser.role === 'admin' || currentUser.planId === 'unlimited_admin'
+      ? 'Unlimited Admin Storage'
+      : currentUser.planId === 'ultra_1tb'
       ? '1 TB Ultra Plan'
       : currentUser.planId === 'pro_50gb'
       ? '50 GB Pro Plan'

@@ -308,6 +308,11 @@ export const StoragePricingView: React.FC<StoragePricingViewProps> = ({
     }
   };
 
+  const isUnlimitedAdmin =
+    user.role === 'admin' ||
+    user.email?.toLowerCase() === 'titumamma2425@gmail.com' ||
+    activePlan === 'unlimited_admin';
+
   return (
     <div className="space-y-6">
       {/* Header & Wallet Bar */}
@@ -317,9 +322,19 @@ export const StoragePricingView: React.FC<StoragePricingViewProps> = ({
             Storage Plans & Token Wallet
           </h1>
           <p className="text-xs text-[#9E978E]">
-            Every user gets <strong className="text-[#F2EFE9]">25 GB Free</strong>. Upgrade to{' '}
-            <strong className="text-[#F2EFE9]">50 GB (500 Tokens/mo)</strong> or{' '}
-            <strong className="text-[#F2EFE9]">1 TB (1,024 Tokens/mo)</strong> anytime.
+            {isUnlimitedAdmin ? (
+              <>
+                Your Administrator account includes{' '}
+                <strong className="text-[#2E9E6B]">Permanent Unlimited Storage</strong> with no
+                upload caps or expiry limits.
+              </>
+            ) : (
+              <>
+                Every user gets <strong className="text-[#F2EFE9]">25 GB Free</strong>. Upgrade to{' '}
+                <strong className="text-[#F2EFE9]">50 GB (500 Tokens/mo)</strong> or{' '}
+                <strong className="text-[#F2EFE9]">1 TB (1,024 Tokens/mo)</strong> anytime.
+              </>
+            )}
           </p>
         </div>
 
@@ -344,8 +359,28 @@ export const StoragePricingView: React.FC<StoragePricingViewProps> = ({
         </div>
       </div>
 
+      {isUnlimitedAdmin && (
+        <div className="p-4 sm:p-5 bg-[#1C1A17] border border-[#2E9E6B] flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div className="flex items-start gap-3">
+            <ShieldCheck className="w-5 h-5 text-[#2E9E6B] shrink-0 mt-0.5" />
+            <div className="space-y-1">
+              <div className="text-sm font-bold text-[#F2EFE9]">
+                Administrator Unlimited Storage Active
+              </div>
+              <p className="text-xs text-[#9E978E]">
+                Your admin vault (<strong className="text-[#F2EFE9]">{user.email}</strong>) has
+                unlimited multi-GB/TB storage capacity permanently unlocked.
+              </p>
+            </div>
+          </div>
+          <span className="px-3 py-1.5 text-xs font-bold bg-[#141311] border border-[#2E9E6B] text-[#2E9E6B] shrink-0">
+            Unlimited Capacity
+          </span>
+        </div>
+      )}
+
       {/* 3-Month Grace Period Alert if Expired */}
-      {(isExpiredInGrace || lockedFilesCount > 0) && (
+      {!isUnlimitedAdmin && (isExpiredInGrace || lockedFilesCount > 0) && (
         <div className="p-4 sm:p-5 bg-[#1C1A17] border border-[#D99B26] flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div className="flex items-start gap-3">
             <AlertTriangle className="w-5 h-5 text-[#D99B26] shrink-0 mt-0.5" />
@@ -418,13 +453,14 @@ export const StoragePricingView: React.FC<StoragePricingViewProps> = ({
       {/* 3 Plan Cards */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         {PLANS.map((plan) => {
-          const isCurrent = activePlan === plan.id && !isExpiredInGrace;
+          const isCurrent = !isUnlimitedAdmin && activePlan === plan.id && !isExpiredInGrace;
           const isLockedByHigherActivePlan =
-            isPaidPlanActiveAndUnexpired &&
-            (plan.id === 'free_25gb' ||
-              (plan.id === 'pro_50gb' && activePlan === 'ultra_1tb'));
+            isUnlimitedAdmin ||
+            (isPaidPlanActiveAndUnexpired &&
+              (plan.id === 'free_25gb' ||
+                (plan.id === 'pro_50gb' && activePlan === 'ultra_1tb')));
           const isClaimDisabled =
-            isCurrent || isLockedByHigherActivePlan || busyPlan === plan.id;
+            isUnlimitedAdmin || isCurrent || isLockedByHigherActivePlan || busyPlan === plan.id;
 
           return (
             <div
@@ -489,7 +525,9 @@ export const StoragePricingView: React.FC<StoragePricingViewProps> = ({
                     onClick={() => handlePlanSelect('free_25gb')}
                     className="w-full min-h-[44px] px-4 py-2.5 text-xs font-semibold bg-[#24211D] border border-[#2C2824] text-[#9E978E] disabled:opacity-60 disabled:cursor-not-allowed"
                   >
-                    {isCurrent
+                    {isUnlimitedAdmin
+                      ? 'Unlimited Admin Storage Active'
+                      : isCurrent
                       ? 'Included Free Plan (Active)'
                       : isPaidPlanActiveAndUnexpired
                       ? `Current Plan Active (${activeDaysLeft}d Left)`
@@ -501,13 +539,15 @@ export const StoragePricingView: React.FC<StoragePricingViewProps> = ({
                     disabled={isClaimDisabled}
                     onClick={() => handlePlanSelect(plan.id)}
                     className={`w-full min-h-[44px] px-4 py-2.5 text-xs font-bold transition-colors ${
-                      isCurrent || isLockedByHigherActivePlan
+                      isUnlimitedAdmin || isCurrent || isLockedByHigherActivePlan
                         ? 'bg-[#24211D] border border-[#2C2824] text-[#9E978E] opacity-70 cursor-not-allowed'
                         : 'bg-[#D97757] text-[#141311] hover:bg-[#E08568] cursor-pointer'
                     }`}
                   >
                     {busyPlan === plan.id
                       ? 'Activating...'
+                      : isUnlimitedAdmin
+                      ? 'Unlimited Admin Storage Active'
                       : isCurrent
                       ? `Plan Active — Unlocks After Expiry (${activeDaysLeft}d Left)`
                       : isLockedByHigherActivePlan

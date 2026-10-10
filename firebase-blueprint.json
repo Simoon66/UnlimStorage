@@ -21,7 +21,7 @@
         "planId": {
           "type": "string",
           "description": "Active storage tier identifier.",
-          "enum": ["free_25gb", "pro_50gb", "ultra_1tb"],
+          "enum": ["free_25gb", "pro_50gb", "ultra_1tb", "unlimited_admin"],
           "minLength": 1,
           "maxLength": 32
         },

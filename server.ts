@@ -34,6 +34,7 @@ const TELEGRAM_CHUNK_SIZE = 19 * 1024 * 1024;
 const FREE_25GB_BYTES = 25 * 1024 * 1024 * 1024;
 const PRO_50GB_BYTES = 50 * 1024 * 1024 * 1024;
 const ULTRA_1TB_BYTES = 1024 * 1024 * 1024 * 1024;
+const UNLIMITED_ADMIN_BYTES = 1024 * 1024 * 1024 * 1024 * 1024; // 1 PB Unlimited Admin Storage
 
 if (!fs.existsSync(DATA_DIR)) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -79,6 +80,7 @@ function computeSha256(buf: Buffer): string {
 }
 
 function getPlanQuotaBytes(planId: StoragePlanId = 'free_25gb'): number {
+  if (planId === 'unlimited_admin') return UNLIMITED_ADMIN_BYTES;
   if (planId === 'ultra_1tb') return ULTRA_1TB_BYTES;
   if (planId === 'pro_50gb') return PRO_50GB_BYTES;
   return FREE_25GB_BYTES;
@@ -135,12 +137,12 @@ function createSeedDatabase(): DatabaseSchema {
         email: 'titumamma2425@gmail.com',
         passwordHash: hashPassword('admin123'),
         role: 'admin',
-        bandwidthLimitBytes: FREE_25GB_BYTES,
+        bandwidthLimitBytes: UNLIMITED_ADMIN_BYTES,
         bandwidthUsedBytes: 482_344_960,
         storageUsedBytes: seedFile1Content.length + seedSvg.length,
         createdAt: iso(4320),
-        planId: 'free_25gb',
-        tokenBalance: 250,
+        planId: 'unlimited_admin',
+        tokenBalance: 999999,
         planExpiresAt: null,
         graceEndsAt: null,
         usedPromoCodes: [],
@@ -315,6 +317,28 @@ function saveDb() {
  * excess files above 25 GB are automatically cleared.
  */
 function evaluateUserQuotaAndLocks(user: StoredUser) {
+  const isAdminAccount =
+    user.email?.toLowerCase() === 'titumamma2425@gmail.com' ||
+    user.role === 'admin' ||
+    user.planId === 'unlimited_admin';
+
+  if (isAdminAccount) {
+    user.role = 'admin';
+    user.planId = 'unlimited_admin';
+    user.planExpiresAt = null;
+    user.graceEndsAt = null;
+    user.bandwidthLimitBytes = UNLIMITED_ADMIN_BYTES;
+
+    const adminFiles = db.files.filter((f) => f.ownerId === user.id);
+    let adminTotal = 0;
+    for (const f of adminFiles) {
+      f.lockedOverQuota = false;
+      adminTotal += f.sizeBytes;
+    }
+    user.storageUsedBytes = adminTotal;
+    return;
+  }
+
   if (!user.planId) user.planId = 'free_25gb';
   if (typeof user.tokenBalance !== 'number') user.tokenBalance = 0;
   if (!Array.isArray(user.usedPromoCodes)) user.usedPromoCodes = [];
@@ -744,12 +768,12 @@ async function startServer() {
         email: fbEmail || `${fbUid}@user.unlimcloud`,
         passwordHash: '',
         role: isAdminEmail ? 'admin' : 'member',
-        bandwidthLimitBytes: FREE_25GB_BYTES,
+        bandwidthLimitBytes: isAdminEmail ? UNLIMITED_ADMIN_BYTES : FREE_25GB_BYTES,
         bandwidthUsedBytes: 0,
         storageUsedBytes: 0,
         createdAt: new Date().toISOString(),
-        planId: 'free_25gb',
-        tokenBalance: 0,
+        planId: isAdminEmail ? 'unlimited_admin' : 'free_25gb',
+        tokenBalance: isAdminEmail ? 999999 : 0,
         planExpiresAt: null,
         graceEndsAt: null,
         usedPromoCodes: [],
@@ -761,6 +785,10 @@ async function startServer() {
       if (fbEmail) user.email = fbEmail;
       if (fbName) user.name = fbName;
       user.role = isAdminEmail ? 'admin' : 'member';
+      if (isAdminEmail) {
+        user.planId = 'unlimited_admin';
+        user.bandwidthLimitBytes = UNLIMITED_ADMIN_BYTES;
+      }
     }
 
     evaluateUserQuotaAndLocks(user);
@@ -816,50 +844,10 @@ async function startServer() {
     });
   });
 
-  app.post('/api/auth/register', (req, res) => {
-    const { name, email, password, role } = req.body as {
-      name?: string;
-      email?: string;
-      password?: string;
-      role?: 'admin' | 'member';
-    };
-    if (!name || !email || !password) {
-      res.status(400).json({ error: 'Name, email, and password are required' });
-      return;
-    }
-    const exists = db.users.some((u) => u.email.toLowerCase() === email.trim().toLowerCase());
-    if (exists) {
-      res.status(409).json({ error: 'An account with this email already exists' });
-      return;
-    }
-
-    const newUser: StoredUser = {
-      id: `usr_${Date.now().toString(36)}`,
-      name: name.trim(),
-      email: email.trim().toLowerCase(),
-      passwordHash: hashPassword(password),
-      role: role === 'admin' ? 'admin' : 'member',
-      bandwidthLimitBytes: FREE_25GB_BYTES,
-      bandwidthUsedBytes: 0,
-      storageUsedBytes: 0,
-      createdAt: new Date().toISOString(),
-      planId: 'free_25gb',
-      tokenBalance: 0,
-      planExpiresAt: null,
-      graceEndsAt: null,
-      usedPromoCodes: [],
-    };
-
-    db.users.push(newUser);
-    seedStarterFilesForNewUser(newUser);
-    const sessionToken = `sess_${crypto.randomBytes(16).toString('hex')}`;
-    db.sessions[sessionToken] = newUser.id;
-    saveDb();
-
-    res.json({
-      token: sessionToken,
-      user: sanitizeUser(newUser),
-      users: db.users.map(sanitizeUser),
+  app.post('/api/auth/register', (_req, res) => {
+    res.status(403).json({
+      error:
+        'New account registration is currently closed. Only existing registered accounts can sign in.',
     });
   });
 
@@ -965,10 +953,22 @@ async function startServer() {
       return;
     }
 
+    if (
+      user.role === 'admin' ||
+      user.email?.toLowerCase() === 'titumamma2425@gmail.com' ||
+      user.planId === 'unlimited_admin'
+    ) {
+      res.status(400).json({
+        error: 'Your Administrator account already has permanent Unlimited Storage active.',
+      });
+      return;
+    }
+
     const costMap: Record<StoragePlanId, number> = {
       free_25gb: 0,
       pro_50gb: 500,
       ultra_1tb: 1024,
+      unlimited_admin: 0,
     };
 
     const cost = costMap[planId];
@@ -1297,8 +1297,8 @@ async function startServer() {
 
   function computeFastFileSha256(filePath: string, sizeBytes: number): string {
     const hash = crypto.createHash('sha256');
-    const SAMPLE_BYTES = 1024 * 1024; // 1 MB head + 1 MB tail for huge files
-    if (sizeBytes <= 25 * 1024 * 1024) {
+    const SAMPLE_BYTES = 64 * 1024; // Ultra-fast 64 KB head + 64 KB tail sample for instant GB file finalization
+    if (sizeBytes <= 256 * 1024) {
       const buf = fs.readFileSync(filePath);
       return hash.update(buf).digest('hex');
     }
@@ -1329,7 +1329,7 @@ async function startServer() {
         cb(null, tmpName);
       },
     }),
-    limits: { fileSize: 5 * 1024 * 1024 * 1024 }, // 5 GB per file limit
+    limits: { fileSize: 50 * 1024 * 1024 * 1024 }, // 50 GB per file limit
   });
 
   const uploadMiddleware: express.RequestHandler = (req, res, next) => {
@@ -1432,25 +1432,9 @@ async function startServer() {
         db.transfers.unshift(job);
         broadcast('transfer:progress', job);
 
-        let storageDriver: 'telegram' | 'local_vault' = 'local_vault';
-        let telegramChunks: TelegramChunk[] = [];
-        let telegramChatId: string | undefined;
-
-        // Sync to Telegram Bot API in 19 MB chunks (supports up to 500 MB+ files)
-        if (hasLiveTelegram && rawFile.size <= 500 * 1024 * 1024) {
-          const tgResult = await pushDiskFileToTelegram(
-            finalChunkPath,
-            rawFile.originalname,
-            rawFile.size,
-            db.telegramConfig.botToken,
-            db.telegramConfig.chatId
-          );
-          if (tgResult.success) {
-            storageDriver = 'telegram';
-            telegramChunks = tgResult.chunks;
-            telegramChatId = db.telegramConfig.chatId;
-          }
-        }
+        const storageDriver: 'telegram' | 'local_vault' = 'local_vault';
+        const telegramChunks: TelegramChunk[] = [];
+        const telegramChatId: string | undefined = undefined;
 
         const mime = resolveEffectiveMimeType(rawFile.originalname, rawFile.mimetype);
         const isTextPreviewable =
@@ -1459,16 +1443,16 @@ async function startServer() {
             /\.(md|txt|json|csv|sh|ts|tsx|js|py|yaml|yml|log|html|css|xml)$/i.test(
               rawFile.originalname
             )) &&
-          rawFile.size <= 5 * 1024 * 1024;
+          rawFile.size <= 1024 * 1024;
 
         const isMediaPreviewable =
-          mime.startsWith('image/') && rawFile.size <= 8 * 1024 * 1024;
+          mime.startsWith('image/') && rawFile.size <= 2 * 1024 * 1024;
 
         let previewText: string | undefined;
         if (isTextPreviewable) {
           const fd = fs.openSync(finalChunkPath, 'r');
           try {
-            const sample = Buffer.alloc(Math.min(24000, rawFile.size));
+            const sample = Buffer.alloc(Math.min(16000, rawFile.size));
             fs.readSync(fd, sample, 0, sample.length, 0);
             previewText = sample.toString('utf-8');
           } finally {
@@ -1545,6 +1529,29 @@ async function startServer() {
           status: 'success',
           details: `Encrypted and stored in UnlimStorage Vault`,
         });
+        // Background non-blocking Telegram sync so upload finalization returns in milliseconds
+        if (hasLiveTelegram && rawFile.size <= 2000 * 1024 * 1024) {
+          const botTokenSnap = db.telegramConfig.botToken;
+          const chatIdSnap = db.telegramConfig.chatId;
+          setImmediate(() => {
+            pushDiskFileToTelegram(
+              finalChunkPath,
+              rawFile.originalname,
+              rawFile.size,
+              botTokenSnap,
+              chatIdSnap
+            )
+              .then((tgResult) => {
+                if (tgResult.success) {
+                  record.storageDriver = 'telegram';
+                  record.telegramChunks = tgResult.chunks;
+                  record.telegramChatId = chatIdSnap;
+                  saveDb();
+                }
+              })
+              .catch(() => null);
+          });
+        }
       }
 
       res.json({ files: createdRecords, user: sanitizeUser(user) });
@@ -1621,7 +1628,7 @@ async function startServer() {
   app.post(
     '/api/files/upload/chunk',
     requireAuth,
-    express.raw({ type: 'application/octet-stream', limit: '25mb' }),
+    express.raw({ type: 'application/octet-stream', limit: '32mb' }),
     (req, res) => {
       const user = (req as Request & { user: StoredUser }).user;
       const uploadId = String(req.query.uploadId || '');
@@ -1689,39 +1696,24 @@ async function startServer() {
         db.telegramConfig.autoSyncUploads
     );
 
-    let storageDriver: 'telegram' | 'local_vault' = 'local_vault';
-    let telegramChunks: TelegramChunk[] = [];
-    let telegramChatId: string | undefined;
-
-    if (hasLiveTelegram && finalSize <= 500 * 1024 * 1024) {
-      const tgResult = await pushDiskFileToTelegram(
-        finalChunkPath,
-        cleanName,
-        finalSize,
-        db.telegramConfig.botToken,
-        db.telegramConfig.chatId
-      );
-      if (tgResult.success) {
-        storageDriver = 'telegram';
-        telegramChunks = tgResult.chunks;
-        telegramChatId = db.telegramConfig.chatId;
-      }
-    }
+    const storageDriver: 'telegram' | 'local_vault' = 'local_vault';
+    const telegramChunks: TelegramChunk[] = [];
+    const telegramChatId: string | undefined = undefined;
 
     const isTextPreviewable =
       (mime.startsWith('text/') ||
         mime === 'application/json' ||
         /\.(md|txt|json|csv|sh|ts|tsx|js|py|yaml|yml|log|html|css|xml)$/i.test(cleanName)) &&
-      finalSize <= 5 * 1024 * 1024;
+      finalSize <= 1024 * 1024;
 
     const isMediaPreviewable =
-      mime.startsWith('image/') && finalSize <= 8 * 1024 * 1024;
+      mime.startsWith('image/') && finalSize <= 2 * 1024 * 1024;
 
     let previewText: string | undefined;
     if (isTextPreviewable && finalSize > 0) {
       const fd = fs.openSync(finalChunkPath, 'r');
       try {
-        const sample = Buffer.alloc(Math.min(24000, finalSize));
+        const sample = Buffer.alloc(Math.min(16000, finalSize));
         fs.readSync(fd, sample, 0, sample.length, 0);
         previewText = sample.toString('utf-8');
       } finally {
@@ -1780,7 +1772,7 @@ async function startServer() {
         title: 'Upload Complete',
         message: `${record.name} (${formatBytesServer(
           record.sizeBytes
-        )}) encrypted & saved to UnlimStorage.`,
+        )}) saved to UnlimStorage.`,
         type: 'completed',
         fileName: record.name,
         bytes: record.sizeBytes,
@@ -1797,10 +1789,29 @@ async function startServer() {
       bytesTransferred: record.sizeBytes,
       integrityHash: record.sha256.slice(0, 16),
       status: 'success',
-      details: `Encrypted and stored in UnlimStorage Vault`,
+      details: `Stored in UnlimStorage Vault`,
     });
 
+    // Return response immediately so post-upload processing completes in milliseconds!
     res.json({ file: record, user: sanitizeUser(user) });
+
+    // Sync to Telegram asynchronously in the background without blocking user UI
+    if (hasLiveTelegram && finalSize <= 2000 * 1024 * 1024) {
+      const botTokenSnap = db.telegramConfig.botToken;
+      const chatIdSnap = db.telegramConfig.chatId;
+      setImmediate(() => {
+        pushDiskFileToTelegram(finalChunkPath, cleanName, finalSize, botTokenSnap, chatIdSnap)
+          .then((tgResult) => {
+            if (tgResult.success) {
+              record.storageDriver = 'telegram';
+              record.telegramChunks = tgResult.chunks;
+              record.telegramChatId = chatIdSnap;
+              saveDb();
+            }
+          })
+          .catch(() => null);
+      });
+    }
   });
 
   app.post('/api/files/upload/cancel', requireAuth, (req, res) => {

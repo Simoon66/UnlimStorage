@@ -172,7 +172,7 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
     async function inspectTracks() {
       try {
         let headerBuffer: Uint8Array | null = null;
-        const INITIAL_SCAN_BYTES = 16 * 1024 * 1024; // Read first 16 MB for instant track + subtitle discovery
+        const INITIAL_SCAN_BYTES = 8 * 1024 * 1024; // Read first 8 MB for ultra-fast track + subtitle discovery
 
         if (rawBlob) {
           const slice = rawBlob.slice(0, Math.min(rawBlob.size, INITIAL_SCAN_BYTES));
@@ -671,7 +671,7 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
         <div className="flex items-center gap-2 shrink-0">
           <span className="hidden sm:inline-block px-2 py-0.5 text-[11px] font-mono bg-black/75 border border-white/15 text-[#F2EFE9]">
             {audioTracks.length} Audio · {subtitleTracks.length} Sub
-            {scanningSubs ? ' (Scanning...)' : ''}
+            {scanningSubs ? ' (Processing...)' : ''}
           </span>
           <button
             type="button"
@@ -781,6 +781,15 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
             ) : null
           )}
         </video>
+
+        {/* Clean Processing Overlay during track switch */}
+        {switchingAudio && (
+          <div className="absolute inset-0 z-20 bg-black/60 flex items-center justify-center pointer-events-none">
+            <div className="px-4 py-2.5 bg-[#1C1A17] border border-[#D97757] text-xs font-bold text-[#F2EFE9]">
+              Processing...
+            </div>
+          </div>
+        )}
 
         {/* Center YouTube Play Button Overlay when paused */}
         {!isPlaying && !switchingAudio && (

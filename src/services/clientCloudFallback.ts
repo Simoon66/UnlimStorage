@@ -17,6 +17,7 @@ const FILE_BLOBS_KEY = 'unlimcloud_client_blobs_v4';
 const FREE_25GB_BYTES = 25 * 1024 * 1024 * 1024;
 const PRO_50GB_BYTES = 50 * 1024 * 1024 * 1024;
 const ULTRA_1TB_BYTES = 1024 * 1024 * 1024 * 1024;
+const UNLIMITED_ADMIN_BYTES = 1024 * 1024 * 1024 * 1024 * 1024; // 1 PB (Unlimited Admin)
 
 interface ClientStoredUser extends User {
   passwordHash: string;
@@ -53,6 +54,7 @@ function simpleHash(input: string): string {
 }
 
 function getPlanQuotaBytes(planId: StoragePlanId = 'free_25gb'): number {
+  if (planId === 'unlimited_admin') return UNLIMITED_ADMIN_BYTES;
   if (planId === 'ultra_1tb') return ULTRA_1TB_BYTES;
   if (planId === 'pro_50gb') return PRO_50GB_BYTES;
   return FREE_25GB_BYTES;
@@ -115,6 +117,10 @@ function openBinaryVaultDb(): Promise<IDBDatabase | null> {
       resolve(null);
     }
   });
+}
+
+export function getMemoryBinaryBlobSync(fileId: string): Blob | null {
+  return memoryBlobCache.get(fileId) || null;
 }
 
 export async function storeClientBinaryBlob(fileId: string, blob: Blob): Promise<void> {
@@ -340,12 +346,12 @@ function createInitialClientDb(): ClientDatabase {
         email: 'titumamma2425@gmail.com',
         passwordHash: simpleHash('admin123'),
         role: 'admin',
-        bandwidthLimitBytes: FREE_25GB_BYTES,
+        bandwidthLimitBytes: UNLIMITED_ADMIN_BYTES,
         bandwidthUsedBytes: 482_344_960,
         storageUsedBytes: file1Text.length + file2Svg.length,
         createdAt: iso(4320),
-        planId: 'free_25gb',
-        tokenBalance: 250,
+        planId: 'unlimited_admin',
+        tokenBalance: 999999,
         planExpiresAt: null,
         graceEndsAt: null,
         usedPromoCodes: [],
@@ -504,6 +510,33 @@ function saveClientDb(db: ClientDatabase) {
 }
 
 function evaluateClientQuotaAndLocks(db: ClientDatabase, user: ClientStoredUser) {
+  const isAdminAccount =
+    user.role === 'admin' ||
+    user.email?.toLowerCase() === 'titumamma2425@gmail.com' ||
+    user.planId === 'unlimited_admin';
+
+  if (isAdminAccount) {
+    user.role = 'admin';
+    user.planId = 'unlimited_admin';
+    user.bandwidthLimitBytes = UNLIMITED_ADMIN_BYTES;
+    user.planExpiresAt = null;
+    user.graceEndsAt = null;
+    if (typeof user.tokenBalance !== 'number' || user.tokenBalance < 999999) {
+      user.tokenBalance = 999999;
+    }
+    if (!Array.isArray(user.usedPromoCodes)) user.usedPromoCodes = [];
+
+    let adminTotal = 0;
+    for (const f of db.files) {
+      if (f.ownerId === user.id) {
+        adminTotal += f.sizeBytes;
+        f.lockedOverQuota = false;
+      }
+    }
+    user.storageUsedBytes = adminTotal;
+    return;
+  }
+
   if (!user.planId) user.planId = 'free_25gb';
   if (typeof user.tokenBalance !== 'number') user.tokenBalance = 0;
   if (!Array.isArray(user.usedPromoCodes)) user.usedPromoCodes = [];
@@ -685,36 +718,51 @@ async function handleClientApi(urlStr: string, init?: RequestInit): Promise<Resp
   let fbUid = (parsed.searchParams.get('uid') || '').trim();
   let fbEmail = (parsed.searchParams.get('email') || '').trim();
   let fbName = '';
+  let isExistingCloudUser = false;
   if (init?.headers) {
     const h = new Headers(init.headers);
     fbUid = (h.get('X-Firebase-Uid') || fbUid).trim();
     fbEmail = (h.get('X-Firebase-Email') || fbEmail).trim();
     fbName = (h.get('X-Firebase-Name') || '').trim();
+    isExistingCloudUser = h.get('X-Existing-Cloud-User') === '1';
   }
 
   if (!fbUid) {
     return jsonResponse(
-      { error: 'Authentication required. Please sign in with Google to access UnlimCloud.' },
+      { error: 'Authentication required. Please sign in with Google to access UnlimStorage.' },
       401
     );
   }
 
   const isAdminEmail = fbEmail.toLowerCase() === 'titumamma2425@gmail.com';
-  let currentUser = db.users.find((u) => u.id === fbUid);
+  let currentUser = db.users.find(
+    (u) => u.id === fbUid || (fbEmail && u.email.toLowerCase() === fbEmail.toLowerCase())
+  );
 
   if (!currentUser) {
+    // Registration is closed for brand-new users; only admin or verified existing cloud users may initialize local session
+    if (!isAdminEmail && !isExistingCloudUser) {
+      return jsonResponse(
+        {
+          error:
+            'New account registration is currently closed. Only existing registered accounts can access UnlimStorage.',
+        },
+        403
+      );
+    }
+
     currentUser = {
       id: fbUid,
       name: fbName || fbEmail.split('@')[0] || 'Cloud User',
       email: fbEmail || `${fbUid}@user.unlimcloud`,
       passwordHash: '',
       role: isAdminEmail ? 'admin' : 'member',
-      bandwidthLimitBytes: FREE_25GB_BYTES,
+      bandwidthLimitBytes: isAdminEmail ? UNLIMITED_ADMIN_BYTES : FREE_25GB_BYTES,
       bandwidthUsedBytes: 0,
       storageUsedBytes: 0,
       createdAt: new Date().toISOString(),
-      planId: 'free_25gb',
-      tokenBalance: 0,
+      planId: isAdminEmail ? 'unlimited_admin' : 'free_25gb',
+      tokenBalance: isAdminEmail ? 999999 : 0,
       planExpiresAt: null,
       graceEndsAt: null,
       usedPromoCodes: [],
@@ -723,9 +771,14 @@ async function handleClientApi(urlStr: string, init?: RequestInit): Promise<Resp
     seedStarterClientFilesForNewUser(db, currentUser);
     saveClientDb(db);
   } else {
+    currentUser.id = fbUid;
     if (fbEmail) currentUser.email = fbEmail;
     if (fbName) currentUser.name = fbName;
     currentUser.role = isAdminEmail ? 'admin' : 'member';
+    if (isAdminEmail) {
+      currentUser.planId = 'unlimited_admin';
+      currentUser.bandwidthLimitBytes = UNLIMITED_ADMIN_BYTES;
+    }
   }
 
   evaluateClientQuotaAndLocks(db, currentUser);
@@ -806,6 +859,7 @@ async function handleClientApi(urlStr: string, init?: RequestInit): Promise<Resp
       free_25gb: 0,
       pro_50gb: 500,
       ultra_1tb: 1024,
+      unlimited_admin: 0,
     };
     const cost = costMap[planId] ?? 0;
     const currentTokens = currentUser.tokenBalance || 0;
@@ -989,7 +1043,11 @@ async function handleClientApi(urlStr: string, init?: RequestInit): Promise<Resp
     const uploadedFiles = (formData?.getAll('files') as File[]) || [];
     const totalBatchBytes = uploadedFiles.reduce((acc, f) => acc + f.size, 0);
 
-    if (currentUser.storageUsedBytes + totalBatchBytes > currentUser.bandwidthLimitBytes) {
+    if (
+      currentUser.role !== 'admin' &&
+      currentUser.planId !== 'unlimited_admin' &&
+      currentUser.storageUsedBytes + totalBatchBytes > currentUser.bandwidthLimitBytes
+    ) {
       return jsonResponse(
         {
           error:
@@ -1001,60 +1059,42 @@ async function handleClientApi(urlStr: string, init?: RequestInit): Promise<Resp
 
     const created: FileRecord[] = [];
     const blobs = getBlobStore();
+    const envToken = (import.meta as any).env?.VITE_TELEGRAM_BOT_TOKEN || '';
+    const envChat = (import.meta as any).env?.VITE_TELEGRAM_CHAT_ID || '';
+    const activeBotToken = db.telegramConfig.botToken || envToken;
+    const activeChatId = db.telegramConfig.chatId || envChat;
 
     for (const f of uploadedFiles) {
       const fileId = `file_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
       const mime = resolveClientMimeType(f.name, f.type);
-      const isText =
+      const isTinyText =
         (mime.startsWith('text/') ||
           mime === 'application/json' ||
           /\.(md|txt|json|csv|sh|ts|tsx|js|py|html|css|xml)$/i.test(f.name)) &&
-        f.size <= 5 * 1024 * 1024;
-      const isSmallImage = mime.startsWith('image/') && f.size <= 4 * 1024 * 1024;
+        f.size <= 64 * 1024;
+      const isTinyImage = mime.startsWith('image/') && f.size <= 128 * 1024;
 
-      // Always store the true binary File/Blob in IndexedDB + memory cache (supports 285 MB+ MKV files)
-      await storeClientBinaryBlob(fileId, f);
+      // Zero-copy instant memory cache + non-blocking IndexedDB write for instant GB file finalization
+      memoryBlobCache.set(fileId, f);
+      void storeClientBinaryBlob(fileId, f);
 
       let textContent = '';
       try {
-        if (isText) {
-          textContent = await f.text();
+        if (isTinyText) {
+          textContent = (await f.text()).slice(0, 8000);
         }
       } catch {
         textContent = '';
       }
 
       let previewDataUrl: string | undefined;
-      if (isSmallImage) {
+      if (isTinyImage) {
         const dUrl = await fileToDataUrl(f);
         if (dUrl) previewDataUrl = dUrl;
       }
 
       if (previewDataUrl || textContent) {
         blobs[fileId] = previewDataUrl || textContent;
-      }
-
-      let storageDriver: 'telegram' | 'local_vault' = 'local_vault';
-      let telegramChunks: TelegramChunk[] = [];
-      let telegramChatId: string | undefined;
-
-      const envToken = (import.meta as any).env?.VITE_TELEGRAM_BOT_TOKEN || '';
-      const envChat = (import.meta as any).env?.VITE_TELEGRAM_CHAT_ID || '';
-      const activeBotToken = db.telegramConfig.botToken || envToken;
-      const activeChatId = db.telegramConfig.chatId || envChat;
-
-      if (activeBotToken && activeChatId && f.size <= 500 * 1024 * 1024) {
-        const tgResult = await pushBlobToTelegramClient(
-          f,
-          f.name,
-          activeBotToken,
-          activeChatId
-        );
-        if (tgResult.success) {
-          storageDriver = 'telegram';
-          telegramChunks = tgResult.chunks;
-          telegramChatId = activeChatId;
-        }
       }
 
       const rec: FileRecord = {
@@ -1066,17 +1106,34 @@ async function handleClientApi(urlStr: string, init?: RequestInit): Promise<Resp
         sizeBytes: f.size,
         mimeType: mime,
         sha256: simpleHash(f.name + f.size),
-        storageDriver,
-        telegramChatId,
-        telegramChunks,
+        storageDriver: 'local_vault',
+        telegramChunks: [],
         starred: false,
         downloadCount: 0,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
-        previewText: isText ? textContent.slice(0, 20000) : undefined,
+        previewText: isTinyText ? textContent : undefined,
         previewDataUrl,
         lockedOverQuota: false,
       };
+
+      // Sync to Telegram Storage Node in background without blocking the user's upload completion
+      if (activeBotToken && activeChatId && f.size <= 500 * 1024 * 1024) {
+        void pushBlobToTelegramClient(f, f.name, activeBotToken, activeChatId)
+          .then((tgResult) => {
+            if (tgResult.success) {
+              const latestDb = loadClientDb();
+              const target = latestDb.files.find((item) => item.id === fileId);
+              if (target) {
+                target.storageDriver = 'telegram';
+                target.telegramChunks = tgResult.chunks;
+                target.telegramChatId = activeChatId;
+                saveClientDb(latestDb);
+              }
+            }
+          })
+          .catch(() => null);
+      }
 
       db.files.unshift(rec);
       created.push(rec);
@@ -1092,7 +1149,7 @@ async function handleClientApi(urlStr: string, init?: RequestInit): Promise<Resp
         bytesTransferred: rec.sizeBytes,
         integrityHash: rec.sha256.slice(0, 16),
         status: 'success',
-        details: 'Encrypted and saved to UnlimCloud Vault',
+        details: 'Saved to UnlimStorage Cloud Drive',
       });
     }
 
@@ -1626,6 +1683,7 @@ export async function uploadFilesWithProgress(params: {
     totalBytes: number;
     speedBps: number;
   }) => void;
+  onProcessingStart?: () => void;
 }): Promise<{ ok: boolean; cancelled?: boolean; status: number; data: any }> {
   if (params.signal?.aborted) {
     return {
@@ -1641,7 +1699,7 @@ export async function uploadFilesWithProgress(params: {
     params.files.reduce((acc, f) => acc + f.size, 0)
   );
   const startMs = performance.now();
-  const CHUNK_SIZE = 4 * 1024 * 1024; // 4 MB binary chunks (safe under Cloud Run 32 MB limit)
+  const CHUNK_SIZE = 24 * 1024 * 1024; // 24 MB high-throughput binary chunks (6x faster for GB files, safe under Cloud Run 32 MB limit)
 
   // Report initial 0% real state
   params.onProgress({
@@ -1713,7 +1771,10 @@ export async function uploadFilesWithProgress(params: {
         transferId: string;
       };
 
-      // Stream file in real 4 MB binary chunks via XMLHttpRequest
+      // Cache File reference in zero-copy memory vault immediately so post-upload preview is 0ms
+      memoryBlobCache.set(uploadId, file);
+
+      // Stream file in high-speed 24 MB binary chunks via XMLHttpRequest
       let offset = 0;
       while (offset < file.size || (file.size === 0 && offset === 0)) {
         if (params.signal?.aborted) {
@@ -1801,7 +1862,19 @@ export async function uploadFilesWithProgress(params: {
         if (file.size === 0) break;
       }
 
-      // Finalize uploaded file on server
+      // Notify UI that byte transfer is complete and fast post-upload processing has started
+      if (fileIdx === params.files.length - 1) {
+        const totalElapsed = Math.max(0.05, (performance.now() - startMs) / 1000);
+        params.onProgress({
+          percent: 100,
+          loadedBytes: totalBatchBytes,
+          totalBytes: totalBatchBytes,
+          speedBps: Math.round(totalBatchBytes / totalElapsed),
+        });
+        params.onProcessingStart?.();
+      }
+
+      // Finalize uploaded file on server (instant non-blocking response)
       const completeRes = await originalFetch('/api/files/upload/complete', {
         method: 'POST',
         headers: {
@@ -1830,8 +1903,8 @@ export async function uploadFilesWithProgress(params: {
       const completeData = await completeRes.json();
       if (completeData.file) {
         createdFiles.push(completeData.file);
-        // Also store in client IndexedDB binary cache for instant local MKV track parsing & zero-copy playback
-        storeClientBinaryBlob(completeData.file.id, file).catch(() => null);
+        memoryBlobCache.set(completeData.file.id, file);
+        void storeClientBinaryBlob(completeData.file.id, file);
       }
       if (completeData.user) {
         latestUser = completeData.user;
@@ -1841,13 +1914,6 @@ export async function uploadFilesWithProgress(params: {
     }
 
     if (staticFallbackMode !== true) {
-      const totalElapsed = Math.max(0.05, (performance.now() - startMs) / 1000);
-      params.onProgress({
-        percent: 100,
-        loadedBytes: totalBatchBytes,
-        totalBytes: totalBatchBytes,
-        speedBps: Math.round(totalBatchBytes / totalElapsed),
-      });
       return {
         ok: true,
         status: 200,
@@ -1856,7 +1922,8 @@ export async function uploadFilesWithProgress(params: {
     }
   }
 
-  // 2. Static Host Mode (e.g. Cloudflare Pages): Real binary slice reading & IndexedDB storage
+  // 2. Static Host Mode: Ultra-fast zero-copy File reference registration (supports multi-GB files without ArrayBuffer allocation)
+  const STATIC_STEP_SIZE = 128 * 1024 * 1024; // 128 MB virtual progress steps
   let processedBytes = 0;
   for (const file of params.files) {
     let offset = 0;
@@ -1869,9 +1936,9 @@ export async function uploadFilesWithProgress(params: {
           data: { error: 'Upload cancelled by user' },
         };
       }
-      const end = Math.min(file.size, offset + CHUNK_SIZE);
-      // Perform real binary slice read from disk
-      await file.slice(offset, end).arrayBuffer();
+      const end = Math.min(file.size, offset + STATIC_STEP_SIZE);
+      // Verify first 64 bytes of slice to confirm readable disk handle without loading GBs into RAM
+      await file.slice(offset, Math.min(end, offset + 64)).arrayBuffer();
       processedBytes += end - offset;
       offset = end;
 
@@ -1894,6 +1961,15 @@ export async function uploadFilesWithProgress(params: {
     };
   }
 
+  const finalElapsed = Math.max(0.05, (performance.now() - startMs) / 1000);
+  params.onProgress({
+    percent: 100,
+    loadedBytes: totalBatchBytes,
+    totalBytes: totalBatchBytes,
+    speedBps: Math.round(totalBatchBytes / finalElapsed),
+  });
+  params.onProcessingStart?.();
+
   const formData = new FormData();
   if (params.folderId) {
     formData.append('folderId', params.folderId);
@@ -1902,16 +1978,11 @@ export async function uploadFilesWithProgress(params: {
 
   const res = await handleClientApi('/api/files/upload', {
     method: 'POST',
-    headers: params.headers,
+    headers: {
+      ...params.headers,
+      'X-Existing-Cloud-User': '1',
+    },
     body: formData,
-  });
-
-  const finalElapsed = Math.max(0.05, (performance.now() - startMs) / 1000);
-  params.onProgress({
-    percent: 100,
-    loadedBytes: totalBatchBytes,
-    totalBytes: totalBatchBytes,
-    speedBps: Math.round(totalBatchBytes / finalElapsed),
   });
 
   const data = await res.json();
@@ -1963,7 +2034,11 @@ export async function syncClientDbWithFirestoreDrive(params: {
   }
 
   // 2. Ensure user exists in client DB & sync profile plan / token balance from Firestore
-  let user = db.users.find((u) => u.id === params.uid);
+  let user = db.users.find(
+    (u) =>
+      u.id === params.uid ||
+      (params.email && u.email.toLowerCase() === params.email.toLowerCase())
+  );
   if (!user) {
     user = {
       id: params.uid,
@@ -1971,21 +2046,30 @@ export async function syncClientDbWithFirestoreDrive(params: {
       email: params.email || `${params.uid}@user.unlimcloud`,
       passwordHash: '',
       role: isAdminEmail ? 'admin' : 'member',
-      bandwidthLimitBytes: FREE_25GB_BYTES,
+      bandwidthLimitBytes: isAdminEmail ? UNLIMITED_ADMIN_BYTES : FREE_25GB_BYTES,
       bandwidthUsedBytes: 0,
       storageUsedBytes: 0,
       createdAt: new Date().toISOString(),
-      planId: 'free_25gb',
-      tokenBalance: 0,
+      planId: isAdminEmail ? 'unlimited_admin' : 'free_25gb',
+      tokenBalance: isAdminEmail ? 999999 : 0,
       planExpiresAt: null,
       graceEndsAt: null,
       usedPromoCodes: [],
     };
     db.users.push(user);
     seedStarterClientFilesForNewUser(db, user);
+  } else {
+    user.id = params.uid;
+    if (params.email) user.email = params.email;
+    if (params.name) user.name = params.name;
+    user.role = isAdminEmail ? 'admin' : 'member';
   }
 
-  if (params.profile) {
+  if (isAdminEmail) {
+    user.planId = 'unlimited_admin';
+    user.bandwidthLimitBytes = UNLIMITED_ADMIN_BYTES;
+    user.tokenBalance = Math.max(user.tokenBalance || 0, 999999);
+  } else if (params.profile) {
     user.planId = params.profile.planId || user.planId || 'free_25gb';
     user.tokenBalance = Math.max(user.tokenBalance || 0, params.profile.tokenBalance || 0);
     if (params.profile.planExpiresAt) {

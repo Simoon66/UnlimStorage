@@ -1,6 +1,6 @@
 export type UserRole = 'admin' | 'member';
 
-export type StoragePlanId = 'free_25gb' | 'pro_50gb' | 'ultra_1tb';
+export type StoragePlanId = 'free_25gb' | 'pro_50gb' | 'ultra_1tb' | 'unlimited_admin';
 
 export interface User {
   id: string;

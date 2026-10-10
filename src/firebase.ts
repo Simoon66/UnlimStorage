@@ -150,18 +150,33 @@ async function ensureFirestoreUserProfileInternal(
   const safeUid = sanitizeId(fbUser.uid);
   const path = `userProfiles/${safeUid}`;
   const ref = doc(db, 'userProfiles', safeUid);
+  const isAdminEmail = fbUser.email?.toLowerCase() === 'titumamma2425@gmail.com';
+  const isLegacySeededMember = fbUser.email?.toLowerCase() === 'dev@unlim.cloud';
 
   try {
     const snap = await getDoc(ref);
     if (snap.exists()) {
       const d = snap.data();
+      const effectivePlanId: StoragePlanId = isAdminEmail
+        ? 'unlimited_admin'
+        : (d.planId as StoragePlanId) || 'free_25gb';
+
+      if (isAdminEmail && d.planId !== 'unlimited_admin') {
+        updateDoc(ref, {
+          planId: 'unlimited_admin',
+          planExpiresAt: '',
+          graceEndsAt: '',
+          updatedAt: serverTimestamp(),
+        }).catch(() => null);
+      }
+
       return {
         uid: String(d.uid || safeUid),
         displayName: String(d.displayName || fbUser.displayName || 'Cloud User'),
-        planId: (d.planId as StoragePlanId) || 'free_25gb',
+        planId: effectivePlanId,
         tokenBalance: typeof d.tokenBalance === 'number' ? d.tokenBalance : 0,
-        planExpiresAt: String(d.planExpiresAt || ''),
-        graceEndsAt: String(d.graceEndsAt || ''),
+        planExpiresAt: isAdminEmail ? '' : String(d.planExpiresAt || ''),
+        graceEndsAt: isAdminEmail ? '' : String(d.graceEndsAt || ''),
         usedPromoCodes: String(d.usedPromoCodes || ''),
       };
     }
@@ -169,15 +184,49 @@ async function ensureFirestoreUserProfileInternal(
     handleFirestoreError(error, OperationType.GET, path);
   }
 
+  // Registration is currently closed for brand-new accounts:
+  // Only the Administrator (titumamma2425@gmail.com) or users who already have existing files/accounts can proceed.
+  if (!isAdminEmail && !isLegacySeededMember) {
+    let hasExistingFiles = false;
+    try {
+      const existingFilesSnap = await getDocs(
+        query(collection(db, 'cloudFiles'), where('ownerId', '==', safeUid))
+      );
+      hasExistingFiles = !existingFilesSnap.empty;
+    } catch {
+      hasExistingFiles = false;
+    }
+
+    if (!hasExistingFiles) {
+      throw new Error(
+        'REGISTRATION_CLOSED: New account registration is currently closed. Only existing accounts can sign in.'
+      );
+    }
+
+    return {
+      uid: safeUid,
+      displayName: truncateString(fbUser.displayName || fbUser.email?.split('@')[0] || 'User', 120),
+      planId: 'free_25gb',
+      tokenBalance: 0,
+      planExpiresAt: '',
+      graceEndsAt: '',
+      usedPromoCodes: '',
+    };
+  }
+
   const initial: FirestoreUserProfileData = {
     uid: safeUid,
     displayName: truncateString(fbUser.displayName || fbUser.email?.split('@')[0] || 'User', 120),
-    planId: 'free_25gb',
-    tokenBalance: 0,
+    planId: isAdminEmail ? 'unlimited_admin' : 'free_25gb',
+    tokenBalance: isAdminEmail ? 999999 : 0,
     planExpiresAt: '',
     graceEndsAt: '',
     usedPromoCodes: '',
   };
+
+  if (!isAdminEmail) {
+    return initial;
+  }
 
   try {
     await setDoc(ref, {
@@ -194,10 +243,10 @@ async function ensureFirestoreUserProfileInternal(
         return {
           uid: String(d.uid || safeUid),
           displayName: String(d.displayName || fbUser.displayName || 'Cloud User'),
-          planId: (d.planId as StoragePlanId) || 'free_25gb',
+          planId: isAdminEmail ? 'unlimited_admin' : (d.planId as StoragePlanId) || 'free_25gb',
           tokenBalance: typeof d.tokenBalance === 'number' ? d.tokenBalance : 0,
-          planExpiresAt: String(d.planExpiresAt || ''),
-          graceEndsAt: String(d.graceEndsAt || ''),
+          planExpiresAt: isAdminEmail ? '' : String(d.planExpiresAt || ''),
+          graceEndsAt: isAdminEmail ? '' : String(d.graceEndsAt || ''),
           usedPromoCodes: String(d.usedPromoCodes || ''),
         };
       }
@@ -320,7 +369,7 @@ export async function syncCloudFileToFirestore(
       ownerName: truncateString(file.ownerName || fbUser.displayName || 'User', 120),
       folderId: sanitizeId(file.folderId || 'root'),
       name: truncateString(file.name, 255, 'file.bin'),
-      sizeBytes: Math.max(0, Math.min(1099511627776, Math.floor(file.sizeBytes))),
+      sizeBytes: Math.max(0, Math.min(54975581388800, Math.floor(file.sizeBytes))),
       mimeType: truncateString(file.mimeType || 'application/octet-stream', 128),
       starred: Boolean(file.starred),
       downloadCount: Math.max(0, Math.min(100000000, Math.floor(file.downloadCount || 0))),
@@ -409,7 +458,12 @@ export async function fetchUserCloudDriveFromFirestore(
     return { profile: null, files: [], folders: [] };
   }
 
-  const profile = await ensureFirestoreUserProfile(fbUser).catch(() => null);
+  const profile = await ensureFirestoreUserProfile(fbUser).catch((err) => {
+    if (err instanceof Error && err.message.includes('REGISTRATION_CLOSED')) {
+      throw err;
+    }
+    return null;
+  });
   const safeUid = sanitizeId(fbUser.uid);
 
   const files: FileRecord[] = [];
