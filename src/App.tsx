@@ -30,6 +30,10 @@ import {
   LogIn,
   FolderInput,
   Loader2,
+  Tag,
+  Plus,
+  CheckSquare,
+  Square,
 } from 'lucide-react';
 import {
   User,
@@ -81,6 +85,7 @@ import {
   DeleteTarget,
   BuyTokensModal,
   AuthModal,
+  ManageTagsModal,
 } from './components/Modals';
 import {
   SharedLinksView,
@@ -284,6 +289,8 @@ export default function App() {
   const [currentFolderId, setCurrentFolderId] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [onlyStarred, setOnlyStarred] = useState(false);
+  const [selectedTagFilter, setSelectedTagFilter] = useState<string | null>(null);
+  const [selectedFileIds, setSelectedFileIds] = useState<string[]>([]);
   const [creatingFolder, setCreatingFolder] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
   const [isDraggingOver, setIsDraggingOver] = useState(false);
@@ -306,6 +313,8 @@ export default function App() {
   const [shareModalFile, setShareModalFile] = useState<FileRecord | null>(null);
   const [inspectedFile, setInspectedFile] = useState<FileRecord | null>(null);
   const [moveModalFile, setMoveModalFile] = useState<FileRecord | null>(null);
+  const [batchMoveFiles, setBatchMoveFiles] = useState<FileRecord[] | null>(null);
+  const [tagModalFiles, setTagModalFiles] = useState<FileRecord[] | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
   const [showBuyTokensModal, setShowBuyTokensModal] = useState(false);
   const [showAuthModal, setShowAuthModal] = useState(false);
@@ -934,6 +943,103 @@ export default function App() {
     });
   };
 
+  const handleBatchMoveFiles = async (
+    targetFilesList: FileRecord[],
+    targetFolderId: string | null
+  ) => {
+    const movable = targetFilesList.filter((f) => f.folderId !== targetFolderId);
+    if (movable.length === 0) return;
+
+    const updatedMap = new Map<string, FileRecord>();
+    for (const file of movable) {
+      const res = await apiFetch(`/api/files/${encodeURIComponent(file.id)}`, {
+        method: 'PATCH',
+        headers: authHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ folderId: targetFolderId }),
+      });
+      const data = await res.json().catch(() => ({}));
+      const updatedFile: FileRecord = data.file || {
+        ...file,
+        folderId: targetFolderId,
+        updatedAt: new Date().toISOString(),
+      };
+      updatedMap.set(file.id, updatedFile);
+      syncCloudFileToFirestore(updatedFile, true).catch(() => null);
+    }
+
+    setFiles((prev) => prev.map((f) => updatedMap.get(f.id) || f));
+    setSelectedFileIds([]);
+
+    const destName =
+      targetFolderId === null
+        ? 'My Cloud Drive (Root)'
+        : folders.find((fl) => fl.id === targetFolderId)?.name || 'Folder';
+    pushNotification({
+      id: `batch_move_${Date.now()}`,
+      timestamp: new Date().toISOString(),
+      title: 'Batch Move Complete',
+      message: `Moved ${movable.length} ${
+        movable.length === 1 ? 'file' : 'files'
+      } to ${destName}.`,
+      type: 'completed',
+    });
+  };
+
+  const handleSaveFileTags = async (
+    targetFilesList: FileRecord[],
+    updatedTags: string[]
+  ) => {
+    const cleanTags = Array.from(
+      new Set(
+        updatedTags
+          .map((t) => t.trim().slice(0, 32))
+          .filter(Boolean)
+      )
+    ).slice(0, 12);
+
+    const updatedMap = new Map<string, FileRecord>();
+    for (const file of targetFilesList) {
+      const res = await apiFetch(`/api/files/${encodeURIComponent(file.id)}`, {
+        method: 'PATCH',
+        headers: authHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ tags: cleanTags }),
+      });
+      const data = await res.json().catch(() => ({}));
+      const updatedFile: FileRecord = data.file || {
+        ...file,
+        tags: cleanTags,
+        updatedAt: new Date().toISOString(),
+      };
+      updatedMap.set(file.id, updatedFile);
+      syncCloudFileToFirestore(updatedFile, true).catch(() => null);
+    }
+
+    setFiles((prev) => prev.map((f) => updatedMap.get(f.id) || f));
+    pushNotification({
+      id: `tags_${Date.now()}`,
+      timestamp: new Date().toISOString(),
+      title: 'File Labels Saved',
+      message:
+        targetFilesList.length > 1
+          ? `Updated labels on ${targetFilesList.length} files.`
+          : `Updated labels for "${targetFilesList[0]?.name || 'file'}".`,
+      type: 'completed',
+    });
+  };
+
+  const handleQuickRemoveTag = async (file: FileRecord, tagToRemove: string) => {
+    const nextTags = (file.tags || []).filter(
+      (t) => t.toLowerCase() !== tagToRemove.toLowerCase()
+    );
+    await handleSaveFileTags([file], nextTags);
+  };
+
+  const toggleSelectFile = (fileId: string) => {
+    setSelectedFileIds((prev) =>
+      prev.includes(fileId) ? prev.filter((id) => id !== fileId) : [...prev, fileId]
+    );
+  };
+
   const executeDeleteTarget = async () => {
     if (!deleteTarget) return;
     if (deleteTarget.type === 'folder') {
@@ -958,6 +1064,49 @@ export default function App() {
           type: 'info',
         });
       }
+    } else if (deleteTarget.type === 'batch-files') {
+      const batchIds =
+        deleteTarget.fileIds && deleteTarget.fileIds.length > 0
+          ? deleteTarget.fileIds
+          : selectedFileIds;
+      const idSet = new Set(batchIds);
+      const relatedShares = shares.filter((s) => idSet.has(s.fileId));
+
+      for (const fid of batchIds) {
+        await deleteCloudFileFromFirestore(fid).catch(() => null);
+      }
+      for (const sh of relatedShares) {
+        deletePublicShareFromFirestore(sh.token).catch(() => null);
+      }
+
+      let latestUser: User | null = null;
+      for (const fid of batchIds) {
+        const res = await apiFetch(`/api/files/${encodeURIComponent(fid)}`, {
+          method: 'DELETE',
+          headers: authHeaders(),
+        });
+        if (res.ok) {
+          const data = await res.json().catch(() => ({}));
+          if (data.user) latestUser = data.user;
+        }
+      }
+      if (latestUser) setCurrentUser(latestUser);
+      setFiles((prev) => prev.filter((f) => !idSet.has(f.id)));
+      setShares((prev) => prev.filter((s) => !idSet.has(s.fileId)));
+      setSelectedFileIds((prev) => prev.filter((id) => !idSet.has(id)));
+      if (inspectedFile && idSet.has(inspectedFile.id)) setInspectedFile(null);
+      if (shareModalFile && idSet.has(shareModalFile.id)) setShareModalFile(null);
+      if (moveModalFile && idSet.has(moveModalFile.id)) setMoveModalFile(null);
+
+      pushNotification({
+        id: `batch_del_${Date.now()}`,
+        timestamp: new Date().toISOString(),
+        title: 'Batch Delete Complete',
+        message: `${batchIds.length} ${
+          batchIds.length === 1 ? 'file was' : 'files were'
+        } permanently deleted across all devices.`,
+        type: 'info',
+      });
     } else {
       const fileId = deleteTarget.id;
       const fileName = deleteTarget.name;
@@ -978,6 +1127,7 @@ export default function App() {
         if (data.user) setCurrentUser(data.user);
         setFiles((prev) => prev.filter((f) => f.id !== fileId));
         setShares((prev) => prev.filter((s) => s.fileId !== fileId));
+        setSelectedFileIds((prev) => prev.filter((id) => id !== fileId));
         if (inspectedFile?.id === fileId) setInspectedFile(null);
         if (shareModalFile?.id === fileId) setShareModalFile(null);
         if (moveModalFile?.id === fileId) setMoveModalFile(null);
@@ -1492,6 +1642,33 @@ export default function App() {
     return data.message;
   };
 
+  // Collect all tags across files (plus standard 'Work', 'Personal', 'Archive' presets)
+  const allFilterTags = React.useMemo(() => {
+    const tagMap = new Map<string, { label: string; count: number }>();
+    for (const preset of ['Work', 'Personal', 'Archive']) {
+      tagMap.set(preset.toLowerCase(), { label: preset, count: 0 });
+    }
+    for (const f of files) {
+      for (const rawTag of f.tags || []) {
+        const clean = rawTag.trim();
+        if (!clean) continue;
+        const key = clean.toLowerCase();
+        const existing = tagMap.get(key);
+        if (existing) {
+          existing.count += 1;
+        } else {
+          tagMap.set(key, { label: clean, count: 1 });
+        }
+      }
+    }
+    return Array.from(tagMap.values());
+  }, [files]);
+
+  const allExistingTagNames = React.useMemo(
+    () => allFilterTags.map((t) => t.label),
+    [allFilterTags]
+  );
+
   // ============================================================================
   // 1. PUBLIC SHARE PORTAL RENDERING
   // ============================================================================
@@ -1613,18 +1790,73 @@ export default function App() {
   const visibleSubfolders = folders.filter((f) => f.parentId === currentFolderId);
 
   const visibleFiles = files.filter((f) => {
+    if (selectedTagFilter) {
+      const hasMatchingTag = (f.tags || []).some(
+        (t) => t.toLowerCase() === selectedTagFilter.toLowerCase()
+      );
+      if (!hasMatchingTag) return false;
+    }
+
     if (onlyStarred) {
       if (!f.starred) return false;
-    } else if (!searchQuery.trim()) {
+    } else if (!searchQuery.trim() && !selectedTagFilter) {
       if (f.folderId !== currentFolderId) return false;
     }
 
     if (searchQuery.trim()) {
       const q = searchQuery.toLowerCase();
-      return f.name.toLowerCase().includes(q) || f.ownerName.toLowerCase().includes(q);
+      const matchesTag = (f.tags || []).some((t) => t.toLowerCase().includes(q));
+      return (
+        f.name.toLowerCase().includes(q) ||
+        f.ownerName.toLowerCase().includes(q) ||
+        matchesTag
+      );
     }
     return true;
   });
+
+  const selectedFilesObjects = files.filter((f) => selectedFileIds.includes(f.id));
+  const selectedTotalBytes = selectedFilesObjects.reduce((acc, f) => acc + f.sizeBytes, 0);
+  const allVisibleSelected =
+    visibleFiles.length > 0 && visibleFiles.every((f) => selectedFileIds.includes(f.id));
+
+  const handleToggleSelectAllVisible = () => {
+    if (allVisibleSelected) {
+      const visibleSet = new Set(visibleFiles.map((f) => f.id));
+      setSelectedFileIds((prev) => prev.filter((id) => !visibleSet.has(id)));
+    } else {
+      const merged = new Set([...selectedFileIds, ...visibleFiles.map((f) => f.id)]);
+      setSelectedFileIds(Array.from(merged));
+    }
+  };
+
+  const handleBatchDownload = async () => {
+    if (selectedFilesObjects.length === 0) return;
+    const unlocked = selectedFilesObjects.filter((f) => !f.lockedOverQuota);
+    if (unlocked.length === 0) {
+      pushNotification({
+        id: `batch_dl_lock_${Date.now()}`,
+        timestamp: new Date().toISOString(),
+        title: 'Selected Files Locked',
+        message: 'Extend your storage plan with Tokens to download locked files.',
+        type: 'warning',
+      });
+      return;
+    }
+    pushNotification({
+      id: `batch_dl_start_${Date.now()}`,
+      timestamp: new Date().toISOString(),
+      title: 'Batch Download Started',
+      message: `Downloading ${unlocked.length} ${
+        unlocked.length === 1 ? 'file' : 'files'
+      }...`,
+      type: 'info',
+    });
+    for (const file of unlocked) {
+      await handleDownloadFile(file);
+      await new Promise((r) => setTimeout(r, 280));
+    }
+  };
 
   const isUnlimitedAdmin =
     isAdminUser ||
@@ -2041,11 +2273,140 @@ export default function App() {
                   type="text"
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
-                  placeholder="Search your files..."
+                  placeholder="Search files or labels..."
                   className="w-full min-h-[44px] bg-[#1C1A17] border border-[#2C2824] pl-10 pr-4 py-2.5 text-xs text-[#F2EFE9] focus:outline-none focus:border-[#D97757]"
                 />
               </div>
             </div>
+
+            {/* Tag / Label Filter Bar */}
+            <div className="p-3 bg-[#1C1A17] border border-[#2C2824] flex flex-wrap items-center justify-between gap-2.5">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <span className="text-[11px] font-semibold text-[#9E978E] uppercase tracking-wider mr-1.5 flex items-center gap-1">
+                  <Tag className="w-3.5 h-3.5 text-[#D97757]" />
+                  Labels:
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setSelectedTagFilter(null)}
+                  className={`min-h-[32px] px-3 py-1 text-xs font-semibold border transition-colors cursor-pointer ${
+                    selectedTagFilter === null
+                      ? 'bg-[#D97757] border-[#D97757] text-[#141311]'
+                      : 'bg-[#141311] border-[#2C2824] text-[#9E978E] hover:border-[#D97757] hover:text-[#F2EFE9]'
+                  }`}
+                >
+                  All Files ({files.length})
+                </button>
+                {allFilterTags.map((tagItem) => {
+                  const isActive =
+                    selectedTagFilter?.toLowerCase() === tagItem.label.toLowerCase();
+                  return (
+                    <button
+                      key={tagItem.label}
+                      type="button"
+                      onClick={() =>
+                        setSelectedTagFilter(isActive ? null : tagItem.label)
+                      }
+                      className={`min-h-[32px] px-3 py-1 text-xs font-semibold border transition-colors flex items-center gap-1.5 cursor-pointer ${
+                        isActive
+                          ? 'bg-[#D97757] border-[#D97757] text-[#141311]'
+                          : 'bg-[#141311] border-[#2C2824] text-[#9E978E] hover:border-[#D97757] hover:text-[#F2EFE9]'
+                      }`}
+                    >
+                      <span>{tagItem.label}</span>
+                      <span
+                        className={`text-[11px] tabular-nums ${
+                          isActive ? 'text-[#141311]/80 font-bold' : 'text-[#9E978E]'
+                        }`}
+                      >
+                        ({tagItem.count})
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+
+              {selectedTagFilter && (
+                <button
+                  type="button"
+                  onClick={() => setSelectedTagFilter(null)}
+                  className="min-h-[30px] px-2.5 py-1 text-xs text-[#D97757] hover:underline flex items-center gap-1 cursor-pointer"
+                >
+                  <X className="w-3.5 h-3.5" />
+                  Clear Filter
+                </button>
+              )}
+            </div>
+
+            {/* Batch Actions Bar (Appears when 1 or more files are checked) */}
+            {selectedFileIds.length > 0 && (
+              <div className="p-3.5 bg-[#24211D] border border-[#D97757] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div className="flex items-center gap-2.5 text-xs">
+                  <CheckSquare className="w-4 h-4 text-[#D97757] shrink-0" />
+                  <span className="font-bold text-[#F2EFE9]">
+                    {selectedFileIds.length}{' '}
+                    {selectedFileIds.length === 1 ? 'file' : 'files'} selected
+                  </span>
+                  <span className="text-[#9E978E] tabular-nums">
+                    ({formatBytes(selectedTotalBytes)})
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-2 sm:flex sm:flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setTagModalFiles(selectedFilesObjects)}
+                    className="min-h-[38px] px-3 py-1.5 text-xs font-semibold bg-[#1C1A17] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center justify-center gap-1.5 cursor-pointer"
+                  >
+                    <Tag className="w-3.5 h-3.5 text-[#D97757]" />
+                    <span>Label ({selectedFileIds.length})</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setBatchMoveFiles(selectedFilesObjects)}
+                    className="min-h-[38px] px-3 py-1.5 text-xs font-semibold bg-[#1C1A17] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center justify-center gap-1.5 cursor-pointer"
+                  >
+                    <FolderInput className="w-3.5 h-3.5 text-[#D97757]" />
+                    <span>Move to Folder</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={handleBatchDownload}
+                    className="min-h-[38px] px-3 py-1.5 text-xs font-bold bg-[#D97757] text-[#141311] hover:bg-[#E08568] flex items-center justify-center gap-1.5 cursor-pointer"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    <span>Download ({selectedFileIds.length})</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setDeleteTarget({
+                        type: 'batch-files',
+                        id: 'batch',
+                        name: `${selectedFileIds.length} Selected Files`,
+                        subtitle: `Total Size: ${formatBytes(selectedTotalBytes)}`,
+                        fileIds: [...selectedFileIds],
+                      })
+                    }
+                    className="min-h-[38px] px-3 py-1.5 text-xs font-semibold bg-[#141311] border border-[#D94848] text-[#D94848] hover:bg-[#D94848] hover:text-[#F2EFE9] flex items-center justify-center gap-1.5 cursor-pointer"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    <span>Delete ({selectedFileIds.length})</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setSelectedFileIds([])}
+                    className="col-span-2 sm:col-span-1 min-h-[38px] px-3 py-1.5 text-xs text-[#9E978E] hover:text-[#F2EFE9] border border-[#2C2824] bg-[#141311] cursor-pointer"
+                  >
+                    Clear Selection
+                  </button>
+                </div>
+              </div>
+            )}
 
             {/* Inline New Folder Input */}
             {creatingFolder && (
@@ -2080,12 +2441,13 @@ export default function App() {
             )}
 
             {/* Breadcrumb (Also acts as Drop Target to move files back to Root) */}
-            {(activeFolder || onlyStarred) && (
+            {(activeFolder || onlyStarred || selectedTagFilter) && (
               <div className="flex items-center gap-2 text-sm font-semibold">
                 <button
                   onClick={() => {
                     setCurrentFolderId(null);
                     setOnlyStarred(false);
+                    setSelectedTagFilter(null);
                   }}
                   onDragOver={(e) => {
                     if (draggedFileId) {
@@ -2114,13 +2476,17 @@ export default function App() {
                 </button>
                 <ChevronRight className="w-4 h-4 text-[#9E978E]" />
                 <span className="text-[#D97757] truncate">
-                  {onlyStarred ? 'Starred Files' : activeFolder?.name}
+                  {selectedTagFilter
+                    ? `Label: ${selectedTagFilter}`
+                    : onlyStarred
+                    ? 'Starred Files'
+                    : activeFolder?.name}
                 </span>
               </div>
             )}
 
             {/* Folders Section (Supports Google Drive-style Drag & Drop File onto Folder) */}
-            {!onlyStarred && !searchQuery.trim() && visibleSubfolders.length > 0 && (
+            {!onlyStarred && !selectedTagFilter && !searchQuery.trim() && visibleSubfolders.length > 0 && (
               <div className="space-y-2.5">
                 <div className="flex items-center justify-between">
                   <h2 className="text-xs font-semibold text-[#9E978E] uppercase tracking-wider">
@@ -2200,12 +2566,30 @@ export default function App() {
 
             {/* Files Section */}
             <div className="space-y-2.5">
-              <div className="flex items-center justify-between">
-                <h2 className="text-xs font-semibold text-[#9E978E] uppercase tracking-wider">
-                  Files ({visibleFiles.length})
-                </h2>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-3">
+                  <h2 className="text-xs font-semibold text-[#9E978E] uppercase tracking-wider">
+                    Files ({visibleFiles.length})
+                  </h2>
+                  {visibleFiles.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={handleToggleSelectAllVisible}
+                      className="min-h-[30px] px-2.5 py-1 text-xs font-semibold bg-[#1C1A17] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center gap-1.5 cursor-pointer"
+                    >
+                      {allVisibleSelected ? (
+                        <CheckSquare className="w-3.5 h-3.5 text-[#D97757]" />
+                      ) : (
+                        <Square className="w-3.5 h-3.5 text-[#9E978E]" />
+                      )}
+                      <span>
+                        {allVisibleSelected ? 'Deselect All' : 'Select All'}
+                      </span>
+                    </button>
+                  )}
+                </div>
                 <span className="hidden sm:inline text-xs text-[#9E978E]">
-                  Tap any file (including MKV video) to preview · Click Move or drag to organize
+                  Check files for batch actions · Tap any file to preview · Click + Label to organize
                 </span>
               </div>
 
@@ -2216,24 +2600,39 @@ export default function App() {
                   }`}
                 >
                   <div className="text-base font-bold text-[#F2EFE9]">
-                    This folder is empty
+                    {selectedTagFilter
+                      ? `No files labeled "${selectedTagFilter}"`
+                      : 'This folder is empty'}
                   </div>
                   <p className="text-xs text-[#9E978E] max-w-md mx-auto">
-                    Tap Upload Files below or upload directly from any web link.
+                    {selectedTagFilter
+                      ? 'Assign this label to any file card using the + Label button, or clear the active filter.'
+                      : 'Tap Upload Files below or upload directly from any web link.'}
                   </p>
                   <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-center gap-2.5 pt-2">
-                    <button
-                      onClick={() => fileInputRef.current?.click()}
-                      className="min-h-[44px] px-5 py-2.5 text-xs font-bold bg-[#D97757] text-[#141311] cursor-pointer"
-                    >
-                      + Upload Files
-                    </button>
-                    <button
-                      onClick={() => setShowRemoteModal(true)}
-                      className="min-h-[44px] px-4 py-2.5 text-xs font-semibold bg-[#24211D] border border-[#2C2824] text-[#F2EFE9] cursor-pointer"
-                    >
-                      Upload from Link
-                    </button>
+                    {selectedTagFilter ? (
+                      <button
+                        onClick={() => setSelectedTagFilter(null)}
+                        className="min-h-[44px] px-5 py-2.5 text-xs font-bold bg-[#D97757] text-[#141311] cursor-pointer"
+                      >
+                        Show All Files
+                      </button>
+                    ) : (
+                      <>
+                        <button
+                          onClick={() => fileInputRef.current?.click()}
+                          className="min-h-[44px] px-5 py-2.5 text-xs font-bold bg-[#D97757] text-[#141311] cursor-pointer"
+                        >
+                          + Upload Files
+                        </button>
+                        <button
+                          onClick={() => setShowRemoteModal(true)}
+                          className="min-h-[44px] px-4 py-2.5 text-xs font-semibold bg-[#24211D] border border-[#2C2824] text-[#F2EFE9] cursor-pointer"
+                        >
+                          Upload from Link
+                        </button>
+                      </>
+                    )}
                   </div>
                 </div>
               ) : (
@@ -2241,6 +2640,8 @@ export default function App() {
                   {visibleFiles.map((file) => {
                     const existingShare = shares.find((s) => s.fileId === file.id);
                     const isLocked = Boolean(file.lockedOverQuota);
+                    const isSelected = selectedFileIds.includes(file.id);
+                    const fileTags = Array.isArray(file.tags) ? file.tags : [];
                     return (
                       <div
                         key={file.id}
@@ -2253,42 +2654,77 @@ export default function App() {
                           setDraggedFileId(null);
                           setDragOverFolderId(null);
                         }}
-                        className={`p-4 sm:p-5 bg-[#1C1A17] border transition-colors flex flex-col justify-between gap-4 ${
-                          isLocked
-                            ? 'border-[#D99B26]/80'
-                            : 'border-[#2C2824] hover:border-[#D97757]/70'
+                        className={`p-4 sm:p-5 border transition-colors flex flex-col justify-between gap-4 ${
+                          isSelected
+                            ? 'bg-[#24211D] border-[#D97757]'
+                            : isLocked
+                            ? 'bg-[#1C1A17] border-[#D99B26]/80'
+                            : 'bg-[#1C1A17] border-[#2C2824] hover:border-[#D97757]/70'
                         }`}
                       >
                         <div className="space-y-3">
                           <div className="flex items-start justify-between gap-2">
-                            <button
-                              onClick={() => setInspectedFile(file)}
-                              className="w-11 h-11 bg-[#24211D] border border-[#2C2824] flex items-center justify-center shrink-0 cursor-pointer overflow-hidden"
-                              title="Preview File"
-                            >
-                              {file.previewDataUrl && file.mimeType.startsWith('image/') ? (
-                                <img
-                                  src={file.previewDataUrl}
-                                  alt={file.name}
-                                  className="w-full h-full object-cover"
-                                />
-                              ) : (
-                                renderFileIcon(file)
-                              )}
-                            </button>
+                            <div className="flex items-center gap-2.5">
+                              {/* Batch Action Selection Checkbox */}
+                              <button
+                                type="button"
+                                role="checkbox"
+                                aria-checked={isSelected}
+                                aria-label={`Select ${file.name}`}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  toggleSelectFile(file.id);
+                                }}
+                                className={`w-9 h-9 border flex items-center justify-center shrink-0 transition-colors cursor-pointer ${
+                                  isSelected
+                                    ? 'bg-[#D97757] border-[#D97757] text-[#141311]'
+                                    : 'bg-[#141311] border-[#2C2824] text-[#9E978E] hover:border-[#D97757] hover:text-[#F2EFE9]'
+                                }`}
+                                title={isSelected ? 'Deselect file' : 'Select file for batch action'}
+                              >
+                                {isSelected ? (
+                                  <CheckSquare className="w-4 h-4" />
+                                ) : (
+                                  <Square className="w-4 h-4" />
+                                )}
+                              </button>
+
+                              <button
+                                onClick={() => setInspectedFile(file)}
+                                className="w-11 h-11 bg-[#24211D] border border-[#2C2824] flex items-center justify-center shrink-0 cursor-pointer overflow-hidden"
+                                title="Preview File"
+                              >
+                                {file.previewDataUrl && file.mimeType.startsWith('image/') ? (
+                                  <img
+                                    src={file.previewDataUrl}
+                                    alt={file.name}
+                                    className="w-full h-full object-cover"
+                                  />
+                                ) : (
+                                  renderFileIcon(file)
+                                )}
+                              </button>
+                            </div>
 
                             <div className="flex items-center -mr-2 -mt-2">
                               <button
                                 onClick={() => setInspectedFile(file)}
-                                className="min-w-[38px] min-h-[44px] flex items-center justify-center text-[#9E978E] hover:text-[#F2EFE9] cursor-pointer"
+                                className="min-w-[36px] min-h-[44px] flex items-center justify-center text-[#9E978E] hover:text-[#F2EFE9] cursor-pointer"
                                 title="Preview File (MKV / Video / Image / PDF)"
                               >
                                 <Eye className="w-4 h-4" />
                               </button>
+                              <button
+                                onClick={() => setTagModalFiles([file])}
+                                className="min-w-[36px] min-h-[44px] flex items-center justify-center text-[#9E978E] hover:text-[#D97757] cursor-pointer"
+                                title="Manage Labels / Tags"
+                              >
+                                <Tag className="w-4 h-4" />
+                              </button>
                               {!isLocked && (
                                 <button
                                   onClick={() => setMoveModalFile(file)}
-                                  className="min-w-[38px] min-h-[44px] flex items-center justify-center text-[#9E978E] hover:text-[#D97757] cursor-pointer"
+                                  className="min-w-[36px] min-h-[44px] flex items-center justify-center text-[#9E978E] hover:text-[#D97757] cursor-pointer"
                                   title="Move to Folder"
                                 >
                                   <FolderInput className="w-4 h-4" />
@@ -2296,7 +2732,7 @@ export default function App() {
                               )}
                               <button
                                 onClick={() => handleToggleStar(file)}
-                                className={`min-w-[38px] min-h-[44px] flex items-center justify-center cursor-pointer ${
+                                className={`min-w-[36px] min-h-[44px] flex items-center justify-center cursor-pointer ${
                                   file.starred
                                     ? 'text-[#D97757]'
                                     : 'text-[#9E978E] hover:text-[#F2EFE9]'
@@ -2317,7 +2753,7 @@ export default function App() {
                                     subtitle: `Size: ${formatBytes(file.sizeBytes)}`,
                                   })
                                 }
-                                className="min-w-[38px] min-h-[44px] flex items-center justify-center text-[#9E978E] hover:text-[#D94848] cursor-pointer"
+                                className="min-w-[36px] min-h-[44px] flex items-center justify-center text-[#9E978E] hover:text-[#D94848] cursor-pointer"
                                 title="Delete File"
                               >
                                 <Trash2 className="w-4 h-4" />
@@ -2347,6 +2783,59 @@ export default function App() {
                               )}
                               <span aria-hidden="true">·</span>
                               <span>{formatShortDate(file.updatedAt)}</span>
+                            </div>
+
+                            {/* File Tags / Custom Labels Row */}
+                            <div className="flex flex-wrap items-center gap-1.5 mt-2.5">
+                              {fileTags.map((tag) => {
+                                const isFiltered =
+                                  selectedTagFilter?.toLowerCase() === tag.toLowerCase();
+                                return (
+                                  <span
+                                    key={tag}
+                                    className={`inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-semibold border transition-colors ${
+                                      isFiltered
+                                        ? 'bg-[#D97757] border-[#D97757] text-[#141311]'
+                                        : 'bg-[#141311] border-[#2C2824] text-[#F2EFE9]'
+                                    }`}
+                                  >
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        setSelectedTagFilter(isFiltered ? null : tag)
+                                      }
+                                      className="hover:underline cursor-pointer"
+                                      title={`Filter by "${tag}"`}
+                                    >
+                                      {tag}
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        handleQuickRemoveTag(file, tag);
+                                      }}
+                                      className={`ml-0.5 cursor-pointer ${
+                                        isFiltered
+                                          ? 'text-[#141311]/70 hover:text-[#141311]'
+                                          : 'text-[#9E978E] hover:text-[#D94848]'
+                                      }`}
+                                      title={`Remove "${tag}" label`}
+                                    >
+                                      <X className="w-2.5 h-2.5" />
+                                    </button>
+                                  </span>
+                                );
+                              })}
+                              <button
+                                type="button"
+                                onClick={() => setTagModalFiles([file])}
+                                className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-medium bg-[#141311] border border-[#2C2824] hover:border-[#D97757] text-[#9E978E] hover:text-[#F2EFE9] cursor-pointer"
+                                title="Add or edit custom labels"
+                              >
+                                <Plus className="w-2.5 h-2.5 text-[#D97757]" />
+                                <span>{fileTags.length === 0 ? 'Add Label' : 'Label'}</span>
+                              </button>
                             </div>
                           </div>
                         </div>
@@ -2581,14 +3070,28 @@ export default function App() {
         />
       )}
 
-      {moveModalFile && (
+      {(moveModalFile || (batchMoveFiles && batchMoveFiles.length > 0)) && (
         <MoveFileModal
           file={moveModalFile}
+          targetFiles={batchMoveFiles || undefined}
           folders={folders}
           files={files}
-          onClose={() => setMoveModalFile(null)}
+          onClose={() => {
+            setMoveModalFile(null);
+            setBatchMoveFiles(null);
+          }}
           onMoveFile={handleMoveFile}
+          onMoveFiles={handleBatchMoveFiles}
           onCreateFolder={handleCreateFolderFromModal}
+        />
+      )}
+
+      {tagModalFiles && tagModalFiles.length > 0 && (
+        <ManageTagsModal
+          targetFiles={tagModalFiles}
+          allExistingTags={allExistingTagNames}
+          onClose={() => setTagModalFiles(null)}
+          onSaveTags={handleSaveFileTags}
         />
       )}
 

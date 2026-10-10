@@ -237,6 +237,7 @@ function createSeedDatabase(): DatabaseSchema {
         updatedAt: iso(640),
         previewText: seedFile1Content.toString('utf-8'),
         lockedOverQuota: false,
+        tags: ['Work', 'Personal'],
       },
       {
         id: 'file_diagram_02',
@@ -1560,6 +1561,7 @@ async function startServer() {
                 : cur.telegramChunks || [],
             previewText: cur.previewText || cf.previewText,
             previewDataUrl: cur.previewDataUrl || cf.previewDataUrl,
+            tags: Array.isArray(cf.tags) ? cf.tags : cur.tags || [],
           };
         }
       }
@@ -2221,10 +2223,11 @@ async function startServer() {
       res.status(404).json({ error: 'File not found' });
       return;
     }
-    const { name, folderId, starred } = req.body as {
+    const { name, folderId, starred, tags } = req.body as {
       name?: string;
       folderId?: string | null;
       starred?: boolean;
+      tags?: string[];
     };
     if (typeof name === 'string' && name.trim()) {
       file.name = name.trim();
@@ -2234,6 +2237,21 @@ async function startServer() {
     }
     if (typeof starred === 'boolean') {
       file.starred = starred;
+    }
+    if (Array.isArray(tags)) {
+      const seen = new Set<string>();
+      const cleanTags: string[] = [];
+      for (const raw of tags) {
+        const t = String(raw || '').trim().slice(0, 32);
+        if (!t) continue;
+        const lower = t.toLowerCase();
+        if (!seen.has(lower)) {
+          seen.add(lower);
+          cleanTags.push(t);
+          if (cleanTags.length >= 12) break;
+        }
+      }
+      file.tags = cleanTags;
     }
     file.updatedAt = new Date().toISOString();
     saveDb();

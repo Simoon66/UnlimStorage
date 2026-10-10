@@ -27,6 +27,8 @@ import {
   RotateCw,
   Maximize2,
   Film,
+  Tag,
+  Plus,
 } from 'lucide-react';
 import { FileRecord, FolderRecord, ShareLink, User } from '../types';
 import { formatBytes, formatShortDate } from '../utils/format';
@@ -833,30 +835,46 @@ export const FileDetailDrawer: React.FC<FileDetailDrawerProps> = ({
 // ============================================================================
 
 interface MoveFileModalProps {
-  file: FileRecord;
+  file?: FileRecord | null;
+  targetFiles?: FileRecord[];
   folders: FolderRecord[];
   files: FileRecord[];
   onClose: () => void;
   onMoveFile: (file: FileRecord, targetFolderId: string | null) => Promise<void>;
+  onMoveFiles?: (files: FileRecord[], targetFolderId: string | null) => Promise<void>;
   onCreateFolder: (name: string, parentId: string | null) => Promise<FolderRecord | null>;
 }
 
 export const MoveFileModal: React.FC<MoveFileModalProps> = ({
   file,
+  targetFiles,
   folders,
   files,
   onClose,
   onMoveFile,
+  onMoveFiles,
   onCreateFolder,
 }) => {
-  const [selectedFolderId, setSelectedFolderId] = useState<string | null>(file.folderId);
+  const effectiveFiles =
+    targetFiles && targetFiles.length > 0 ? targetFiles : file ? [file] : [];
+  const primaryFile = effectiveFiles[0];
+  const isBatchMove = effectiveFiles.length > 1;
+  const allSameFolder = effectiveFiles.every(
+    (f) => f.folderId === primaryFile?.folderId
+  );
+  const initialFolderId = allSameFolder && primaryFile ? primaryFile.folderId : null;
+
+  const [selectedFolderId, setSelectedFolderId] = useState<string | null>(initialFolderId);
   const [browsingParentId, setBrowsingParentId] = useState<string | null>(null);
   const [moving, setMoving] = useState(false);
   const [creatingSubfolder, setCreatingSubfolder] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
   const [error, setError] = useState<string | null>(null);
 
-  const currentFolderObj = folders.find((f) => f.id === file.folderId) || null;
+  const currentFolderObj =
+    allSameFolder && primaryFile
+      ? folders.find((f) => f.id === primaryFile.folderId) || null
+      : null;
   const browsingFolderObj = folders.find((f) => f.id === browsingParentId) || null;
 
   const visibleFolders = folders.filter((f) => f.parentId === browsingParentId);
@@ -878,17 +896,29 @@ export const MoveFileModal: React.FC<MoveFileModalProps> = ({
   };
 
   const handleConfirmMove = async () => {
-    if (selectedFolderId === file.folderId) {
+    if (effectiveFiles.length === 0) {
+      onClose();
+      return;
+    }
+    if (allSameFolder && selectedFolderId === primaryFile?.folderId) {
       onClose();
       return;
     }
     setMoving(true);
     setError(null);
     try {
-      await onMoveFile(file, selectedFolderId);
+      if (isBatchMove && onMoveFiles) {
+        await onMoveFiles(effectiveFiles, selectedFolderId);
+      } else if (isBatchMove) {
+        for (const item of effectiveFiles) {
+          await onMoveFile(item, selectedFolderId);
+        }
+      } else if (primaryFile) {
+        await onMoveFile(primaryFile, selectedFolderId);
+      }
       onClose();
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Could not move file');
+      setError(err instanceof Error ? err.message : 'Could not move files');
     } finally {
       setMoving(false);
     }
@@ -906,7 +936,9 @@ export const MoveFileModal: React.FC<MoveFileModalProps> = ({
           <div className="flex items-center gap-2.5 min-w-0">
             <FolderInput className="w-4 h-4 text-[#D97757] shrink-0" />
             <h2 className="text-base font-bold text-[#F2EFE9] truncate">
-              Move &ldquo;{file.name}&rdquo;
+              {isBatchMove
+                ? `Move ${effectiveFiles.length} Selected Files`
+                : `Move "${primaryFile?.name || 'File'}"`}
             </h2>
           </div>
           <button
@@ -922,7 +954,11 @@ export const MoveFileModal: React.FC<MoveFileModalProps> = ({
             <span>
               Current location:{' '}
               <strong className="text-[#F2EFE9]">
-                {currentFolderObj ? currentFolderObj.name : 'My Cloud Drive (Root)'}
+                {!allSameFolder
+                  ? 'Multiple Folders'
+                  : currentFolderObj
+                  ? currentFolderObj.name
+                  : 'My Cloud Drive (Root)'}
               </strong>
             </span>
             <button
@@ -1019,7 +1055,7 @@ export const MoveFileModal: React.FC<MoveFileModalProps> = ({
 
             {visibleFolders.map((folder) => {
               const isSelected = selectedFolderId === folder.id;
-              const isCurrent = file.folderId === folder.id;
+              const isCurrent = allSameFolder && primaryFile?.folderId === folder.id;
               const itemCount = files.filter((f) => f.folderId === folder.id).length;
               const hasSubfolders = folders.some((sub) => sub.parentId === folder.id);
 
@@ -1092,12 +1128,12 @@ export const MoveFileModal: React.FC<MoveFileModalProps> = ({
             <button
               type="button"
               onClick={handleConfirmMove}
-              disabled={moving || selectedFolderId === file.folderId}
+              disabled={moving || (allSameFolder && selectedFolderId === primaryFile?.folderId)}
               className="min-h-[44px] px-5 py-2.5 text-xs font-bold bg-[#D97757] text-[#141311] hover:bg-[#E08568] disabled:opacity-50 cursor-pointer"
             >
               {moving
                 ? 'Moving...'
-                : selectedFolderId === file.folderId
+                : allSameFolder && selectedFolderId === primaryFile?.folderId
                 ? 'Already in This Folder'
                 : `Move to "${targetDestinationName}"`}
             </button>
@@ -1109,14 +1145,15 @@ export const MoveFileModal: React.FC<MoveFileModalProps> = ({
 };
 
 // ============================================================================
-// 4. DELETE CONFIRMATION MODAL (Files & Folders)
+// 4. DELETE CONFIRMATION MODAL (Files, Batch Files & Folders)
 // ============================================================================
 
 export interface DeleteTarget {
-  type: 'file' | 'folder';
+  type: 'file' | 'folder' | 'batch-files';
   id: string;
   name: string;
   subtitle?: string;
+  fileIds?: string[];
 }
 
 interface DeleteConfirmModalProps {
@@ -1149,7 +1186,13 @@ export const DeleteConfirmModal: React.FC<DeleteConfirmModalProps> = ({
           <div className="flex items-center gap-2.5">
             <AlertTriangle className="w-4 h-4 text-[#D94848]" />
             <h2 className="text-base font-bold text-[#F2EFE9]">
-              Confirm {target.type === 'folder' ? 'Folder' : 'File'} Deletion
+              Confirm{' '}
+              {target.type === 'folder'
+                ? 'Folder'
+                : target.type === 'batch-files'
+                ? 'Batch File'
+                : 'File'}{' '}
+              Deletion
             </h2>
           </div>
           <button
@@ -1171,9 +1214,11 @@ export const DeleteConfirmModal: React.FC<DeleteConfirmModalProps> = ({
             </div>
           )}
           <p className="text-xs text-[#9E978E]">
-            {target.type === 'file'
-              ? 'This file and any active shared download links pointing to it will be permanently removed.'
-              : 'This folder will be removed and any files inside will be moved safely to your main drive.'}
+            {target.type === 'folder'
+              ? 'This folder will be removed and any files inside will be moved safely to your main drive.'
+              : target.type === 'batch-files'
+              ? 'All selected files and any active shared download links pointing to them will be permanently removed across all devices.'
+              : 'This file and any active shared download links pointing to it will be permanently removed.'}
           </p>
 
           <div className="grid grid-cols-2 gap-3 pt-3 border-t border-[#2C2824]">
@@ -1609,3 +1654,245 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     </div>
   );
 };
+
+// ============================================================================
+// 7. MANAGE FILE TAGS / CUSTOM LABELS MODAL (Single File or Batch Selection)
+// ============================================================================
+
+const PRESET_FILE_TAGS = ['Work', 'Personal', 'Archive', 'Important', 'Project', 'Media'];
+
+interface ManageTagsModalProps {
+  targetFiles: FileRecord[];
+  allExistingTags: string[];
+  onClose: () => void;
+  onSaveTags: (files: FileRecord[], updatedTags: string[]) => Promise<void>;
+}
+
+export const ManageTagsModal: React.FC<ManageTagsModalProps> = ({
+  targetFiles,
+  allExistingTags,
+  onClose,
+  onSaveTags,
+}) => {
+  const isBatch = targetFiles.length > 1;
+  const initialTags = React.useMemo(() => {
+    if (targetFiles.length === 0) return [];
+    if (targetFiles.length === 1) {
+      return Array.isArray(targetFiles[0].tags) ? [...targetFiles[0].tags] : [];
+    }
+    // For batch selection, start with tags common to all selected files
+    const firstTags = Array.isArray(targetFiles[0].tags) ? targetFiles[0].tags : [];
+    return firstTags.filter((tag) =>
+      targetFiles.every((f) =>
+        (f.tags || []).some((t) => t.toLowerCase() === tag.toLowerCase())
+      )
+    );
+  }, [targetFiles]);
+
+  const [selectedTags, setSelectedTags] = useState<string[]>(initialTags);
+  const [customTagInput, setCustomTagInput] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const availableSuggestions = React.useMemo(() => {
+    const merged = new Map<string, string>();
+    for (const preset of PRESET_FILE_TAGS) {
+      merged.set(preset.toLowerCase(), preset);
+    }
+    for (const existing of allExistingTags) {
+      if (!merged.has(existing.toLowerCase())) {
+        merged.set(existing.toLowerCase(), existing);
+      }
+    }
+    return Array.from(merged.values());
+  }, [allExistingTags]);
+
+  const toggleTag = (tagLabel: string) => {
+    const clean = tagLabel.trim().slice(0, 32);
+    if (!clean) return;
+    setSelectedTags((prev) => {
+      const exists = prev.some((t) => t.toLowerCase() === clean.toLowerCase());
+      if (exists) {
+        return prev.filter((t) => t.toLowerCase() !== clean.toLowerCase());
+      }
+      if (prev.length >= 12) return prev;
+      return [...prev, clean];
+    });
+  };
+
+  const handleAddCustomTag = (e: React.FormEvent) => {
+    e.preventDefault();
+    const clean = customTagInput.trim().slice(0, 32);
+    if (!clean) return;
+    setSelectedTags((prev) => {
+      if (prev.some((t) => t.toLowerCase() === clean.toLowerCase())) return prev;
+      if (prev.length >= 12) return prev;
+      return [...prev, clean];
+    });
+    setCustomTagInput('');
+  };
+
+  const handleSave = async () => {
+    setSaving(true);
+    setError(null);
+    try {
+      await onSaveTags(targetFiles, selectedTags);
+      onClose();
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Failed to update file labels');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/80 flex items-end sm:items-center justify-center p-0 sm:p-4">
+      <div className="w-full sm:max-w-md bg-[#1C1A17] border-t sm:border border-[#2C2824] max-h-[90vh] overflow-y-auto">
+        <div className="flex items-center justify-between px-5 py-4 border-b border-[#2C2824] sticky top-0 bg-[#1C1A17] z-10">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <Tag className="w-4 h-4 text-[#D97757] shrink-0" />
+            <h2 className="text-base font-bold text-[#F2EFE9] truncate">
+              {isBatch
+                ? `Label ${targetFiles.length} Selected Files`
+                : `Labels for "${targetFiles[0]?.name || 'File'}"`}
+            </h2>
+          </div>
+          <button
+            onClick={onClose}
+            className="min-w-[44px] min-h-[44px] -mr-2 flex items-center justify-center text-[#9E978E] hover:text-[#F2EFE9] cursor-pointer"
+          >
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        <div className="p-5 sm:p-6 space-y-5">
+          {/* Active Tags on File(s) */}
+          <div className="space-y-2">
+            <div className="flex items-center justify-between text-xs">
+              <span className="font-semibold text-[#9E978E] uppercase tracking-wider">
+                Active Labels ({selectedTags.length}/12)
+              </span>
+              {selectedTags.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setSelectedTags([])}
+                  className="text-xs text-[#D94848] hover:underline cursor-pointer"
+                >
+                  Clear All
+                </button>
+              )}
+            </div>
+            <div className="min-h-[48px] p-3 bg-[#141311] border border-[#2C2824] flex flex-wrap items-center gap-2">
+              {selectedTags.length === 0 ? (
+                <span className="text-xs text-[#9E978E]">
+                  No labels assigned yet. Click a preset below or type a custom label.
+                </span>
+              ) : (
+                selectedTags.map((tag) => (
+                  <span
+                    key={tag}
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-semibold bg-[#24211D] border border-[#D97757] text-[#F2EFE9]"
+                  >
+                    <Tag className="w-3 h-3 text-[#D97757]" />
+                    <span>{tag}</span>
+                    <button
+                      type="button"
+                      onClick={() => toggleTag(tag)}
+                      className="text-[#9E978E] hover:text-[#F2EFE9] ml-0.5 cursor-pointer"
+                      aria-label={`Remove ${tag} label`}
+                    >
+                      <X className="w-3 h-3" />
+                    </button>
+                  </span>
+                ))
+              )}
+            </div>
+          </div>
+
+          {/* Add Custom Label Input */}
+          <form onSubmit={handleAddCustomTag} className="space-y-2">
+            <label className="block text-xs font-semibold text-[#9E978E] uppercase tracking-wider">
+              Add Custom Label
+            </label>
+            <div className="flex items-center gap-2">
+              <input
+                type="text"
+                maxLength={32}
+                value={customTagInput}
+                onChange={(e) => setCustomTagInput(e.target.value)}
+                placeholder="e.g., Work, Personal, Archive, Client..."
+                className="flex-1 min-h-[42px] bg-[#141311] border border-[#2C2824] px-3.5 py-2 text-xs text-[#F2EFE9] focus:outline-none focus:border-[#D97757]"
+              />
+              <button
+                type="submit"
+                disabled={!customTagInput.trim()}
+                className="min-h-[42px] px-4 py-2 text-xs font-bold bg-[#24211D] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] disabled:opacity-40 flex items-center gap-1.5 cursor-pointer"
+              >
+                <Plus className="w-3.5 h-3.5 text-[#D97757]" />
+                Add
+              </button>
+            </div>
+          </form>
+
+          {/* Quick Toggle Presets & Existing Labels */}
+          <div className="space-y-2">
+            <div className="text-xs font-semibold text-[#9E978E] uppercase tracking-wider">
+              Quick Labels (Tap to Toggle)
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {availableSuggestions.map((label) => {
+                const isActive = selectedTags.some(
+                  (t) => t.toLowerCase() === label.toLowerCase()
+                );
+                return (
+                  <button
+                    key={label}
+                    type="button"
+                    onClick={() => toggleTag(label)}
+                    className={`min-h-[36px] px-3 py-1.5 text-xs font-semibold border transition-colors flex items-center gap-1.5 cursor-pointer ${
+                      isActive
+                        ? 'bg-[#D97757] border-[#D97757] text-[#141311]'
+                        : 'bg-[#141311] border-[#2C2824] text-[#9E978E] hover:border-[#D97757] hover:text-[#F2EFE9]'
+                    }`}
+                  >
+                    {isActive ? <Check className="w-3.5 h-3.5" /> : <Tag className="w-3 h-3" />}
+                    <span>{label}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {error && (
+            <div className="p-3 bg-[#141311] border border-[#D94848] text-xs text-[#D94848]">
+              {error}
+            </div>
+          )}
+
+          <div className="flex flex-col-reverse sm:flex-row items-stretch sm:items-center justify-between gap-2.5 pt-3 border-t border-[#2C2824]">
+            <button
+              type="button"
+              onClick={onClose}
+              className="min-h-[44px] px-4 py-2.5 text-xs font-medium text-[#9E978E] border border-[#2C2824] bg-[#141311] cursor-pointer"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={handleSave}
+              disabled={saving}
+              className="min-h-[44px] px-5 py-2.5 text-xs font-bold bg-[#D97757] text-[#141311] hover:bg-[#E08568] disabled:opacity-50 cursor-pointer"
+            >
+              {saving
+                ? 'Saving Labels...'
+                : isBatch
+                ? `Apply Labels to ${targetFiles.length} Files`
+                : 'Save Labels'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+

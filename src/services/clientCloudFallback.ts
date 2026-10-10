@@ -541,6 +541,7 @@ function createInitialClientDb(): ClientDatabase {
         updatedAt: iso(640),
         previewText: file1Text,
         lockedOverQuota: false,
+        tags: ['Work', 'Personal'],
       },
       {
         id: 'file_diagram_02',
@@ -560,6 +561,7 @@ function createInitialClientDb(): ClientDatabase {
         previewText: file2Svg,
         previewDataUrl: `data:image/svg+xml;base64,${svgBase64}`,
         lockedOverQuota: false,
+        tags: ['Work', 'Archive'],
       },
       {
         id: 'file_mv1shmzl_ynyib',
@@ -578,6 +580,7 @@ function createInitialClientDb(): ClientDatabase {
         createdAt: iso(120),
         updatedAt: iso(120),
         lockedOverQuota: false,
+        tags: ['Personal', 'Archive'],
       },
     ],
     shares: [
@@ -1571,6 +1574,21 @@ async function handleClientApi(urlStr: string, init?: RequestInit): Promise<Resp
     if (typeof body.starred === 'boolean') file.starred = body.starred;
     if (typeof body.name === 'string' && body.name.trim()) file.name = body.name.trim();
     if (body.folderId !== undefined) file.folderId = body.folderId;
+    if (Array.isArray(body.tags)) {
+      const seen = new Set<string>();
+      const cleanTags: string[] = [];
+      for (const raw of body.tags) {
+        const t = String(raw || '').trim().slice(0, 32);
+        if (!t) continue;
+        const lower = t.toLowerCase();
+        if (!seen.has(lower)) {
+          seen.add(lower);
+          cleanTags.push(t);
+          if (cleanTags.length >= 12) break;
+        }
+      }
+      file.tags = cleanTags;
+    }
     file.updatedAt = new Date().toISOString();
     saveClientDb(db);
     return jsonResponse({ file });
@@ -2629,6 +2647,7 @@ export async function syncClientDbWithFirestoreDrive(params: {
             : local.telegramChunks || [],
         previewText: local.previewText || cf.previewText,
         previewDataUrl: local.previewDataUrl || cf.previewDataUrl,
+        tags: Array.isArray(cf.tags) ? cf.tags : local.tags || [],
       };
     }
   }
@@ -2869,6 +2888,7 @@ export async function applyCloudDriveRealtimeSnapshot(params: {
               : local.telegramChunks || [],
           previewText: local.previewText || cf.previewText,
           previewDataUrl: local.previewDataUrl || cf.previewDataUrl,
+          tags: Array.isArray(cf.tags) ? cf.tags : local.tags || [],
         };
       }
     }

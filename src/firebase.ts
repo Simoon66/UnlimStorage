@@ -127,6 +127,36 @@ function toIsoDateString(val: unknown): string {
   return new Date().toISOString();
 }
 
+function sanitizeFileTags(rawTags: unknown): string[] {
+  if (!Array.isArray(rawTags)) return [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const item of rawTags) {
+    const cleaned = String(item || '').trim().slice(0, 32);
+    if (!cleaned) continue;
+    const key = cleaned.toLowerCase();
+    if (!seen.has(key)) {
+      seen.add(key);
+      out.push(cleaned);
+      if (out.length >= 12) break;
+    }
+  }
+  return out;
+}
+
+function parseTagsJson(raw: unknown): string[] {
+  if (Array.isArray(raw)) return sanitizeFileTags(raw);
+  if (typeof raw === 'string' && raw.trim()) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return sanitizeFileTags(parsed);
+    } catch {
+      return sanitizeFileTags(raw.split(','));
+    }
+  }
+  return [];
+}
+
 export async function signInWithGooglePopup(): Promise<FirebaseUser> {
   const result = await signInWithPopup(auth, googleProvider);
   return result.user;
@@ -350,6 +380,7 @@ export async function syncCloudFileToFirestore(
   const safePreviewText = (file.previewText || '').slice(0, 28000);
   const safePreviewDataUrl =
     file.previewDataUrl && file.previewDataUrl.length <= 500000 ? file.previewDataUrl : '';
+  const safeTagsJson = JSON.stringify(sanitizeFileTags(file.tags)).slice(0, 1024);
 
   try {
     await updateDoc(ref, {
@@ -363,6 +394,7 @@ export async function syncCloudFileToFirestore(
       telegramChunksJson: chunksJson,
       previewText: safePreviewText,
       previewDataUrl: safePreviewDataUrl,
+      tagsJson: safeTagsJson,
       updatedAt: serverTimestamp(),
     });
     return;
@@ -387,6 +419,7 @@ export async function syncCloudFileToFirestore(
       telegramChunksJson: chunksJson,
       previewText: safePreviewText,
       previewDataUrl: safePreviewDataUrl,
+      tagsJson: safeTagsJson,
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
     });
@@ -537,6 +570,7 @@ export async function fetchUserCloudDriveFromFirestore(
         previewText: d.previewText ? String(d.previewText) : undefined,
         previewDataUrl: d.previewDataUrl ? String(d.previewDataUrl) : undefined,
         lockedOverQuota: false,
+        tags: parseTagsJson(d.tagsJson),
       });
     });
   } catch (err) {
@@ -1032,6 +1066,7 @@ function parseCloudFileSnapshotDoc(
     previewText: d.previewText ? String(d.previewText) : undefined,
     previewDataUrl: d.previewDataUrl ? String(d.previewDataUrl) : undefined,
     lockedOverQuota: false,
+    tags: parseTagsJson(d.tagsJson),
   };
 }
 

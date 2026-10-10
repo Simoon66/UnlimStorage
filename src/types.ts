@@ -81,6 +81,7 @@ export interface FileRecord {
   previewText?: string;
   previewDataUrl?: string;
   lockedOverQuota?: boolean;
+  tags?: string[];
 }
 
 export interface ShareLink {

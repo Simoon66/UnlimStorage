@@ -154,6 +154,11 @@
           "description": "Optional base64 data URL preview for small images.",
           "maxLength": 524288
         },
+        "tagsJson": {
+          "type": "string",
+          "description": "Serialized JSON array of custom file tags (e.g., Work, Personal, Archive).",
+          "maxLength": 1024
+        },
         "createdAt": {
           "type": "string",
           "format": "date-time",

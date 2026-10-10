@@ -103,6 +103,7 @@ service cloud.firestore {
         'telegramChunksJson',
         'previewText',
         'previewDataUrl',
+        'tagsJson',
         'createdAt',
         'updatedAt'
       ]) &&
@@ -122,6 +123,7 @@ service cloud.firestore {
       (!('telegramChunksJson' in data) || (data.telegramChunksJson is string && data.telegramChunksJson.size() <= 131072)) &&
       (!('previewText' in data) || (data.previewText is string && data.previewText.size() <= 30000)) &&
       (!('previewDataUrl' in data) || (data.previewDataUrl is string && data.previewDataUrl.size() <= 524288)) &&
+      (!('tagsJson' in data) || (data.tagsJson is string && data.tagsJson.size() <= 1024)) &&
       data.createdAt is timestamp &&
       data.updatedAt is timestamp;
     }
@@ -372,6 +374,7 @@ service cloud.firestore {
               'telegramChunksJson',
               'previewText',
               'previewDataUrl',
+              'tagsJson',
               'updatedAt'
             ])
           )
