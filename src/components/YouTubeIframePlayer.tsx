@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
   Play,
   Pause,
@@ -9,15 +9,12 @@ import {
   Minimize,
   RotateCcw,
   RotateCw,
-  Check,
-  Repeat,
-  Camera,
   PictureInPicture2,
   Loader2,
-  Sparkles,
-  Keyboard,
-  X,
-  RefreshCw,
+  Subtitles,
+  Headphones,
+  Check,
+  Upload,
 } from 'lucide-react';
 
 interface YouTubeIframePlayerProps {
@@ -31,17 +28,186 @@ interface YouTubeIframePlayerProps {
   onPlaybackError?: (msg: string) => void;
 }
 
-const SPEED_RATES = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
-
-interface TransientIndicator {
-  id: number;
+interface AudioTrackItem {
+  index: number;
+  id: string;
   label: string;
-  type: 'play' | 'pause' | 'rewind' | 'forward' | 'volume' | 'loop' | 'snapshot';
+  language: string;
+  codec?: string;
+  enabled: boolean;
+}
+
+interface SubtitleTrackItem {
+  id: string;
+  label: string;
+  language: string;
+  srcUrl?: string;
+  isEmbedded?: boolean;
+  embeddedIndex?: number;
+  serverSubIndex?: number;
+}
+
+interface ServerMediaInfoResponse {
+  ok: boolean;
+  duration: number;
+  videoCodec: string;
+  pixFmt: string;
+  width: number;
+  height: number;
+  needsTranscode: boolean;
+  canCopyVideo: boolean;
+  audioTracks: Array<{
+    index: number;
+    streamIndex: number;
+    codec: string;
+    language: string;
+    title: string;
+    label: string;
+    channels: number;
+  }>;
+  subtitleTracks: Array<{
+    subIndex: number;
+    streamIndex: number;
+    codec: string;
+    language: string;
+    title: string;
+    label: string;
+  }>;
+}
+
+const ISO_LANG_LABELS: Record<string, string> = {
+  hin: 'Hindi',
+  hi: 'Hindi',
+  tam: 'Tamil',
+  ta: 'Tamil',
+  tel: 'Telugu',
+  te: 'Telugu',
+  eng: 'English',
+  en: 'English',
+  jpn: 'Japanese',
+  ja: 'Japanese',
+  ben: 'Bengali',
+  bn: 'Bengali',
+  kor: 'Korean',
+  ko: 'Korean',
+  chi: 'Chinese',
+  zho: 'Chinese',
+  zh: 'Chinese',
+  spa: 'Spanish',
+  es: 'Spanish',
+  fra: 'French',
+  fr: 'French',
+  ger: 'German',
+  deu: 'German',
+  de: 'German',
+  rus: 'Russian',
+  ru: 'Russian',
+  ara: 'Arabic',
+  por: 'Portuguese',
+  ita: 'Italian',
+  mal: 'Malayalam',
+  kan: 'Kannada',
+  mar: 'Marathi',
+  urd: 'Urdu',
+};
+
+/**
+ * Converts SRT subtitle text into WebVTT format so native HTML5 <track> can render .srt files.
+ */
+function convertSrtToVtt(srtText: string): string {
+  const normalized = srtText
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
+    .replace(/(\d{2}:\d{2}:\d{2}),(\d{3})/g, '$1.$2');
+  return `WEBVTT\n\n${normalized}`;
+}
+
+/**
+ * Lightweight client-side Matroska (EBML) TrackEntry header scanner fallback
+ * in case the server ffprobe endpoint is unreachable.
+ */
+function parseMatroskaTracksFromHeaderBytes(bytes: Uint8Array): {
+  audioTracks: AudioTrackItem[];
+  hasHevcVideo: boolean;
+} {
+  const audioTracks: AudioTrackItem[] = [];
+  let hasHevcVideo = false;
+  try {
+    const textDecoder = new TextDecoder('utf-8', { fatal: false });
+    const ascii = textDecoder.decode(bytes);
+    if (ascii.includes('V_MPEGH/ISO/HEVC')) {
+      hasHevcVideo = true;
+    }
+
+    // Scan for Matroska TrackEntry (0xAE) blocks in the first 256KB
+    let i = 0;
+    const limit = Math.min(bytes.length - 16, 262144);
+    while (i < limit) {
+      // Look for TrackType element 0x83 [size 0x81] [type: 1=video, 2=audio, 17=subtitle]
+      if (bytes[i] === 0x83 && bytes[i + 1] === 0x81) {
+        const trackType = bytes[i + 2];
+        if (trackType === 2) {
+          // Search nearby window for Language (0x22 0xB5 0x9C) or CodecID (0x86)
+          const winStart = Math.max(0, i - 120);
+          const winEnd = Math.min(bytes.length - 8, i + 220);
+          let lang = '';
+          let codec = '';
+
+          for (let j = winStart; j < winEnd; j++) {
+            if (
+              bytes[j] === 0x22 &&
+              bytes[j + 1] === 0xb5 &&
+              bytes[j + 2] === 0x9c &&
+              bytes[j + 3] > 0x80 &&
+              bytes[j + 3] <= 0x88
+            ) {
+              const len = bytes[j + 3] - 0x80;
+              lang = textDecoder
+                .decode(bytes.subarray(j + 4, j + 4 + len))
+                .replace(/\0/g, '')
+                .trim()
+                .toLowerCase();
+            }
+            if (bytes[j] === 0x86 && bytes[j + 1] > 0x80 && bytes[j + 1] <= 0x9f) {
+              const len = bytes[j + 1] - 0x80;
+              const rawCodec = textDecoder
+                .decode(bytes.subarray(j + 2, j + 2 + len))
+                .replace(/\0/g, '')
+                .trim();
+              if (rawCodec.startsWith('A_')) {
+                codec = rawCodec.replace('A_', '').split('/')[0];
+              }
+            }
+          }
+
+          const idx = audioTracks.length;
+          const langLabel = ISO_LANG_LABELS[lang] || (lang ? lang.toUpperCase() : `Track ${idx + 1}`);
+          const fullLabel = codec ? `${langLabel} (${codec})` : langLabel;
+          audioTracks.push({
+            index: idx,
+            id: `ebml_audio_${idx}`,
+            label: fullLabel,
+            language: lang || `track_${idx + 1}`,
+            codec: codec.toLowerCase(),
+            enabled: idx === 0,
+          });
+          i += 20;
+          continue;
+        }
+      }
+      i++;
+    }
+  } catch {
+    // ignore binary scan errors
+  }
+  return { audioTracks, hasHevcVideo };
 }
 
 export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
+  fileId,
   fileName,
   srcUrl,
+  rawBlob,
   isMkv,
   fullViewport = false,
   onFallbackContainer,
@@ -50,63 +216,223 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const playerContainerRef = useRef<HTMLDivElement | null>(null);
   const timelineRef = useRef<HTMLDivElement | null>(null);
+  const subtitleInputRef = useRef<HTMLInputElement | null>(null);
   const hideControlsTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const indicatorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const autoPlayAfterSwitchRef = useRef<boolean>(false);
+
+  const isServerApiSource = Boolean(
+    srcUrl && !srcUrl.startsWith('blob:') && !srcUrl.startsWith('data:')
+  );
+
+  // If the file is an MKV streamed from our server, immediately use the FFmpeg H.264/AAC stream
+  // so 10-bit HEVC anime MKVs render crystal-clear video on frame 1 without a black screen!
+  const [useServerTranscode, setUseServerTranscode] = useState<boolean>(
+    () => Boolean(isMkv && isServerApiSource)
+  );
+  const [streamStartOffset, setStreamStartOffset] = useState<number>(0);
+  const [probedDuration, setProbedDuration] = useState<number>(0);
 
   const [isPlaying, setIsPlaying] = useState(false);
-  const [isEnded, setIsEnded] = useState(false);
-  const [isBuffering, setIsBuffering] = useState(false);
+  const [isBuffering, setIsBuffering] = useState(true);
+  const [preloadStatusText, setPreloadStatusText] = useState<string>('Fast-Loading Video Stream...');
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [bufferedPct, setBufferedPct] = useState(0);
   const [volume, setVolume] = useState(1);
   const [isMuted, setIsMuted] = useState(false);
-  const [playbackRate, setPlaybackRate] = useState(1);
-  const [isLooping, setIsLooping] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [isPip, setIsPip] = useState(false);
-  const [fitMode, setFitMode] = useState<'contain' | 'cover'>('contain');
-  const [showRemainingTime, setShowRemainingTime] = useState(false);
-  const [videoResolution, setVideoResolution] = useState<string>('');
-
-  const [showSpeedMenu, setShowSpeedMenu] = useState(false);
-  const [showShortcutsModal, setShowShortcutsModal] = useState(false);
   const [controlsVisible, setControlsVisible] = useState(true);
 
-  // Scrubber hover preview state
+  // Scrubber hover time preview
   const [hoverPct, setHoverPct] = useState<number | null>(null);
   const [hoverTime, setHoverTime] = useState<number | null>(null);
 
-  // Center transient feedback badge
-  const [indicator, setIndicator] = useState<TransientIndicator | null>(null);
+  // Multi-Audio tracks (only shown in UI if > 1 track exists on the video)
+  const [audioTracks, setAudioTracks] = useState<AudioTrackItem[]>([]);
+  const [activeAudioIndex, setActiveAudioIndex] = useState<number>(0);
+  const [showAudioMenu, setShowAudioMenu] = useState(false);
 
-  const triggerIndicator = useCallback(
-    (label: string, type: TransientIndicator['type']) => {
-      if (indicatorTimerRef.current) {
-        clearTimeout(indicatorTimerRef.current);
+  // CC / Subtitles tracks (embedded MKV tracks + native textTracks + user-loaded .vtt/.srt)
+  const [subtitleTracks, setSubtitleTracks] = useState<SubtitleTrackItem[]>([]);
+  const [activeSubtitleId, setActiveSubtitleId] = useState<string | null>(null);
+  const [showCcMenu, setShowCcMenu] = useState(false);
+
+  // Derive API endpoints for media-info, live FFmpeg H.264/AAC streaming, and WebVTT subtitle extraction
+  const streamEndpoints = useMemo(() => {
+    try {
+      const parsed = new URL(srcUrl, window.location.origin);
+      const shareMatch = parsed.pathname.match(/^\/api\/public\/share\/([^/]+)\/download/);
+      const queryParams = new URLSearchParams(parsed.search);
+      queryParams.delete('inline');
+      const baseQuery = queryParams.toString();
+
+      if (shareMatch) {
+        const token = shareMatch[1];
+        return {
+          mediaInfoUrl: `/api/public/share/${token}/media-info${baseQuery ? `?${baseQuery}` : ''}`,
+          streamBaseUrl: `/api/public/share/${token}/stream${baseQuery ? `?${baseQuery}` : ''}`,
+          subtitlesBaseUrl: `/api/public/share/${token}/subtitles${baseQuery ? `?${baseQuery}` : ''}`,
+        };
       }
-      setIndicator({ id: Date.now(), label, type });
-      indicatorTimerRef.current = setTimeout(() => {
-        setIndicator(null);
-      }, 650);
-    },
-    []
-  );
+
+      const encodedId = encodeURIComponent(fileId);
+      return {
+        mediaInfoUrl: `/api/files/${encodedId}/media-info${baseQuery ? `?${baseQuery}` : ''}`,
+        streamBaseUrl: `/api/files/${encodedId}/stream${baseQuery ? `?${baseQuery}` : ''}`,
+        subtitlesBaseUrl: `/api/files/${encodedId}/subtitles${baseQuery ? `?${baseQuery}` : ''}`,
+      };
+    } catch {
+      const encodedId = encodeURIComponent(fileId);
+      return {
+        mediaInfoUrl: `/api/files/${encodedId}/media-info`,
+        streamBaseUrl: `/api/files/${encodedId}/stream`,
+        subtitlesBaseUrl: `/api/files/${encodedId}/subtitles`,
+      };
+    }
+  }, [fileId, srcUrl]);
+
+  // Compute the active <video src="..."> URL
+  const activeVideoSrc = useMemo(() => {
+    if (useServerTranscode && isServerApiSource) {
+      const sep = streamEndpoints.streamBaseUrl.includes('?') ? '&' : '?';
+      return `${streamEndpoints.streamBaseUrl}${sep}audio=${activeAudioIndex}&start=${streamStartOffset.toFixed(
+        2
+      )}`;
+    }
+    return srcUrl;
+  }, [
+    useServerTranscode,
+    isServerApiSource,
+    streamEndpoints.streamBaseUrl,
+    activeAudioIndex,
+    streamStartOffset,
+    srcUrl,
+  ]);
+
+  // Probe server media-info (FFprobe) + fallback EBML header scan to detect Multi-Audio tracks, Subtitles & HEVC codec
+  useEffect(() => {
+    let cancelled = false;
+
+    const inspectMedia = async () => {
+      try {
+        const res = await fetch(streamEndpoints.mediaInfoUrl);
+        if (res.ok) {
+          const info = (await res.json()) as ServerMediaInfoResponse;
+          if (!cancelled && info && info.ok) {
+            if (info.duration > 0) {
+              setProbedDuration(info.duration);
+            }
+            if (info.audioTracks && info.audioTracks.length > 1) {
+              setAudioTracks(
+                info.audioTracks.map((t, idx) => ({
+                  index: t.index ?? idx,
+                  id: `server_audio_${t.index ?? idx}`,
+                  label: t.label,
+                  language: t.language,
+                  codec: t.codec,
+                  enabled: idx === 0,
+                }))
+              );
+            }
+            if (info.subtitleTracks && info.subtitleTracks.length > 0) {
+              setSubtitleTracks((prev) => {
+                const customOnly = prev.filter((item) => item.serverSubIndex === undefined && !item.isEmbedded);
+                const serverSubs: SubtitleTrackItem[] = info.subtitleTracks.map((st) => ({
+                  id: `server_sub_${st.subIndex}`,
+                  label: st.label,
+                  language: st.language || 'en',
+                  serverSubIndex: st.subIndex,
+                }));
+                return [...serverSubs, ...customOnly];
+              });
+            }
+            if (info.needsTranscode && isServerApiSource) {
+              setUseServerTranscode(true);
+            }
+            return;
+          }
+        }
+      } catch {
+        // Fallback to client-side header inspection below
+      }
+
+      // Client-side EBML / Matroska header inspection fallback
+      if (isMkv && !cancelled) {
+        try {
+          let headerBytes: Uint8Array | null = null;
+          if (rawBlob && rawBlob.size > 0) {
+            const sliceBuf = await rawBlob.slice(0, 262144).arrayBuffer();
+            headerBytes = new Uint8Array(sliceBuf);
+          } else if (srcUrl && !srcUrl.startsWith('data:')) {
+            const rangeRes = await fetch(srcUrl, {
+              headers: { Range: 'bytes=0-262143' },
+            });
+            if (rangeRes.ok) {
+              const arrBuf = await rangeRes.arrayBuffer();
+              headerBytes = new Uint8Array(arrBuf);
+            }
+          }
+          if (!cancelled && headerBytes && headerBytes.length > 0) {
+            const parsed = parseMatroskaTracksFromHeaderBytes(headerBytes);
+            if (parsed.audioTracks.length > 1) {
+              setAudioTracks(parsed.audioTracks);
+            }
+          }
+        } catch {
+          // ignore
+        }
+      }
+    };
+
+    void inspectMedia();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [streamEndpoints.mediaInfoUrl, isMkv, isServerApiSource, rawBlob, srcUrl]);
+
+  // Warmup / Preload initial byte range for non-transcoded direct streams
+  useEffect(() => {
+    if (!srcUrl || useServerTranscode || srcUrl.startsWith('blob:') || srcUrl.startsWith('data:')) {
+      return;
+    }
+    const controller = new AbortController();
+    fetch(srcUrl, {
+      method: 'GET',
+      headers: { Range: 'bytes=0-1048575' },
+      signal: controller.signal,
+    }).catch(() => null);
+    return () => {
+      controller.abort();
+    };
+  }, [srcUrl, useServerTranscode]);
+
+  // Cleanup custom subtitle blob URLs on unmount
+  useEffect(() => {
+    return () => {
+      subtitleTracks.forEach((t) => {
+        if (t.srcUrl && t.srcUrl.startsWith('blob:')) {
+          URL.revokeObjectURL(t.srcUrl);
+        }
+      });
+    };
+  }, [subtitleTracks]);
 
   const scheduleHideControls = useCallback(() => {
     setControlsVisible(true);
     if (hideControlsTimerRef.current) {
       clearTimeout(hideControlsTimerRef.current);
     }
-    if (isPlaying && !showSpeedMenu && !showShortcutsModal) {
+    if (isPlaying && !showAudioMenu && !showCcMenu) {
       hideControlsTimerRef.current = setTimeout(() => {
         setControlsVisible(false);
-      }, 2600);
+      }, 2500);
     }
-  }, [isPlaying, showSpeedMenu, showShortcutsModal]);
+  }, [isPlaying, showAudioMenu, showCcMenu]);
 
   useEffect(() => {
-    if (!isPlaying || showSpeedMenu || showShortcutsModal) {
+    if (!isPlaying || showAudioMenu || showCcMenu) {
       setControlsVisible(true);
       if (hideControlsTimerRef.current) {
         clearTimeout(hideControlsTimerRef.current);
@@ -119,7 +445,7 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
         clearTimeout(hideControlsTimerRef.current);
       }
     };
-  }, [isPlaying, showSpeedMenu, showShortcutsModal, scheduleHideControls]);
+  }, [isPlaying, showAudioMenu, showCcMenu, scheduleHideControls]);
 
   useEffect(() => {
     const onFullscreenChange = () => {
@@ -142,56 +468,239 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
       vid.removeEventListener('enterpictureinpicture', handleEnterPip);
       vid.removeEventListener('leavepictureinpicture', handleLeavePip);
     };
-  }, [srcUrl]);
+  }, [activeVideoSrc]);
+
+  // Inspect browser-native audioTracks / textTracks when metadata loads (if not already populated by FFprobe)
+  const syncBrowserMediaTracks = useCallback(() => {
+    const vid = videoRef.current as
+      | (HTMLVideoElement & {
+          audioTracks?: {
+            length: number;
+            [index: number]: {
+              id?: string;
+              label?: string;
+              language?: string;
+              enabled?: boolean;
+            };
+          };
+        })
+      | null;
+    if (!vid) return;
+
+    const rawAudio = vid.audioTracks;
+    if (rawAudio && rawAudio.length > 1) {
+      setAudioTracks((prev) => {
+        if (prev.length > 1) return prev;
+        const detectedAudio: AudioTrackItem[] = [];
+        for (let i = 0; i < rawAudio.length; i++) {
+          const track = rawAudio[i];
+          const langCode = (track?.language || '').toLowerCase();
+          const friendlyLang = ISO_LANG_LABELS[langCode] || track?.language?.toUpperCase() || '';
+          detectedAudio.push({
+            index: i,
+            id: track?.id || `audio_${i}`,
+            label:
+              track?.label ||
+              (friendlyLang ? `Audio (${friendlyLang})` : `Audio Track ${i + 1}`),
+            language: langCode,
+            enabled: Boolean(track?.enabled),
+          });
+        }
+        return detectedAudio;
+      });
+    }
+  }, []);
+
+  const effectiveDuration = probedDuration > 0 ? probedDuration : duration;
+  const displayedCurrentTime = useServerTranscode
+    ? Math.min(effectiveDuration || Infinity, streamStartOffset + currentTime)
+    : currentTime;
+
+  const seekToTargetSeconds = useCallback(
+    (targetSec: number) => {
+      const vid = videoRef.current;
+      if (!vid) return;
+      const maxDur = effectiveDuration || vid.duration || 0;
+      const clampedTarget = maxDur > 0 ? Math.max(0, Math.min(maxDur, targetSec)) : Math.max(0, targetSec);
+
+      if (useServerTranscode && isServerApiSource) {
+        // Check if target is already within the currently buffered range of the active stream
+        const localOffset = clampedTarget - streamStartOffset;
+        let canSeekLocally = false;
+        if (localOffset >= 0 && vid.buffered && vid.buffered.length > 0) {
+          for (let i = 0; i < vid.buffered.length; i++) {
+            if (
+              localOffset >= vid.buffered.start(i) &&
+              localOffset <= Math.max(0, vid.buffered.end(i) - 0.5)
+            ) {
+              canSeekLocally = true;
+              break;
+            }
+          }
+        }
+
+        if (canSeekLocally) {
+          vid.currentTime = localOffset;
+          setCurrentTime(localOffset);
+        } else {
+          autoPlayAfterSwitchRef.current = !vid.paused || isPlaying;
+          setIsBuffering(true);
+          setPreloadStatusText(`Fast-Seeking to ${formatClock(clampedTarget)}...`);
+          setStreamStartOffset(clampedTarget);
+          setCurrentTime(0);
+        }
+      } else {
+        vid.currentTime = clampedTarget;
+        setCurrentTime(clampedTarget);
+      }
+      scheduleHideControls();
+    },
+    [effectiveDuration, useServerTranscode, isServerApiSource, streamStartOffset, isPlaying, scheduleHideControls]
+  );
+
+  const handleSelectAudioTrack = (index: number) => {
+    setShowAudioMenu(false);
+    if (index === activeAudioIndex) return;
+
+    const selectedTrack = audioTracks.find((t) => t.index === index);
+    setActiveAudioIndex(index);
+    setAudioTracks((prev) =>
+      prev.map((item) => ({
+        ...item,
+        enabled: item.index === index,
+      }))
+    );
+
+    // 1. If server FFmpeg streaming is available, switch the audio stream on the fly from current timestamp
+    if (isServerApiSource) {
+      const resumeAt = displayedCurrentTime;
+      autoPlayAfterSwitchRef.current = true;
+      setIsBuffering(true);
+      setPreloadStatusText(
+        `Switching Audio to ${selectedTrack?.label || `Track ${index + 1}`}...`
+      );
+      setUseServerTranscode(true);
+      setStreamStartOffset(resumeAt);
+      setCurrentTime(0);
+      return;
+    }
+
+    // 2. Fallback to native browser HTMLMediaElement.audioTracks if supported
+    const vid = videoRef.current as
+      | (HTMLVideoElement & {
+          audioTracks?: {
+            length: number;
+            [idx: number]: { enabled: boolean };
+          };
+        })
+      | null;
+    if (vid && vid.audioTracks) {
+      for (let i = 0; i < vid.audioTracks.length; i++) {
+        vid.audioTracks[i].enabled = i === index;
+      }
+    }
+  };
+
+  const handleSelectSubtitle = (trackId: string | null) => {
+    const vid = videoRef.current;
+    setActiveSubtitleId(trackId);
+    setShowCcMenu(false);
+    if (!vid) return;
+
+    setTimeout(() => {
+      const currentVid = videoRef.current;
+      if (!currentVid || !currentVid.textTracks) return;
+      const selected = subtitleTracks.find((t) => t.id === trackId);
+      for (let i = 0; i < currentVid.textTracks.length; i++) {
+        const tt = currentVid.textTracks[i];
+        if (!trackId) {
+          tt.mode = 'disabled';
+        } else if (selected && tt.label === selected.label) {
+          tt.mode = 'showing';
+        } else {
+          tt.mode = 'disabled';
+        }
+      }
+    }, 60);
+  };
+
+  const handleUploadSubtitleFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+
+    try {
+      const rawText = await file.text();
+      const isSrt = /\.srt$/i.test(file.name) || !rawText.trimStart().startsWith('WEBVTT');
+      const vttContent = isSrt ? convertSrtToVtt(rawText) : rawText;
+      const vttBlob = new Blob([vttContent], { type: 'text/vtt' });
+      const blobUrl = URL.createObjectURL(vttBlob);
+
+      const cleanLabel = file.name.replace(/\.(srt|vtt)$/i, '') || 'Custom CC';
+      const newTrack: SubtitleTrackItem = {
+        id: `custom_cc_${Date.now()}`,
+        label: cleanLabel,
+        language: 'en',
+        srcUrl: blobUrl,
+        isEmbedded: false,
+      };
+
+      setSubtitleTracks((prev) => [...prev, newTrack]);
+      setActiveSubtitleId(newTrack.id);
+      setShowCcMenu(false);
+
+      setTimeout(() => {
+        const vid = videoRef.current;
+        if (!vid || !vid.textTracks) return;
+        for (let i = 0; i < vid.textTracks.length; i++) {
+          const tt = vid.textTracks[i];
+          tt.mode = tt.label === newTrack.label ? 'showing' : 'disabled';
+        }
+      }, 80);
+    } catch {
+      // ignore invalid subtitle file
+    }
+  };
 
   const togglePlay = useCallback(() => {
     const vid = videoRef.current;
     if (!vid) return;
     if (vid.paused || vid.ended) {
       if (vid.ended) {
+        if (useServerTranscode && streamStartOffset > 0) {
+          autoPlayAfterSwitchRef.current = true;
+          setStreamStartOffset(0);
+          setCurrentTime(0);
+          return;
+        }
         vid.currentTime = 0;
       }
       vid.play().catch(() => null);
-      triggerIndicator('Play', 'play');
     } else {
       vid.pause();
-      triggerIndicator('Paused', 'pause');
     }
-  }, [triggerIndicator]);
+  }, [useServerTranscode, streamStartOffset]);
 
   const handleSkip = useCallback(
     (deltaSeconds: number) => {
-      const vid = videoRef.current;
-      if (!vid) return;
-      const next = Math.max(0, Math.min(vid.duration || 0, vid.currentTime + deltaSeconds));
-      vid.currentTime = next;
-      setCurrentTime(next);
-      triggerIndicator(
-        deltaSeconds > 0 ? `+${deltaSeconds}s` : `${deltaSeconds}s`,
-        deltaSeconds > 0 ? 'forward' : 'rewind'
-      );
-      scheduleHideControls();
+      seekToTargetSeconds(displayedCurrentTime + deltaSeconds);
     },
-    [scheduleHideControls, triggerIndicator]
+    [displayedCurrentTime, seekToTargetSeconds]
   );
 
   const handleSeekInput = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const vid = videoRef.current;
-    if (!vid) return;
     const newTime = Number(e.target.value);
-    vid.currentTime = newTime;
-    setCurrentTime(newTime);
-    setIsEnded(false);
+    seekToTargetSeconds(newTime);
   };
 
   const handleTimelineMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
     const bar = timelineRef.current;
-    if (!bar || !duration) return;
+    if (!bar || !effectiveDuration) return;
     const rect = bar.getBoundingClientRect();
     const relX = Math.max(0, Math.min(rect.width, e.clientX - rect.left));
     const pct = (relX / Math.max(1, rect.width)) * 100;
     setHoverPct(pct);
-    setHoverTime((pct / 100) * duration);
+    setHoverTime((pct / 100) * effectiveDuration);
   };
 
   const handleTimelineMouseLeave = () => {
@@ -210,47 +719,29 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
     }
   };
 
-  const adjustVolumeBy = useCallback(
-    (delta: number) => {
-      const vid = videoRef.current;
-      if (!vid) return;
-      const nextVol = Math.max(0, Math.min(1, Number((volume + delta).toFixed(2))));
-      setVolume(nextVol);
-      setIsMuted(nextVol === 0);
-      vid.volume = nextVol;
-      vid.muted = nextVol === 0;
-      triggerIndicator(`${Math.round(nextVol * 100)}%`, 'volume');
-    },
-    [volume, triggerIndicator]
-  );
-
   const toggleMute = useCallback(() => {
     const vid = videoRef.current;
     if (!vid) return;
     const nextMute = !isMuted;
     setIsMuted(nextMute);
     vid.muted = nextMute;
-    triggerIndicator(nextMute ? 'Muted' : `${Math.round(volume * 100)}%`, 'volume');
-  }, [isMuted, volume, triggerIndicator]);
+  }, [isMuted]);
 
-  const handleSpeedChange = (rate: number) => {
-    setPlaybackRate(rate);
-    if (videoRef.current) {
-      videoRef.current.playbackRate = rate;
-    }
-    setShowSpeedMenu(false);
-    triggerIndicator(`${rate}x Speed`, 'play');
-  };
-
-  const toggleLoop = useCallback(() => {
+  const togglePictureInPicture = useCallback(async () => {
     const vid = videoRef.current;
-    const next = !isLooping;
-    setIsLooping(next);
-    if (vid) {
-      vid.loop = next;
+    if (!vid) return;
+    try {
+      if (document.pictureInPictureElement) {
+        await document.exitPictureInPicture();
+        setIsPip(false);
+      } else if (typeof vid.requestPictureInPicture === 'function') {
+        await vid.requestPictureInPicture();
+        setIsPip(true);
+      }
+    } catch {
+      // PiP not supported on this device
     }
-    triggerIndicator(next ? 'Loop On' : 'Loop Off', 'loop');
-  }, [isLooping, triggerIndicator]);
+  }, []);
 
   const toggleFullscreen = useCallback(() => {
     const targetEl = playerContainerRef.current;
@@ -268,73 +759,8 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
     }
   }, []);
 
-  const togglePictureInPicture = useCallback(async () => {
-    const vid = videoRef.current;
-    if (!vid) return;
-    try {
-      if (document.pictureInPictureElement) {
-        await document.exitPictureInPicture();
-        setIsPip(false);
-      } else if (typeof vid.requestPictureInPicture === 'function') {
-        await vid.requestPictureInPicture();
-        setIsPip(true);
-      }
-    } catch {
-      // PiP not supported on this device/stream
-    }
-  }, []);
-
-  const captureVideoSnapshot = useCallback(() => {
-    const vid = videoRef.current;
-    if (!vid || !vid.videoWidth || !vid.videoHeight) return;
-    try {
-      const canvas = document.createElement('canvas');
-      canvas.width = vid.videoWidth;
-      canvas.height = vid.videoHeight;
-      const ctx = canvas.getContext('2d');
-      if (!ctx) return;
-      ctx.drawImage(vid, 0, 0, canvas.width, canvas.height);
-      canvas.toBlob((blob) => {
-        if (!blob) return;
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        const cleanBase = (fileName || 'video').replace(/\.[^.]+$/, '');
-        const stamp = Math.floor(vid.currentTime || 0);
-        a.href = url;
-        a.download = `${cleanBase}-frame-${stamp}s.png`;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        setTimeout(() => URL.revokeObjectURL(url), 10000);
-        triggerIndicator('Frame Saved', 'snapshot');
-      }, 'image/png');
-    } catch {
-      // ignore CORS canvas taint if cross-origin
-    }
-  }, [fileName, triggerIndicator]);
-
-  // Stage double-click: left 30% rewinds 10s, right 30% forwards 10s, middle 40% toggles fullscreen
-  const handleStageDoubleClick = (e: React.MouseEvent<HTMLDivElement>) => {
-    const rect = e.currentTarget.getBoundingClientRect();
-    const clickX = e.clientX - rect.left;
-    const ratio = clickX / Math.max(1, rect.width);
-    if (ratio < 0.3) {
-      handleSkip(-10);
-    } else if (ratio > 0.7) {
-      handleSkip(10);
-    } else {
-      toggleFullscreen();
-    }
-  };
-
-  // Keyboard shortcuts when player is focused or hovered
   const handleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
-    if (
-      e.target instanceof HTMLInputElement &&
-      e.target.type !== 'range'
-    ) {
-      return;
-    }
+    if (e.target instanceof HTMLInputElement && e.target.type !== 'range') return;
     const key = e.key.toLowerCase();
     if (key === ' ' || key === 'k') {
       e.preventDefault();
@@ -345,12 +771,6 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
     } else if (key === 'arrowright' || key === 'l') {
       e.preventDefault();
       handleSkip(10);
-    } else if (key === 'arrowup') {
-      e.preventDefault();
-      adjustVolumeBy(0.05);
-    } else if (key === 'arrowdown') {
-      e.preventDefault();
-      adjustVolumeBy(-0.05);
     } else if (key === 'm') {
       e.preventDefault();
       toggleMute();
@@ -360,22 +780,10 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
     } else if (key === 'p') {
       e.preventDefault();
       void togglePictureInPicture();
-    } else if (key === 'r') {
-      e.preventDefault();
-      toggleLoop();
-    } else if (key === '?') {
-      e.preventDefault();
-      setShowShortcutsModal((prev) => !prev);
-    } else if (/^[0-9]$/.test(key) && duration > 0 && videoRef.current) {
-      e.preventDefault();
-      const digit = Number(key);
-      const targetTime = (digit / 10) * duration;
-      videoRef.current.currentTime = targetTime;
-      setCurrentTime(targetTime);
     }
   };
 
-  const formatClock = (sec: number) => {
+  function formatClock(sec: number) {
     if (!Number.isFinite(sec) || sec < 0) return '00:00';
     const total = Math.floor(sec);
     const hrs = Math.floor(total / 3600);
@@ -385,17 +793,28 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
       return `${hrs}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
     }
     return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
-  };
+  }
 
-  const progressPct = duration > 0 ? Math.min(100, (currentTime / duration) * 100) : 0;
-  const extBadge = (fileName.split('.').pop() || (isMkv ? 'MKV' : 'MP4')).toUpperCase().slice(0, 5);
+  const progressPct =
+    effectiveDuration > 0 ? Math.min(100, (displayedCurrentTime / effectiveDuration) * 100) : 0;
+
+  const activeAudioTrackObj =
+    audioTracks.find((t) => t.index === activeAudioIndex) || audioTracks[0] || null;
 
   return (
     <div
-      className={`w-full bg-[#0D0C0B] overflow-hidden ${
+      className={`w-full bg-black overflow-hidden ${
         fullViewport ? 'h-screen border-0' : 'border border-[#2C2824]'
       }`}
     >
+      <input
+        ref={subtitleInputRef}
+        type="file"
+        accept=".vtt,.srt"
+        onChange={handleUploadSubtitleFile}
+        className="hidden"
+      />
+
       <div
         ref={playerContainerRef}
         tabIndex={0}
@@ -403,107 +822,112 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
         onMouseMove={scheduleHideControls}
         onTouchStart={scheduleHideControls}
         onClick={() => {
-          if (showSpeedMenu) setShowSpeedMenu(false);
+          if (showAudioMenu) setShowAudioMenu(false);
+          if (showCcMenu) setShowCcMenu(false);
         }}
-        className={`relative w-full bg-[#0D0C0B] flex flex-col justify-between overflow-hidden select-none focus:outline-none group/player ${
+        className={`relative w-full bg-black flex flex-col justify-between overflow-hidden select-none focus:outline-none ${
           fullViewport ? 'h-full' : 'aspect-video'
         }`}
       >
         {/* ====================================================================
-            TOP CLAUDE HUD BAR (Title, Format Badge, Resolution & Shortcuts)
-        ==================================================================== */}
-        <div
-          onClick={(e) => e.stopPropagation()}
-          className={`absolute top-0 left-0 right-0 z-20 bg-gradient-to-b from-black/85 via-black/45 to-transparent px-3.5 sm:px-5 pt-3 pb-6 flex items-center justify-between gap-3 transition-opacity duration-200 ${
-            controlsVisible ? 'opacity-100 pointer-events-auto' : 'opacity-0 pointer-events-none'
-          }`}
-        >
-          <div className="flex items-center gap-2.5 min-w-0">
-            <span className="w-2 h-2 rounded-full bg-[#D97757] shrink-0" />
-            <span
-              className="text-xs sm:text-sm font-semibold text-[#F2EFE9] truncate"
-              title={fileName}
-            >
-              {fileName || 'Claude Cinema Player'}
-            </span>
-          </div>
-
-          <div className="flex items-center gap-2 shrink-0 text-[11px] font-mono tabular-nums text-[#9E978E]">
-            {videoResolution && (
-              <>
-                <span className="text-[#D97757] font-semibold">{videoResolution}</span>
-                <span aria-hidden="true">·</span>
-              </>
-            )}
-            <span>{extBadge}</span>
-            {playbackRate !== 1 && (
-              <>
-                <span aria-hidden="true">·</span>
-                <span className="text-[#D97757] font-semibold">{playbackRate}x</span>
-              </>
-            )}
-            <button
-              type="button"
-              onClick={() => setShowShortcutsModal((prev) => !prev)}
-              className="ml-1 p-1.5 text-[#9E978E] hover:text-[#F2EFE9] hover:bg-white/10 transition-colors cursor-pointer"
-              title="Keyboard Shortcuts (?)"
-            >
-              <Keyboard className="w-3.5 h-3.5" />
-            </button>
-          </div>
-        </div>
-
-        {/* ====================================================================
-            MAIN VIDEO STAGE
+            VIDEO STAGE (Fast Load, Auto Preload, Centered Play Button & Buffering Indicator)
         ==================================================================== */}
         <div
           onClick={togglePlay}
-          onDoubleClick={handleStageDoubleClick}
+          onDoubleClick={toggleFullscreen}
           className="relative flex-1 w-full h-full flex items-center justify-center bg-black cursor-pointer overflow-hidden"
         >
           <video
             ref={videoRef}
-            src={srcUrl}
+            src={activeVideoSrc}
             playsInline
-            preload="metadata"
+            preload="auto"
             crossOrigin="anonymous"
-            onPlay={() => {
-              setIsPlaying(true);
-              setIsEnded(false);
+            onLoadStart={() => {
+              setIsBuffering(true);
             }}
+            onPlay={() => setIsPlaying(true)}
             onPause={() => setIsPlaying(false)}
             onEnded={() => {
               setIsPlaying(false);
-              setIsEnded(true);
               setControlsVisible(true);
             }}
-            onWaiting={() => setIsBuffering(true)}
-            onPlaying={() => setIsBuffering(false)}
-            onCanPlay={() => setIsBuffering(false)}
+            onWaiting={() => {
+              setPreloadStatusText('Buffering HD Stream...');
+              setIsBuffering(true);
+            }}
+            onPlaying={() => {
+              setIsBuffering(false);
+            }}
+            onCanPlay={(e) => {
+              setIsBuffering(false);
+              const vid = e.currentTarget;
+              vid.volume = volume;
+              vid.muted = isMuted;
+              if (autoPlayAfterSwitchRef.current) {
+                autoPlayAfterSwitchRef.current = false;
+                vid.play().catch(() => null);
+              }
+            }}
+            onLoadedData={(e) => {
+              const vid = e.currentTarget;
+              // If browser opened a raw MKV/HEVC stream and decoded audio only (videoWidth === 0 -> black screen),
+              // automatically switch to our server-side FFmpeg H.264/AAC stream!
+              if (!useServerTranscode && isServerApiSource && vid.videoWidth === 0) {
+                autoPlayAfterSwitchRef.current = !vid.paused;
+                setPreloadStatusText('Optimizing MKV Video Stream...');
+                setIsBuffering(true);
+                setUseServerTranscode(true);
+                return;
+              }
+              syncBrowserMediaTracks();
+            }}
             onLoadedMetadata={(e) => {
               const vid = e.currentTarget;
-              if (vid.duration && Number.isFinite(vid.duration)) {
+              if (vid.duration && Number.isFinite(vid.duration) && vid.duration > 0) {
                 setDuration(vid.duration);
               }
-              if (vid.videoHeight) {
-                const h = vid.videoHeight;
-                if (h >= 2160) setVideoResolution('4K');
-                else if (h >= 1440) setVideoResolution('2K');
-                else if (h >= 1080) setVideoResolution('1080p');
-                else if (h >= 720) setVideoResolution('720p');
-                else if (h >= 480) setVideoResolution('480p');
-                else setVideoResolution(`${vid.videoWidth}×${vid.videoHeight}`);
+              if (!useServerTranscode && isServerApiSource && vid.videoWidth === 0) {
+                autoPlayAfterSwitchRef.current = !vid.paused;
+                setPreloadStatusText('Optimizing MKV Video Stream...');
+                setIsBuffering(true);
+                setUseServerTranscode(true);
+                return;
+              }
+              syncBrowserMediaTracks();
+              // Re-activate selected subtitle track if any
+              if (activeSubtitleId && vid.textTracks) {
+                const selected = subtitleTracks.find((t) => t.id === activeSubtitleId);
+                for (let i = 0; i < vid.textTracks.length; i++) {
+                  const tt = vid.textTracks[i];
+                  tt.mode = selected && tt.label === selected.label ? 'showing' : 'disabled';
+                }
+              }
+            }}
+            onProgress={(e) => {
+              const vid = e.currentTarget;
+              const maxDur = effectiveDuration || vid.duration || 0;
+              if (vid.buffered && vid.buffered.length > 0 && maxDur > 0) {
+                const bufEnd = streamStartOffset + vid.buffered.end(vid.buffered.length - 1);
+                setBufferedPct(Math.min(100, (bufEnd / maxDur) * 100));
               }
             }}
             onTimeUpdate={(e) => {
               const vid = e.currentTarget;
               setCurrentTime(vid.currentTime || 0);
-              if (vid.buffered && vid.buffered.length > 0 && vid.duration > 0) {
-                const bufEnd = vid.buffered.end(vid.buffered.length - 1);
-                setBufferedPct(Math.min(100, (bufEnd / vid.duration) * 100));
+              const maxDur = effectiveDuration || vid.duration || 0;
+              if (vid.buffered && vid.buffered.length > 0 && maxDur > 0) {
+                const bufEnd = streamStartOffset + vid.buffered.end(vid.buffered.length - 1);
+                setBufferedPct(Math.min(100, (bufEnd / maxDur) * 100));
               }
             }}
             onError={() => {
+              if (!useServerTranscode && isServerApiSource) {
+                setPreloadStatusText('Starting MKV Stream Decoder...');
+                setIsBuffering(true);
+                setUseServerTranscode(true);
+                return;
+              }
               setIsBuffering(false);
               if (onFallbackContainer) {
                 onFallbackContainer();
@@ -513,158 +937,93 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
                 );
               }
             }}
-            className={`w-full h-full max-h-full transition-all duration-200 ${
-              fitMode === 'cover' ? 'object-cover' : 'object-contain'
-            }`}
-          />
+            className="w-full h-full max-h-full object-contain"
+          >
+            {subtitleTracks.map((t) => {
+              const trackSrc =
+                t.serverSubIndex !== undefined
+                  ? `${streamEndpoints.subtitlesBaseUrl}${
+                      streamEndpoints.subtitlesBaseUrl.includes('?') ? '&' : '?'
+                    }subIndex=${t.serverSubIndex}&start=${streamStartOffset.toFixed(2)}`
+                  : t.srcUrl;
+              if (!trackSrc) return null;
+              return (
+                <track
+                  key={`${t.id}_${streamStartOffset.toFixed(0)}`}
+                  kind="subtitles"
+                  label={t.label}
+                  srcLang={t.language}
+                  src={trackSrc}
+                  default={activeSubtitleId === t.id}
+                />
+              );
+            })}
+          </video>
 
-          {/* Buffering Spinner */}
-          {isBuffering && isPlaying && (
-            <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/20">
-              <div className="w-14 h-14 rounded-full bg-[#141311]/90 border border-[#D97757]/60 flex items-center justify-center shadow-2xl">
-                <Loader2 className="w-6 h-6 text-[#D97757] animate-spin" />
+          {/* Center Play Button (Kept as first <button> child in video stage for Focus Mode & centered via absolute positioning) */}
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              togglePlay();
+            }}
+            className={`absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-10 w-16 h-16 sm:w-20 sm:h-20 rounded-full bg-black/80 hover:bg-[#D97757] text-white hover:text-[#141311] border-2 border-white/30 hover:border-[#D97757] flex items-center justify-center transition-all duration-150 cursor-pointer shadow-2xl ${
+              !isPlaying && !isBuffering
+                ? 'opacity-100 scale-100 pointer-events-auto'
+                : 'opacity-0 scale-90 pointer-events-none'
+            }`}
+            aria-label={fileName ? `Play ${fileName}` : 'Play Video'}
+          >
+            <Play className="w-7 h-7 sm:w-8 sm:h-8 fill-current ml-1" />
+          </button>
+
+          {/* Visual Preloading / Fast-Loading & Buffering Indicator Overlay */}
+          {isBuffering && (
+            <div className="pointer-events-none absolute inset-0 z-10 flex flex-col items-center justify-center bg-black/45 px-4">
+              <div className="px-4 py-3 bg-[#141311]/95 border border-[#2C2824] flex flex-col items-center gap-2 shadow-2xl max-w-xs w-full">
+                <div className="flex items-center gap-2.5">
+                  <Loader2 className="w-5 h-5 text-[#D97757] animate-spin shrink-0" />
+                  <span className="text-xs font-semibold text-[#F2EFE9] truncate">
+                    {preloadStatusText}
+                  </span>
+                </div>
+                <div className="w-full h-1 bg-[#2C2824] overflow-hidden">
+                  <div
+                    style={{ width: `${Math.max(18, Math.round(bufferedPct))}%` }}
+                    className="h-full bg-[#D97757] animate-pulse transition-all duration-200"
+                  />
+                </div>
               </div>
             </div>
-          )}
-
-          {/* Transient Action Feedback Badge (Play/Pause/+10s/-10s/Volume/Snapshot) */}
-          {indicator && (
-            <div
-              key={indicator.id}
-              className="pointer-events-none absolute top-14 left-1/2 -translate-x-1/2 z-30 px-3.5 py-1.5 bg-[#141311]/95 border border-[#D97757]/70 text-[#F2EFE9] text-xs font-mono tabular-nums flex items-center gap-2 shadow-2xl"
-            >
-              {indicator.type === 'rewind' && <RotateCcw className="w-3.5 h-3.5 text-[#D97757]" />}
-              {indicator.type === 'forward' && <RotateCw className="w-3.5 h-3.5 text-[#D97757]" />}
-              {indicator.type === 'volume' && <Volume2 className="w-3.5 h-3.5 text-[#D97757]" />}
-              {indicator.type === 'loop' && <Repeat className="w-3.5 h-3.5 text-[#D97757]" />}
-              {indicator.type === 'snapshot' && <Camera className="w-3.5 h-3.5 text-[#D97757]" />}
-              <span>{indicator.label}</span>
-            </div>
-          )}
-
-          {/* Claude Signature Center Play / Replay Button when Paused */}
-          {!isPlaying && !isBuffering && (
-            <button
-              type="button"
-              onClick={(e) => {
-                e.stopPropagation();
-                togglePlay();
-              }}
-              className="group/playbtn relative w-16 h-16 sm:w-20 sm:h-20 rounded-full bg-[#141311]/90 hover:bg-[#D97757] text-[#F2EFE9] hover:text-[#141311] border-2 border-[#D97757] flex items-center justify-center shadow-[0_0_40px_rgba(217,119,87,0.35)] transition-all duration-150 hover:scale-105 cursor-pointer"
-              aria-label={isEnded ? 'Replay Video' : 'Play Video'}
-            >
-              {isEnded ? (
-                <RefreshCw className="w-7 h-7 sm:w-8 sm:h-8" />
-              ) : (
-                <Play className="w-7 h-7 sm:w-8 sm:h-8 fill-current ml-1" />
-              )}
-            </button>
           )}
         </div>
 
         {/* ====================================================================
-            KEYBOARD SHORTCUTS OVERLAY MODAL
+            MULTI-AUDIO TRACK SELECTOR MENU (Only rendered if >1 audio track)
         ==================================================================== */}
-        {showShortcutsModal && (
+        {showAudioMenu && audioTracks.length > 1 && (
           <div
             onClick={(e) => e.stopPropagation()}
-            className="absolute inset-0 z-40 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4"
+            className="absolute bottom-14 right-12 sm:right-16 z-30 w-56 bg-[#141311]/95 border border-[#2C2824] text-[#F2EFE9] shadow-2xl py-1 max-h-60 overflow-y-auto"
           >
-            <div className="w-full max-w-sm bg-[#1C1A17] border border-[#2C2824] p-4 space-y-3 shadow-2xl">
-              <div className="flex items-center justify-between border-b border-[#2C2824] pb-2.5">
-                <div className="flex items-center gap-2 text-xs font-bold text-[#F2EFE9]">
-                  <Keyboard className="w-4 h-4 text-[#D97757]" />
-                  <span>Player Keyboard Shortcuts</span>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setShowShortcutsModal(false)}
-                  className="text-[#9E978E] hover:text-[#F2EFE9] cursor-pointer"
-                >
-                  <X className="w-4 h-4" />
-                </button>
-              </div>
-              <div className="grid grid-cols-2 gap-x-4 gap-y-2 text-xs">
-                <div className="flex items-center justify-between text-[#9E978E]">
-                  <span>Play / Pause</span>
-                  <kbd className="px-1.5 py-0.5 bg-[#141311] border border-[#2C2824] text-[#F2EFE9] font-mono text-[10px]">
-                    Space / K
-                  </kbd>
-                </div>
-                <div className="flex items-center justify-between text-[#9E978E]">
-                  <span>Fullscreen</span>
-                  <kbd className="px-1.5 py-0.5 bg-[#141311] border border-[#2C2824] text-[#F2EFE9] font-mono text-[10px]">
-                    F
-                  </kbd>
-                </div>
-                <div className="flex items-center justify-between text-[#9E978E]">
-                  <span>Rewind 10s</span>
-                  <kbd className="px-1.5 py-0.5 bg-[#141311] border border-[#2C2824] text-[#F2EFE9] font-mono text-[10px]">
-                    ← / J
-                  </kbd>
-                </div>
-                <div className="flex items-center justify-between text-[#9E978E]">
-                  <span>Forward 10s</span>
-                  <kbd className="px-1.5 py-0.5 bg-[#141311] border border-[#2C2824] text-[#F2EFE9] font-mono text-[10px]">
-                    → / L
-                  </kbd>
-                </div>
-                <div className="flex items-center justify-between text-[#9E978E]">
-                  <span>Volume</span>
-                  <kbd className="px-1.5 py-0.5 bg-[#141311] border border-[#2C2824] text-[#F2EFE9] font-mono text-[10px]">
-                    ↑ / ↓
-                  </kbd>
-                </div>
-                <div className="flex items-center justify-between text-[#9E978E]">
-                  <span>Mute</span>
-                  <kbd className="px-1.5 py-0.5 bg-[#141311] border border-[#2C2824] text-[#F2EFE9] font-mono text-[10px]">
-                    M
-                  </kbd>
-                </div>
-                <div className="flex items-center justify-between text-[#9E978E]">
-                  <span>Mini Player</span>
-                  <kbd className="px-1.5 py-0.5 bg-[#141311] border border-[#2C2824] text-[#F2EFE9] font-mono text-[10px]">
-                    P
-                  </kbd>
-                </div>
-                <div className="flex items-center justify-between text-[#9E978E]">
-                  <span>Loop Video</span>
-                  <kbd className="px-1.5 py-0.5 bg-[#141311] border border-[#2C2824] text-[#F2EFE9] font-mono text-[10px]">
-                    R
-                  </kbd>
-                </div>
-              </div>
+            <div className="px-3 py-1.5 text-[11px] font-semibold text-[#9E978E] border-b border-[#2C2824] flex items-center justify-between">
+              <span>Multi-Audio Track ({audioTracks.length})</span>
             </div>
-          </div>
-        )}
-
-        {/* ====================================================================
-            PLAYBACK SPEED POPOVER MENU
-        ==================================================================== */}
-        {showSpeedMenu && (
-          <div
-            onClick={(e) => e.stopPropagation()}
-            className="absolute bottom-16 right-3 sm:right-5 z-30 w-40 bg-[#141311]/95 backdrop-blur-md border border-[#2C2824] text-[#F2EFE9] shadow-2xl py-1"
-          >
-            <div className="px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider text-[#9E978E] border-b border-[#2C2824] flex items-center justify-between">
-              <span>Playback Speed</span>
-              <Sparkles className="w-3 h-3 text-[#D97757]" />
-            </div>
-            {SPEED_RATES.map((rate) => {
-              const active = playbackRate === rate;
+            {audioTracks.map((track) => {
+              const active = activeAudioIndex === track.index;
               return (
                 <button
-                  key={rate}
+                  key={track.id}
                   type="button"
-                  onClick={() => handleSpeedChange(rate)}
-                  className={`w-full px-3 py-1.5 text-xs font-mono tabular-nums flex items-center justify-between cursor-pointer transition-colors ${
+                  onClick={() => handleSelectAudioTrack(track.index)}
+                  className={`w-full px-3 py-2 text-xs flex items-center justify-between cursor-pointer transition-colors ${
                     active
-                      ? 'bg-[#24211D] text-[#D97757] font-bold'
+                      ? 'bg-[#24211D] text-[#D97757] font-semibold'
                       : 'text-[#F2EFE9] hover:bg-[#1C1A17]'
                   }`}
                 >
-                  <span>{rate === 1 ? '1.0x (Normal)' : `${rate}x`}</span>
-                  {active && <Check className="w-3.5 h-3.5 text-[#D97757]" />}
+                  <span className="truncate">{track.label}</span>
+                  {active && <Check className="w-3.5 h-3.5 text-[#D97757] shrink-0" />}
                 </button>
               );
             })}
@@ -672,116 +1031,163 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
         )}
 
         {/* ====================================================================
-            CLAUDE SIGNATURE BOTTOM CONTROL HUD
+            CC / SUBTITLES MENU
+        ==================================================================== */}
+        {showCcMenu && (
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="absolute bottom-14 right-3 sm:right-5 z-30 w-56 bg-[#141311]/95 border border-[#2C2824] text-[#F2EFE9] shadow-2xl py-1 max-h-60 overflow-y-auto"
+          >
+            <div className="px-3 py-1.5 text-[11px] font-semibold text-[#9E978E] border-b border-[#2C2824] flex items-center justify-between">
+              <span>Subtitles / CC</span>
+              <button
+                type="button"
+                onClick={() => subtitleInputRef.current?.click()}
+                className="text-[11px] text-[#D97757] hover:underline flex items-center gap-1 cursor-pointer"
+              >
+                <Upload className="w-3 h-3" />
+                <span>Load .SRT/.VTT</span>
+              </button>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => handleSelectSubtitle(null)}
+              className={`w-full px-3 py-2 text-xs flex items-center justify-between cursor-pointer transition-colors ${
+                activeSubtitleId === null
+                  ? 'bg-[#24211D] text-[#D97757] font-semibold'
+                  : 'text-[#F2EFE9] hover:bg-[#1C1A17]'
+              }`}
+            >
+              <span>Off</span>
+              {activeSubtitleId === null && <Check className="w-3.5 h-3.5 text-[#D97757]" />}
+            </button>
+
+            {subtitleTracks.map((track) => {
+              const active = activeSubtitleId === track.id;
+              return (
+                <button
+                  key={track.id}
+                  type="button"
+                  onClick={() => handleSelectSubtitle(track.id)}
+                  className={`w-full px-3 py-2 text-xs flex items-center justify-between cursor-pointer transition-colors ${
+                    active
+                      ? 'bg-[#24211D] text-[#D97757] font-semibold'
+                      : 'text-[#F2EFE9] hover:bg-[#1C1A17]'
+                  }`}
+                >
+                  <span className="truncate">{track.label}</span>
+                  {active && <Check className="w-3.5 h-3.5 text-[#D97757] shrink-0" />}
+                </button>
+              );
+            })}
+          </div>
+        )}
+
+        {/* ====================================================================
+            MINIMALIST BOTTOM CONTROL BAR
+            (Play/Pause, -10s, +10s, Volume, Multi-Audio [if available], CC, PiP, Fullscreen)
         ==================================================================== */}
         <div
           onClick={(e) => e.stopPropagation()}
-          className={`absolute bottom-0 left-0 right-0 z-20 bg-gradient-to-t from-black/95 via-black/80 to-transparent px-3 sm:px-5 pt-6 pb-3 space-y-2.5 transition-opacity duration-200 ${
+          className={`absolute bottom-0 left-0 right-0 z-20 bg-gradient-to-t from-black/95 via-black/70 to-transparent px-3 sm:px-4 pt-6 pb-2.5 space-y-2 transition-opacity duration-200 ${
             controlsVisible ? 'opacity-100 pointer-events-auto' : 'opacity-0 pointer-events-none'
           }`}
         >
-          {/* Interactive Timeline Scrubber + Hover Timecode Tooltip */}
+          {/* Timeline Scrubber with Preload Buffer Bar */}
           <div
             ref={timelineRef}
             onMouseMove={handleTimelineMouseMove}
             onMouseLeave={handleTimelineMouseLeave}
-            className="relative w-full h-4 flex items-center group/scrub cursor-pointer"
+            className="relative w-full h-3.5 flex items-center group/scrub cursor-pointer"
           >
-            {/* Floating Hover Timecode Tooltip */}
-            {hoverPct !== null && hoverTime !== null && duration > 0 && (
+            {hoverPct !== null && hoverTime !== null && effectiveDuration > 0 && (
               <div
-                style={{
-                  left: `${Math.max(4, Math.min(96, hoverPct))}%`,
-                }}
-                className="pointer-events-none absolute -top-7 -translate-x-1/2 px-2 py-0.5 bg-[#141311] border border-[#D97757] text-[#F2EFE9] text-[11px] font-mono tabular-nums shadow-lg whitespace-nowrap"
+                style={{ left: `${Math.max(4, Math.min(96, hoverPct))}%` }}
+                className="pointer-events-none absolute -top-6 -translate-x-1/2 px-1.5 py-0.5 bg-black/90 border border-white/15 text-white text-[11px] font-mono tabular-nums whitespace-nowrap"
               >
                 {formatClock(hoverTime)}
               </div>
             )}
 
-            {/* Track Background */}
-            <div className="w-full h-1.5 group-hover/scrub:h-2 bg-white/20 relative overflow-hidden transition-all">
-              {/* Buffered Segment */}
+            <div className="w-full h-1 group-hover/scrub:h-1.5 bg-white/20 relative overflow-hidden transition-all">
+              {/* Preload / Buffered Progress */}
               <div
                 style={{ width: `${bufferedPct}%` }}
-                className="absolute left-0 top-0 bottom-0 bg-white/35 transition-all duration-150"
+                className="absolute left-0 top-0 bottom-0 bg-white/40 transition-all duration-150"
               />
-              {/* Hover Preview Ghost Bar */}
-              {hoverPct !== null && (
-                <div
-                  style={{ width: `${hoverPct}%` }}
-                  className="absolute left-0 top-0 bottom-0 bg-white/25"
-                />
-              )}
-              {/* Played Terracotta Progress Bar */}
+              {/* Played Progress */}
               <div
                 style={{ width: `${progressPct}%` }}
                 className="absolute left-0 top-0 bottom-0 bg-[#D97757]"
               />
             </div>
 
-            {/* Scrubber Thumb Handle */}
             <div
               style={{ left: `${progressPct}%` }}
-              className="pointer-events-none absolute -translate-x-1/2 w-3.5 h-3.5 rounded-full bg-[#D97757] border-2 border-[#F2EFE9] shadow-[0_0_10px_rgba(217,119,87,0.9)] scale-90 group-hover/scrub:scale-110 transition-transform"
+              className="pointer-events-none absolute -translate-x-1/2 w-3 h-3 rounded-full bg-[#D97757] scale-0 group-hover/scrub:scale-100 transition-transform"
             />
 
             <input
               type="range"
               min={0}
-              max={duration || 100}
+              max={effectiveDuration || 100}
               step={0.1}
-              value={currentTime}
+              value={displayedCurrentTime}
               onChange={handleSeekInput}
               className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
               aria-label="Seek video timeline"
             />
           </div>
 
-          {/* Bottom Controls Transport Row */}
-          <div className="flex items-center justify-between gap-2 text-[#F2EFE9]">
-            {/* Left Group: Play/Pause, -10s, +10s, Volume Slider, Clickable Timecode */}
-            <div className="flex items-center gap-1.5 sm:gap-2.5">
+          {/* Controls Row */}
+          <div className="flex items-center justify-between gap-2 text-white">
+            {/* Left Controls: Play/Pause, Prev 10s, Next 10s, Volume, Time */}
+            <div className="flex items-center gap-1 sm:gap-2">
               <button
                 type="button"
                 onClick={togglePlay}
-                className="w-8 h-8 flex items-center justify-center bg-[#1C1A17]/90 border border-[#2C2824] hover:border-[#D97757] hover:text-[#D97757] transition-colors cursor-pointer"
-                title={isPlaying ? 'Pause (Space)' : 'Play (Space)'}
+                className="w-8 h-8 flex items-center justify-center text-white/90 hover:text-[#D97757] transition-colors cursor-pointer"
+                title={isPlaying ? 'Pause' : 'Play'}
+                aria-label={isPlaying ? 'Pause' : 'Play'}
               >
                 {isPlaying ? (
-                  <Pause className="w-4 h-4" />
-                ) : isEnded ? (
-                  <RefreshCw className="w-4 h-4" />
+                  <Pause className="w-4 h-4 fill-current" />
                 ) : (
-                  <Play className="w-4 h-4 fill-current ml-0.5" />
+                  <Play className="w-4 h-4 fill-current" />
                 )}
               </button>
 
               <button
                 type="button"
                 onClick={() => handleSkip(-10)}
-                className="w-8 h-8 flex items-center justify-center hover:text-[#D97757] hover:bg-white/10 transition-colors cursor-pointer"
-                title="Rewind 10s (←)"
+                className="px-1.5 h-8 flex items-center justify-center gap-0.5 text-white/90 hover:text-[#D97757] transition-colors cursor-pointer"
+                title="Previous 10 seconds"
+                aria-label="Previous 10 seconds"
               >
                 <RotateCcw className="w-4 h-4" />
+                <span className="text-[10px] font-mono">10</span>
               </button>
 
               <button
                 type="button"
                 onClick={() => handleSkip(10)}
-                className="w-8 h-8 flex items-center justify-center hover:text-[#D97757] hover:bg-white/10 transition-colors cursor-pointer"
-                title="Forward 10s (→)"
+                className="px-1.5 h-8 flex items-center justify-center gap-0.5 text-white/90 hover:text-[#D97757] transition-colors cursor-pointer"
+                title="Next 10 seconds"
+                aria-label="Next 10 seconds"
               >
                 <RotateCw className="w-4 h-4" />
+                <span className="text-[10px] font-mono">10</span>
               </button>
 
-              {/* Volume Control */}
-              <div className="hidden sm:flex items-center gap-1.5 px-1.5 py-1 bg-[#141311]/70 border border-white/10">
+              {/* Volume */}
+              <div className="flex items-center gap-1.5 ml-0.5">
                 <button
                   type="button"
                   onClick={toggleMute}
-                  className="p-1 hover:text-[#D97757] cursor-pointer"
-                  title="Mute / Unmute (M)"
+                  className="w-8 h-8 flex items-center justify-center text-white/90 hover:text-[#D97757] transition-colors cursor-pointer"
+                  title={isMuted ? 'Unmute' : 'Mute'}
+                  aria-label={isMuted ? 'Unmute' : 'Mute'}
                 >
                   {isMuted || volume === 0 ? (
                     <VolumeX className="w-4 h-4 text-[#D94848]" />
@@ -798,95 +1204,79 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
                   step={0.02}
                   value={isMuted ? 0 : volume}
                   onChange={handleVolumeChange}
-                  className="w-16 accent-[#D97757] cursor-pointer"
+                  className="w-14 sm:w-20 h-1 accent-[#D97757] cursor-pointer"
                   aria-label="Volume"
                 />
               </div>
 
-              {/* Clickable Timecode (Toggles Elapsed vs Remaining Time) */}
-              <button
-                type="button"
-                onClick={() => setShowRemainingTime((prev) => !prev)}
-                className="px-2 py-1 text-xs font-mono tabular-nums text-[#F2EFE9] hover:text-[#D97757] transition-colors cursor-pointer"
-                title="Click to toggle elapsed / remaining time"
-              >
-                {showRemainingTime && duration > 0
-                  ? `-${formatClock(Math.max(0, duration - currentTime))}`
-                  : formatClock(currentTime)}{' '}
-                <span className="text-white/35">/</span> {formatClock(duration)}
-              </button>
+              {/* Time Display */}
+              <div className="pl-1.5 text-xs font-mono tabular-nums text-white/80 whitespace-nowrap">
+                {formatClock(displayedCurrentTime)} <span className="text-white/35">/</span>{' '}
+                {formatClock(effectiveDuration)}
+              </div>
             </div>
 
-            {/* Right Group: Loop, Frame Capture, Fit/Fill, Speed, PiP, Fullscreen */}
-            <div className="flex items-center gap-1.5 sm:gap-2">
-              <button
-                type="button"
-                onClick={toggleLoop}
-                className={`w-8 h-8 flex items-center justify-center border transition-colors cursor-pointer ${
-                  isLooping
-                    ? 'bg-[#D97757] border-[#D97757] text-[#141311]'
-                    : 'bg-[#141311]/80 border-white/15 hover:border-[#D97757] text-[#F2EFE9]'
-                }`}
-                title={isLooping ? 'Loop Enabled (R)' : 'Loop Video (R)'}
-              >
-                <Repeat className="w-3.5 h-3.5" />
-              </button>
+            {/* Right Controls: Multi-Audio (ONLY if >1 track exists), CC, Picture-in-Picture, Fullscreen */}
+            <div className="flex items-center gap-1 sm:gap-1.5">
+              {audioTracks.length > 1 && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowCcMenu(false);
+                    setShowAudioMenu((prev) => !prev);
+                  }}
+                  className={`h-8 px-2 flex items-center justify-center gap-1 text-xs transition-colors cursor-pointer border ${
+                    showAudioMenu
+                      ? 'border-[#D97757] bg-[#24211D] text-[#D97757]'
+                      : 'border-white/15 bg-black/50 text-white/90 hover:border-[#D97757] hover:text-[#D97757]'
+                  }`}
+                  title="Switch Audio Track"
+                  aria-label="Switch Audio Track"
+                >
+                  <Headphones className="w-3.5 h-3.5 shrink-0" />
+                  <span className="text-[11px] font-semibold truncate max-w-[80px]">
+                    {activeAudioTrackObj
+                      ? activeAudioTrackObj.label.split(' ')[0]
+                      : `Audio (${audioTracks.length})`}
+                  </span>
+                </button>
+              )}
 
               <button
                 type="button"
-                onClick={captureVideoSnapshot}
-                className="hidden sm:flex w-8 h-8 items-center justify-center bg-[#141311]/80 border border-white/15 hover:border-[#D97757] text-[#F2EFE9] hover:text-[#D97757] transition-colors cursor-pointer"
-                title="Save Video Frame Screenshot"
-              >
-                <Camera className="w-3.5 h-3.5" />
-              </button>
-
-              <button
-                type="button"
-                onClick={() =>
-                  setFitMode((prev) => (prev === 'contain' ? 'cover' : 'contain'))
-                }
-                className={`hidden md:flex px-2 h-8 items-center justify-center text-[11px] font-mono border transition-colors cursor-pointer ${
-                  fitMode === 'cover'
-                    ? 'bg-[#24211D] border-[#D97757] text-[#D97757] font-bold'
-                    : 'bg-[#141311]/80 border-white/15 hover:border-[#D97757] text-[#F2EFE9]'
+                onClick={() => {
+                  setShowAudioMenu(false);
+                  setShowCcMenu((prev) => !prev);
+                }}
+                className={`w-8 h-8 flex items-center justify-center transition-colors cursor-pointer ${
+                  activeSubtitleId !== null || showCcMenu
+                    ? 'text-[#D97757]'
+                    : 'text-white/90 hover:text-[#D97757]'
                 }`}
-                title="Toggle Fit / Widescreen Crop"
+                title="Subtitles / CC"
+                aria-label="Subtitles / CC"
               >
-                {fitMode === 'cover' ? 'FILL' : 'FIT'}
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setShowSpeedMenu((prev) => !prev)}
-                className={`px-2.5 h-8 text-xs font-mono tabular-nums border cursor-pointer transition-colors ${
-                  showSpeedMenu || playbackRate !== 1
-                    ? 'bg-[#D97757] border-[#D97757] text-[#141311] font-bold'
-                    : 'bg-[#141311]/80 border-white/15 hover:border-[#D97757] text-[#F2EFE9]'
-                }`}
-                title="Playback Speed"
-              >
-                {playbackRate}x
+                <Subtitles className="w-4 h-4" />
               </button>
 
               <button
                 type="button"
                 onClick={togglePictureInPicture}
-                className={`hidden sm:flex w-8 h-8 items-center justify-center border transition-colors cursor-pointer ${
-                  isPip
-                    ? 'bg-[#D97757] border-[#D97757] text-[#141311]'
-                    : 'bg-[#141311]/80 border-white/15 hover:border-[#D97757] text-[#F2EFE9]'
+                className={`w-8 h-8 flex items-center justify-center transition-colors cursor-pointer ${
+                  isPip ? 'text-[#D97757]' : 'text-white/90 hover:text-[#D97757]'
                 }`}
-                title="Picture-in-Picture (P)"
+                title="Picture in Picture"
+                aria-label="Picture in Picture"
               >
-                <PictureInPicture2 className="w-3.5 h-3.5" />
+                <PictureInPicture2 className="w-4 h-4" />
               </button>
 
               <button
                 type="button"
                 onClick={toggleFullscreen}
-                className="w-8 h-8 flex items-center justify-center bg-[#141311]/80 border border-white/15 hover:border-[#D97757] text-[#F2EFE9] hover:text-[#D97757] cursor-pointer transition-colors"
-                title="Fullscreen (F)"
+                className="w-8 h-8 flex items-center justify-center text-white/90 hover:text-[#D97757] transition-colors cursor-pointer"
+                title={isFullscreen ? 'Exit Fullscreen' : 'Fullscreen'}
+                aria-label={isFullscreen ? 'Exit Fullscreen' : 'Fullscreen'}
               >
                 {isFullscreen ? (
                   <Minimize className="w-4 h-4" />

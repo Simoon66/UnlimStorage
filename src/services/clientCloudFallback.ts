@@ -428,6 +428,52 @@ export async function deleteClientBinaryBlob(fileId: string): Promise<void> {
   });
 }
 
+const preloadedVideoIds = new Set<string>();
+
+/**
+ * Warms up the first video chunk & seek header in the background for instant playback.
+ */
+export function preloadVideoFile(
+  file: FileRecord,
+  headers?: Record<string, string>
+): void {
+  if (!file || file.lockedOverQuota || preloadedVideoIds.has(file.id)) return;
+  const isVideo =
+    file.mimeType.startsWith('video/') ||
+    /\.(mp4|webm|mov|mkv|avi|m4v)$/i.test(file.name);
+  if (!isVideo) return;
+
+  preloadedVideoIds.add(file.id);
+
+  // 1. Trigger server-side chunk preloader (Chunk 0 + seek table chunk)
+  const uid = headers?.['X-Firebase-Uid'] || '';
+  const email = headers?.['X-Firebase-Email'] || '';
+  window
+    .fetch(`/api/files/${encodeURIComponent(file.id)}/preload`, {
+      method: 'POST',
+      headers: {
+        ...(headers || {}),
+        'Content-Type': 'application/json',
+      },
+    })
+    .catch(() => null);
+
+  // 2. Warm up initial 512 KB byte range in browser HTTP cache
+  const inlineStreamUrl = `/api/files/${encodeURIComponent(
+    file.id
+  )}/download?inline=1&uid=${encodeURIComponent(uid)}&email=${encodeURIComponent(email)}`;
+  window
+    .fetch(inlineStreamUrl, {
+      method: 'GET',
+      headers: {
+        ...(headers || {}),
+        Range: 'bytes=0-524287',
+      },
+    })
+    .catch(() => null);
+}
+
+
 function createInitialClientDb(): ClientDatabase {
   const now = new Date();
   const iso = (minsAgo: number) => new Date(now.getTime() - minsAgo * 60000).toISOString();

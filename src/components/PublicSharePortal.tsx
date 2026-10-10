@@ -112,52 +112,43 @@ export const PublicSharePortal: React.FC<PublicSharePortalProps> = ({
     };
   }, [token]);
 
-  // Automatically prepare video stream URL when unlocked and share is a video
+  // Immediately assign direct HTTP 206 Range video stream URL when unlocked (0ms wait)
   useEffect(() => {
     if (!share || !unlockedKey || !isVideoShare) return;
-    let active = true;
-    let createdBlobUrl: string | null = null;
-
-    const loadStream = async () => {
-      setLoadingVideoStream(true);
-      try {
-        const streamEndpoint = `/api/public/share/${encodeURIComponent(
-          share.token
-        )}/download?key=${encodeURIComponent(unlockedKey)}&password=${encodeURIComponent(
-          passwordInput
-        )}`;
-        const res = await apiFetch(streamEndpoint);
-        if (!res.ok) return;
-        const rawBlob = await res.blob();
-        if (rawBlob.size <= 64) return;
-        const normalizedMime =
-          share.fileName.toLowerCase().endsWith('.mkv') ||
-          share.fileMimeType === 'video/x-matroska'
-            ? 'video/webm'
-            : share.fileMimeType.startsWith('video/')
-            ? share.fileMimeType
-            : 'video/mp4';
-        const videoBlob = new Blob([rawBlob], { type: normalizedMime });
-        createdBlobUrl = URL.createObjectURL(videoBlob);
-        if (active) {
-          setVideoStreamUrl(createdBlobUrl);
-        }
-      } catch {
-        // ignore preview stream failure; download button still works
-      } finally {
-        if (active) setLoadingVideoStream(false);
-      }
-    };
-
-    loadStream();
-
-    return () => {
-      active = false;
-      if (createdBlobUrl) {
-        URL.revokeObjectURL(createdBlobUrl);
-      }
-    };
+    setLoadingVideoStream(false);
+    const directInlineUrl = `/api/public/share/${encodeURIComponent(
+      share.token
+    )}/download?inline=1&key=${encodeURIComponent(unlockedKey)}&password=${encodeURIComponent(
+      passwordInput
+    )}`;
+    setVideoStreamUrl(directInlineUrl);
   }, [share, unlockedKey, isVideoShare, passwordInput]);
+
+  const handlePublicVideoFallback = React.useCallback(async () => {
+    if (!share || !unlockedKey || !videoStreamUrl || videoStreamUrl.startsWith('blob:')) return;
+    try {
+      const streamEndpoint = `/api/public/share/${encodeURIComponent(
+        share.token
+      )}/download?key=${encodeURIComponent(unlockedKey)}&password=${encodeURIComponent(
+        passwordInput
+      )}`;
+      const res = await apiFetch(streamEndpoint);
+      if (!res.ok) return;
+      const rawBlob = await res.blob();
+      if (rawBlob.size <= 64) return;
+      const normalizedMime =
+        share.fileName.toLowerCase().endsWith('.mkv') ||
+        share.fileMimeType === 'video/x-matroska'
+          ? 'video/webm'
+          : share.fileMimeType.startsWith('video/')
+          ? share.fileMimeType
+          : 'video/mp4';
+      const videoBlob = new Blob([rawBlob], { type: normalizedMime });
+      setVideoStreamUrl(URL.createObjectURL(videoBlob));
+    } catch {
+      // ignore fallback error
+    }
+  }, [share, unlockedKey, videoStreamUrl, passwordInput]);
 
   useEffect(() => {
     const handleProgress = (event: Event) => {
@@ -395,6 +386,7 @@ export const PublicSharePortal: React.FC<PublicSharePortalProps> = ({
             rawBlob={null}
             isMkv={share.fileName.toLowerCase().endsWith('.mkv')}
             fullViewport={true}
+            onFallbackContainer={handlePublicVideoFallback}
           />
         </div>
       );
@@ -510,12 +502,13 @@ export const PublicSharePortal: React.FC<PublicSharePortalProps> = ({
                       rawBlob={null}
                       isMkv={share.fileName.toLowerCase().endsWith('.mkv')}
                       fullViewport={false}
+                      onFallbackContainer={handlePublicVideoFallback}
                     />
                   ) : null}
 
                   <div className="flex items-center justify-between gap-2 pt-1">
                     <span className="text-[11px] text-[#9E978E]">
-                      Clean JW Player stream · Speed &amp; Fullscreen controls
+                      Direct fast-load stream · Preload enabled
                     </span>
                     <button
                       type="button"

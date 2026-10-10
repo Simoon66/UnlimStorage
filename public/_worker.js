@@ -4,7 +4,8 @@ const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type, Authorization, Range',
-  'Access-Control-Expose-Headers': 'Content-Length, Content-Range, Content-Type, Content-Disposition',
+  'Access-Control-Expose-Headers':
+    'Content-Length, Content-Range, Content-Type, Content-Disposition, Accept-Ranges',
 };
 
 async function resolveTelegramFileUrl(fileId, botToken) {
@@ -39,8 +40,12 @@ export default {
       }
       try {
         const tgFileUrl = await resolveTelegramFileUrl(fileId, botToken);
-        const fileRes = await fetch(tgFileUrl);
-        if (!fileRes.ok) {
+        const rangeHeader = request.headers.get('Range');
+        const fileRes = await fetch(
+          tgFileUrl,
+          rangeHeader ? { headers: { Range: rangeHeader } } : undefined
+        );
+        if (!fileRes.ok && fileRes.status !== 206) {
           return new Response(JSON.stringify({ error: 'Upstream chunk fetch failed' }), {
             status: 502,
             headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
@@ -48,9 +53,13 @@ export default {
         }
         const headers = new Headers(CORS_HEADERS);
         headers.set('Content-Type', 'application/octet-stream');
+        headers.set('Accept-Ranges', 'bytes');
+        headers.set('Cache-Control', 'public, max-age=86400');
         const len = fileRes.headers.get('content-length');
         if (len) headers.set('Content-Length', len);
-        return new Response(fileRes.body, { status: 200, headers });
+        const cr = fileRes.headers.get('content-range');
+        if (cr) headers.set('Content-Range', cr);
+        return new Response(fileRes.body, { status: fileRes.status, headers });
       } catch (err) {
         return new Response(
           JSON.stringify({ error: err instanceof Error ? err.message : 'Chunk proxy error' }),
@@ -62,7 +71,7 @@ export default {
       }
     }
 
-    // 2. Multi-chunk continuous stream download (/api/public/tg-stream)
+    // 2. Multi-chunk continuous stream & HTTP 206 Range video stream (/api/public/tg-stream)
     if (url.pathname === '/api/public/tg-stream') {
       try {
         let chunks = [];
@@ -70,6 +79,7 @@ export default {
         let fileName = 'download.bin';
         let mimeType = 'application/octet-stream';
         let totalSize = 0;
+        const isInline = url.searchParams.get('inline') === '1';
 
         if (request.method === 'POST') {
           const body = await request.json();
@@ -94,7 +104,65 @@ export default {
           return new Response('No chunks provided', { status: 400, headers: CORS_HEADERS });
         }
 
-        const sorted = [...chunks].sort((a, b) => (a.partIndex || 0) - (b.partIndex || 0));
+        const sorted = [...chunks].sort(
+          (a, b) => (a.partIndex ?? a.p ?? 0) - (b.partIndex ?? b.p ?? 0)
+        );
+
+        let runningOffset = 0;
+        const offsets = sorted.map((c, idx) => {
+          const sz = Number(c.sizeBytes ?? c.s) || 19922944;
+          const entry = {
+            chunk: c,
+            index: idx,
+            start: runningOffset,
+            end: runningOffset + sz - 1,
+            size: sz,
+          };
+          runningOffset += sz;
+          return entry;
+        });
+
+        const effectiveTotal = runningOffset > 0 ? runningOffset : totalSize;
+        const rangeHeader = request.headers.get('Range');
+
+        if (rangeHeader && effectiveTotal > 0) {
+          const parts = rangeHeader.replace(/bytes=/, '').split('-');
+          const start = parseInt(parts[0], 10) || 0;
+          const reqEnd = parts[1]
+            ? Math.min(effectiveTotal - 1, parseInt(parts[1], 10))
+            : effectiveTotal - 1;
+
+          const target =
+            offsets.find((o) => start >= o.start && start <= o.end) ||
+            offsets[offsets.length - 1];
+          const fid = target.chunk.fileId || target.chunk.f;
+          const tgUrl = await resolveTelegramFileUrl(fid, botToken);
+
+          const effectiveEnd = Math.min(reqEnd, target.end);
+          const subStart = Math.max(0, start - target.start);
+          const subEnd = Math.max(subStart, effectiveEnd - target.start);
+
+          const partRes = await fetch(tgUrl, {
+            headers: { Range: `bytes=${subStart}-${subEnd}` },
+          });
+
+          if (partRes.ok || partRes.status === 206) {
+            const arrBuf = await partRes.arrayBuffer();
+            const actualLen = arrBuf.byteLength;
+            const finalEnd = start + Math.max(0, actualLen - 1);
+            const headers = new Headers(CORS_HEADERS);
+            headers.set('Accept-Ranges', 'bytes');
+            headers.set('Content-Type', mimeType);
+            headers.set('Content-Range', `bytes ${start}-${finalEnd}/${effectiveTotal}`);
+            headers.set('Content-Length', String(actualLen));
+            headers.set(
+              'Content-Disposition',
+              `${isInline ? 'inline' : 'attachment'}; filename="${encodeURIComponent(fileName)}"`
+            );
+            return new Response(arrBuf, { status: 206, headers });
+          }
+        }
+
         const { readable, writable } = new TransformStream();
 
         (async () => {
@@ -125,13 +193,14 @@ export default {
         })();
 
         const headers = new Headers(CORS_HEADERS);
+        headers.set('Accept-Ranges', 'bytes');
         headers.set('Content-Type', mimeType);
         headers.set(
           'Content-Disposition',
-          `attachment; filename="${encodeURIComponent(fileName)}"`
+          `${isInline ? 'inline' : 'attachment'}; filename="${encodeURIComponent(fileName)}"`
         );
-        if (totalSize > 0) {
-          headers.set('Content-Length', String(totalSize));
+        if (effectiveTotal > 0) {
+          headers.set('Content-Length', String(effectiveTotal));
         }
         return new Response(readable, { status: 200, headers });
       } catch (err) {

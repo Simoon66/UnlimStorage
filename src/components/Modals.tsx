@@ -608,8 +608,11 @@ export const FileDetailDrawer: React.FC<FileDetailDrawerProps> = ({
 
     const memBlob = getMemoryBinaryBlobSync(file.id);
     if (memBlob && memBlob.size > 0) {
-      applyBlob(memBlob);
-    } else {
+      setRawBlob(memBlob);
+      if (!isVideo) {
+        applyBlob(memBlob);
+      }
+    } else if (!isVideo) {
       getClientBinaryBlob(file.id, file)
         .then((blob) => {
           if (cancelled || !blob) return;
@@ -624,7 +627,7 @@ export const FileDetailDrawer: React.FC<FileDetailDrawerProps> = ({
         URL.revokeObjectURL(revokedUrl);
       }
     };
-  }, [file.id, file.name, file.mimeType, isMkv, videoContainerFallback]);
+  }, [file.id, file.name, file.mimeType, isMkv, isVideo, videoContainerFallback]);
 
   const serverInlineUrl = `/api/files/${encodeURIComponent(
     file.id
@@ -632,7 +635,35 @@ export const FileDetailDrawer: React.FC<FileDetailDrawerProps> = ({
     firebaseUid || ''
   )}&email=${encodeURIComponent(firebaseEmail || '')}`;
 
-  const inlineUrl = localBlobUrl || file.previewDataUrl || serverInlineUrl;
+  const inlineUrl = isVideo
+    ? localBlobUrl || serverInlineUrl
+    : localBlobUrl || file.previewDataUrl || serverInlineUrl;
+
+  const handleVideoFallback = () => {
+    if (isMkv && videoContainerFallback === 'webm') {
+      setVideoContainerFallback('mp4');
+      return;
+    }
+    if (!localBlobUrl) {
+      getClientBinaryBlob(file.id, file)
+        .then((blob) => {
+          if (!blob) {
+            setVideoPlaybackError(
+              'Video stream could not be decoded directly in the browser. Click Download below to watch locally.'
+            );
+            return;
+          }
+          const containerType = isMkv ? 'video/webm' : resolveClientMimeType(file.name, file.mimeType);
+          const objUrl = URL.createObjectURL(new Blob([blob], { type: containerType }));
+          setLocalBlobUrl(objUrl);
+        })
+        .catch(() => {
+          setVideoPlaybackError(
+            'Video stream could not be decoded directly in the browser. Click Download below to watch locally.'
+          );
+        });
+    }
+  };
 
   const handleCopyPreviewText = () => {
     if (!file.previewText) return;
@@ -720,11 +751,7 @@ export const FileDetailDrawer: React.FC<FileDetailDrawerProps> = ({
                 srcUrl={inlineUrl}
                 rawBlob={rawBlob}
                 isMkv={isMkv}
-                onFallbackContainer={
-                  isMkv && videoContainerFallback === 'webm'
-                    ? () => setVideoContainerFallback('mp4')
-                    : undefined
-                }
+                onFallbackContainer={handleVideoFallback}
                 onPlaybackError={(msg) => setVideoPlaybackError(msg)}
               />
 

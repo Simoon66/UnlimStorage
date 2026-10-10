@@ -34,6 +34,7 @@ import {
   Plus,
   CheckSquare,
   Square,
+  Clock,
 } from 'lucide-react';
 import {
   User,
@@ -54,6 +55,7 @@ import {
   getClientBinaryBlob,
   syncClientDbWithFirestoreDrive,
   applyCloudDriveRealtimeSnapshot,
+  preloadVideoFile,
 } from './services/clientCloudFallback';
 import {
   auth,
@@ -288,12 +290,28 @@ export default function App() {
   // Drive navigation & filtering
   const [currentFolderId, setCurrentFolderId] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
+  const [searchHistory, setSearchHistory] = useState<string[]>(() => {
+    try {
+      const raw = localStorage.getItem('unlimcloud_search_history_v1');
+      if (!raw) return [];
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed)
+        ? parsed.filter((item): item is string => typeof item === 'string' && Boolean(item.trim())).slice(0, 8)
+        : [];
+    } catch {
+      return [];
+    }
+  });
+  const [showSearchHistory, setShowSearchHistory] = useState(false);
   const [onlyStarred, setOnlyStarred] = useState(false);
   const [selectedTagFilter, setSelectedTagFilter] = useState<string | null>(null);
   const [selectedFileIds, setSelectedFileIds] = useState<string[]>([]);
   const [creatingFolder, setCreatingFolder] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
   const [isDraggingOver, setIsDraggingOver] = useState(false);
+
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const searchContainerRef = useRef<HTMLDivElement | null>(null);
 
   // Live File Upload Progress Bar & Post-Upload Processing State
   const [uploadingFiles, setUploadingFiles] = useState(false);
@@ -1669,6 +1687,273 @@ export default function App() {
     [allFilterTags]
   );
 
+  // Preload the first video file in the current folder so playback starts immediately
+  useEffect(() => {
+    if (!firebaseUser || files.length === 0) return;
+    const firstVideo = files.find(
+      (f) =>
+        f.folderId === currentFolderId &&
+        !f.lockedOverQuota &&
+        (f.mimeType.startsWith('video/') || /\.(mp4|webm|mov|mkv|avi|m4v)$/i.test(f.name))
+    );
+    if (firstVideo) {
+      preloadVideoFile(firstVideo, authHeaders);
+    }
+  }, [files, currentFolderId, firebaseUser, authHeaders]);
+
+  // Persist search history helper
+  const saveSearchQueryToHistory = useCallback((rawQuery: string) => {
+    const clean = rawQuery.trim();
+    if (clean.length < 2) return;
+    setSearchHistory((prev) => {
+      const filtered = prev.filter((item) => item.toLowerCase() !== clean.toLowerCase());
+      const next = [clean, ...filtered].slice(0, 8);
+      try {
+        localStorage.setItem('unlimcloud_search_history_v1', JSON.stringify(next));
+      } catch {
+        // ignore storage quota errors
+      }
+      return next;
+    });
+  }, []);
+
+  const removeSearchHistoryItem = useCallback((queryToRemove: string) => {
+    setSearchHistory((prev) => {
+      const next = prev.filter((item) => item.toLowerCase() !== queryToRemove.toLowerCase());
+      try {
+        localStorage.setItem('unlimcloud_search_history_v1', JSON.stringify(next));
+      } catch {
+        // ignore
+      }
+      return next;
+    });
+  }, []);
+
+  const clearSearchHistory = useCallback(() => {
+    setSearchHistory([]);
+    try {
+      localStorage.removeItem('unlimcloud_search_history_v1');
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  // Automatically record non-empty search queries into persistent history after typing pause
+  useEffect(() => {
+    const clean = searchQuery.trim();
+    if (clean.length < 2) return;
+    const timer = setTimeout(() => {
+      saveSearchQueryToHistory(clean);
+    }, 850);
+    return () => clearTimeout(timer);
+  }, [searchQuery, saveSearchQueryToHistory]);
+
+  // Close search history dropdown when clicking outside the search container
+  useEffect(() => {
+    if (!showSearchHistory) return;
+    const handleMouseDown = (e: MouseEvent) => {
+      if (
+        searchContainerRef.current &&
+        !searchContainerRef.current.contains(e.target as Node)
+      ) {
+        setShowSearchHistory(false);
+      }
+    };
+    document.addEventListener('mousedown', handleMouseDown);
+    return () => document.removeEventListener('mousedown', handleMouseDown);
+  }, [showSearchHistory]);
+
+  // Global Keyboard Shortcut System:
+  // - Esc: Close active drawers/modals or clear file selection
+  // - Delete / Backspace: Open delete confirmation modal for selected files
+  // - Ctrl+A / Cmd+A: Select all visible files in explorer
+  // - /: Focus search input
+  useEffect(() => {
+    if (!firebaseUser || publicShareToken) return;
+
+    const handleGlobalKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      const isInputFocused =
+        Boolean(target) &&
+        (target?.tagName === 'INPUT' ||
+          target?.tagName === 'TEXTAREA' ||
+          target?.tagName === 'SELECT' ||
+          target?.isContentEditable);
+
+      if (e.key === 'Escape') {
+        if (deleteTarget) {
+          e.preventDefault();
+          setDeleteTarget(null);
+          return;
+        }
+        if (tagModalFiles) {
+          e.preventDefault();
+          setTagModalFiles(null);
+          return;
+        }
+        if (moveModalFile || (batchMoveFiles && batchMoveFiles.length > 0)) {
+          e.preventDefault();
+          setMoveModalFile(null);
+          setBatchMoveFiles(null);
+          return;
+        }
+        if (shareModalFile) {
+          e.preventDefault();
+          setShareModalFile(null);
+          return;
+        }
+        if (inspectedFile) {
+          e.preventDefault();
+          setInspectedFile(null);
+          return;
+        }
+        if (showRemoteModal) {
+          e.preventDefault();
+          setShowRemoteModal(false);
+          return;
+        }
+        if (showBuyTokensModal) {
+          e.preventDefault();
+          setShowBuyTokensModal(false);
+          return;
+        }
+        if (showAuthModal) {
+          e.preventDefault();
+          setShowAuthModal(false);
+          return;
+        }
+        if (creatingFolder) {
+          e.preventDefault();
+          setCreatingFolder(false);
+          return;
+        }
+        if (showSearchHistory) {
+          setShowSearchHistory(false);
+          searchInputRef.current?.blur();
+          return;
+        }
+        if (selectedFileIds.length > 0 && !isInputFocused) {
+          setSelectedFileIds([]);
+          return;
+        }
+        return;
+      }
+
+      const anyModalOpen = Boolean(
+        deleteTarget ||
+          tagModalFiles ||
+          moveModalFile ||
+          (batchMoveFiles && batchMoveFiles.length > 0) ||
+          shareModalFile ||
+          inspectedFile ||
+          showRemoteModal ||
+          showBuyTokensModal ||
+          showAuthModal
+      );
+
+      if (anyModalOpen || isInputFocused || activeView !== 'explorer') {
+        return;
+      }
+
+      // Compute visible files for Ctrl+A and Delete shortcuts
+      const currentVisible = files.filter((f) => {
+        if (selectedTagFilter) {
+          const hasMatchingTag = (f.tags || []).some(
+            (t) => t.toLowerCase() === selectedTagFilter.toLowerCase()
+          );
+          if (!hasMatchingTag) return false;
+        }
+        if (onlyStarred) {
+          if (!f.starred) return false;
+        } else if (!searchQuery.trim() && !selectedTagFilter) {
+          if (f.folderId !== currentFolderId) return false;
+        }
+        if (searchQuery.trim()) {
+          const q = searchQuery.toLowerCase();
+          const matchesTag = (f.tags || []).some((t) => t.toLowerCase().includes(q));
+          return (
+            f.name.toLowerCase().includes(q) ||
+            f.ownerName.toLowerCase().includes(q) ||
+            matchesTag
+          );
+        }
+        return true;
+      });
+
+      // Ctrl+A / Cmd+A: Select all visible files in explorer
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a') {
+        if (currentVisible.length > 0) {
+          e.preventDefault();
+          const allSelected = currentVisible.every((f) => selectedFileIds.includes(f.id));
+          if (allSelected) {
+            const visibleSet = new Set(currentVisible.map((f) => f.id));
+            setSelectedFileIds((prev) => prev.filter((id) => !visibleSet.has(id)));
+          } else {
+            const merged = new Set([...selectedFileIds, ...currentVisible.map((f) => f.id)]);
+            setSelectedFileIds(Array.from(merged));
+          }
+        }
+        return;
+      }
+
+      // Delete: Trigger delete confirmation modal for selected files
+      if (e.key === 'Delete' && selectedFileIds.length > 0) {
+        e.preventDefault();
+        const selectedObjs = files.filter((f) => selectedFileIds.includes(f.id));
+        if (selectedObjs.length === 1) {
+          const single = selectedObjs[0];
+          setDeleteTarget({
+            type: 'file',
+            id: single.id,
+            name: single.name,
+            subtitle: `Size: ${formatBytes(single.sizeBytes)}`,
+          });
+        } else if (selectedObjs.length > 1) {
+          const totalBytes = selectedObjs.reduce((acc, f) => acc + f.sizeBytes, 0);
+          setDeleteTarget({
+            type: 'batch-files',
+            id: 'batch_delete',
+            name: `${selectedObjs.length} Selected Files`,
+            subtitle: `Total size: ${formatBytes(totalBytes)}`,
+            fileIds: selectedObjs.map((f) => f.id),
+          });
+        }
+        return;
+      }
+
+      // '/': Focus explorer search input
+      if (e.key === '/' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        e.preventDefault();
+        searchInputRef.current?.focus();
+        setShowSearchHistory(true);
+      }
+    };
+
+    window.addEventListener('keydown', handleGlobalKeyDown);
+    return () => window.removeEventListener('keydown', handleGlobalKeyDown);
+  }, [
+    firebaseUser,
+    publicShareToken,
+    deleteTarget,
+    tagModalFiles,
+    moveModalFile,
+    batchMoveFiles,
+    shareModalFile,
+    inspectedFile,
+    showRemoteModal,
+    showBuyTokensModal,
+    showAuthModal,
+    creatingFolder,
+    showSearchHistory,
+    selectedFileIds,
+    activeView,
+    files,
+    selectedTagFilter,
+    onlyStarred,
+    searchQuery,
+    currentFolderId,
+  ]);
+
   // ============================================================================
   // 1. PUBLIC SHARE PORTAL RENDERING
   // ============================================================================
@@ -2267,15 +2552,98 @@ export default function App() {
                 </button>
               </div>
 
-              <div className="relative w-full lg:w-80">
-                <Search className="w-4 h-4 text-[#9E978E] absolute left-3.5 top-1/2 -translate-y-1/2" />
+              <div ref={searchContainerRef} className="relative w-full lg:w-80">
+                <Search className="w-4 h-4 text-[#9E978E] absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
                 <input
+                  ref={searchInputRef}
                   type="text"
                   value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  placeholder="Search files or labels..."
-                  className="w-full min-h-[44px] bg-[#1C1A17] border border-[#2C2824] pl-10 pr-4 py-2.5 text-xs text-[#F2EFE9] focus:outline-none focus:border-[#D97757]"
+                  onFocus={() => setShowSearchHistory(true)}
+                  onChange={(e) => {
+                    setSearchQuery(e.target.value);
+                    setShowSearchHistory(true);
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && searchQuery.trim().length >= 2) {
+                      saveSearchQueryToHistory(searchQuery.trim());
+                      setShowSearchHistory(false);
+                    }
+                  }}
+                  placeholder="Search files or labels... (Press /)"
+                  className="w-full min-h-[44px] bg-[#1C1A17] border border-[#2C2824] pl-10 pr-9 py-2.5 text-xs text-[#F2EFE9] focus:outline-none focus:border-[#D97757]"
                 />
+                {searchQuery && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (searchQuery.trim().length >= 2) {
+                        saveSearchQueryToHistory(searchQuery.trim());
+                      }
+                      setSearchQuery('');
+                      searchInputRef.current?.focus();
+                    }}
+                    className="w-7 h-7 absolute right-1.5 top-1/2 -translate-y-1/2 flex items-center justify-center text-[#9E978E] hover:text-[#F2EFE9] cursor-pointer"
+                    title="Clear search"
+                    aria-label="Clear search"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                )}
+
+                {/* Persistent Search History Dropdown */}
+                {showSearchHistory && searchHistory.length > 0 && (
+                  <div className="absolute left-0 right-0 top-full mt-1 z-30 bg-[#1C1A17] border border-[#2C2824] shadow-2xl py-1">
+                    <div className="px-3 py-1.5 border-b border-[#2C2824] flex items-center justify-between text-[11px] text-[#9E978E]">
+                      <span className="font-semibold flex items-center gap-1.5">
+                        <Clock className="w-3 h-3 text-[#D97757]" />
+                        Recent Searches
+                      </span>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          clearSearchHistory();
+                        }}
+                        className="text-[11px] text-[#D97757] hover:underline cursor-pointer"
+                      >
+                        Clear All
+                      </button>
+                    </div>
+                    <div className="max-h-52 overflow-y-auto divide-y divide-[#2C2824]/50">
+                      {searchHistory.map((item) => (
+                        <div
+                          key={item}
+                          className="flex items-center justify-between px-3 py-2 hover:bg-[#24211D] transition-colors group"
+                        >
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSearchQuery(item);
+                              saveSearchQueryToHistory(item);
+                              setShowSearchHistory(false);
+                            }}
+                            className="flex-1 flex items-center gap-2 text-left text-xs text-[#F2EFE9] group-hover:text-[#D97757] truncate cursor-pointer"
+                          >
+                            <Clock className="w-3.5 h-3.5 text-[#9E978E] group-hover:text-[#D97757] shrink-0" />
+                            <span className="truncate">{item}</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              removeSearchHistoryItem(item);
+                            }}
+                            className="p-1 text-[#9E978E] hover:text-[#D94848] cursor-pointer shrink-0"
+                            title="Remove from history"
+                            aria-label={`Remove ${item} from search history`}
+                          >
+                            <X className="w-3 h-3" />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
 
@@ -2646,6 +3014,12 @@ export default function App() {
                       <div
                         key={file.id}
                         draggable={!isLocked}
+                        onMouseEnter={() => {
+                          if (!isLocked) preloadVideoFile(file, authHeaders);
+                        }}
+                        onTouchStart={() => {
+                          if (!isLocked) preloadVideoFile(file, authHeaders);
+                        }}
                         onDragStart={(e) => {
                           setDraggedFileId(file.id);
                           e.dataTransfer.setData('text/plain', file.id);

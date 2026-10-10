@@ -6,6 +6,7 @@ import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import { Transform } from 'stream';
+import { spawn } from 'child_process';
 import { createServer as createViteServer } from 'vite';
 import dotenv from 'dotenv';
 import {
@@ -836,55 +837,703 @@ async function pushDiskFileToTelegram(
   }
 }
 
+const DEFAULT_FALLBACK_BOT_TOKEN = '8552451944:AAGnsazvo2X2okXtKrAtAYGnuiizg_n8gkM';
+const inFlightChunkFetches = new Map<string, Promise<Buffer | null>>();
+
+async function fetchSingleTelegramChunkCached(
+  fileId: string,
+  chunk: TelegramChunk,
+  botToken: string
+): Promise<Buffer | null> {
+  const partPath = path.join(CHUNKS_DIR, `${fileId}.part${chunk.partIndex}`);
+  if (fs.existsSync(partPath)) {
+    try {
+      const stat = fs.statSync(partPath);
+      if (stat.size > 0) {
+        return fs.readFileSync(partPath);
+      }
+    } catch {
+      // ignore read error and refetch
+    }
+  }
+
+  const cacheKey = `${fileId}:${chunk.partIndex}:${chunk.fileId}`;
+  const existingPromise = inFlightChunkFetches.get(cacheKey);
+  if (existingPromise) {
+    return existingPromise;
+  }
+
+  const fetchPromise = (async (): Promise<Buffer | null> => {
+    try {
+      const effectiveToken = (botToken || DEFAULT_FALLBACK_BOT_TOKEN).trim();
+      let buf: Buffer | null = null;
+
+      if (chunk.fileId && chunk.fileId.startsWith('mtproto:')) {
+        buf = await fetchBufferFromTelegramMtprotoChunk(chunk);
+      } else if (effectiveToken) {
+        const metaRes = await fetch(
+          `https://api.telegram.org/bot${effectiveToken}/getFile?file_id=${encodeURIComponent(
+            chunk.fileId
+          )}`
+        );
+        const metaJson = (await metaRes.json()) as {
+          ok: boolean;
+          result?: { file_path?: string };
+        };
+        if (metaJson.ok && metaJson.result?.file_path) {
+          const fileRes = await fetch(
+            `https://api.telegram.org/file/bot${effectiveToken}/${metaJson.result.file_path}`
+          );
+          if (fileRes.ok) {
+            const arrBuf = await fileRes.arrayBuffer();
+            buf = Buffer.from(arrBuf);
+          }
+        } else {
+          buf = await fetchBufferFromTelegramMtprotoChunk(chunk);
+        }
+      } else {
+        buf = await fetchBufferFromTelegramMtprotoChunk(chunk);
+      }
+
+      if (buf && buf.length > 0) {
+        try {
+          fs.writeFileSync(partPath, buf);
+        } catch {
+          // ignore disk cache write failure
+        }
+      }
+      return buf;
+    } catch {
+      return null;
+    } finally {
+      inFlightChunkFetches.delete(cacheKey);
+    }
+  })();
+
+  inFlightChunkFetches.set(cacheKey, fetchPromise);
+  return fetchPromise;
+}
+
+function preloadTelegramVideoChunks(
+  fileId: string,
+  chunks: TelegramChunk[],
+  botToken: string,
+  aroundIndex = 0
+) {
+  if (!chunks || chunks.length === 0) return;
+  const sorted = [...chunks].sort((a, b) => a.partIndex - b.partIndex);
+  const indicesToWarm = new Set<number>([
+    0,
+    sorted.length - 1,
+    Math.min(sorted.length - 1, aroundIndex),
+    Math.min(sorted.length - 1, aroundIndex + 1),
+  ]);
+
+  setImmediate(() => {
+    for (const idx of indicesToWarm) {
+      const target = sorted[idx];
+      if (target) {
+        void fetchSingleTelegramChunkCached(fileId, target, botToken).catch(() => null);
+      }
+    }
+  });
+}
+
+async function serveTelegramChunksFastRange(params: {
+  req: Request;
+  res: Response;
+  fileId: string;
+  fileName: string;
+  contentType: string;
+  totalSizeHint: number;
+  chunks: TelegramChunk[];
+  botToken: string;
+  isInline: boolean;
+}): Promise<boolean> {
+  const { req, res, fileId, fileName, contentType, totalSizeHint, chunks, botToken, isInline } =
+    params;
+  if (!chunks || chunks.length === 0) return false;
+
+  const sorted = [...chunks].sort((a, b) => a.partIndex - b.partIndex);
+  const offsets: { chunk: TelegramChunk; index: number; start: number; end: number }[] = [];
+  let runningOffset = 0;
+
+  for (let i = 0; i < sorted.length; i++) {
+    const c = sorted[i];
+    const sz = c.sizeBytes > 0 ? c.sizeBytes : TELEGRAM_CHUNK_SIZE;
+    offsets.push({
+      chunk: c,
+      index: i,
+      start: runningOffset,
+      end: runningOffset + sz - 1,
+    });
+    runningOffset += sz;
+  }
+
+  const totalSize = runningOffset > 0 ? runningOffset : totalSizeHint;
+  if (totalSize <= 0) return false;
+
+  const rangeHeader = req.headers.range;
+  const start = rangeHeader
+    ? parseInt(rangeHeader.replace(/bytes=/, '').split('-')[0], 10) || 0
+    : 0;
+  const rawEndStr = rangeHeader ? rangeHeader.replace(/bytes=/, '').split('-')[1] : '';
+  const requestedEnd = rawEndStr
+    ? Math.min(totalSize - 1, parseInt(rawEndStr, 10))
+    : totalSize - 1;
+
+  if (start >= totalSize || start > requestedEnd) {
+    res.status(416).setHeader('Content-Range', `bytes */${totalSize}`).end();
+    return true;
+  }
+
+  const targetEntry =
+    offsets.find((o) => start >= o.start && start <= o.end) || offsets[offsets.length - 1];
+  if (!targetEntry) return false;
+
+  const chunkBuf = await fetchSingleTelegramChunkCached(fileId, targetEntry.chunk, botToken);
+  if (!chunkBuf || chunkBuf.length === 0) return false;
+
+  // Trigger background preload of first, last (seek index), and next sequential chunk
+  preloadTelegramVideoChunks(fileId, sorted, botToken, targetEntry.index);
+
+  const actualChunkEnd = targetEntry.start + chunkBuf.length - 1;
+  const effectiveEnd = Math.min(requestedEnd, actualChunkEnd);
+  const sliceStart = Math.max(0, start - targetEntry.start);
+  const sliceEnd = Math.min(chunkBuf.length, effectiveEnd - targetEntry.start + 1);
+  const slice = chunkBuf.subarray(sliceStart, sliceEnd);
+
+  res.setHeader('Accept-Ranges', 'bytes');
+  res.setHeader('Content-Type', contentType);
+  res.setHeader(
+    'Content-Disposition',
+    `${isInline ? 'inline' : 'attachment'}; filename="${encodeURIComponent(fileName)}"`
+  );
+
+  if (rangeHeader || sorted.length > 1) {
+    res.status(206);
+    res.setHeader('Content-Range', `bytes ${start}-${effectiveEnd}/${totalSize}`);
+    res.setHeader('Content-Length', String(slice.length));
+    res.end(slice);
+    return true;
+  }
+
+  res.status(200);
+  res.setHeader('Content-Length', String(slice.length));
+  res.end(slice);
+  return true;
+}
+
 async function fetchBufferFromTelegramChunks(
   chunks: TelegramChunk[],
-  botToken: string
+  botToken: string,
+  fileIdForCache = 'temp_tg'
 ): Promise<Buffer | null> {
   try {
     const buffers: Buffer[] = [];
     const sorted = [...chunks].sort((a, b) => a.partIndex - b.partIndex);
 
     for (const chunk of sorted) {
-      if (chunk.fileId && chunk.fileId.startsWith('mtproto:')) {
-        const mtBuf = await fetchBufferFromTelegramMtprotoChunk(chunk);
-        if (!mtBuf) return null;
-        buffers.push(mtBuf);
-        continue;
-      }
-
-      if (!botToken) {
-        const mtBuf = await fetchBufferFromTelegramMtprotoChunk(chunk);
-        if (!mtBuf) return null;
-        buffers.push(mtBuf);
-        continue;
-      }
-
-      const metaRes = await fetch(
-        `https://api.telegram.org/bot${botToken}/getFile?file_id=${encodeURIComponent(chunk.fileId)}`
-      );
-      const metaJson = (await metaRes.json()) as {
-        ok: boolean;
-        result?: { file_path?: string };
-      };
-      if (!metaJson.ok || !metaJson.result?.file_path) {
-        const mtFallback = await fetchBufferFromTelegramMtprotoChunk(chunk);
-        if (!mtFallback) return null;
-        buffers.push(mtFallback);
-        continue;
-      }
-
-      const fileRes = await fetch(
-        `https://api.telegram.org/file/bot${botToken}/${metaJson.result.file_path}`
-      );
-      if (!fileRes.ok) return null;
-      const arrBuf = await fileRes.arrayBuffer();
-      buffers.push(Buffer.from(arrBuf));
+      const partBuf = await fetchSingleTelegramChunkCached(fileIdForCache, chunk, botToken);
+      if (!partBuf) return null;
+      buffers.push(partBuf);
     }
 
     return Buffer.concat(buffers);
   } catch {
     return null;
   }
+}
+
+interface ProbedAudioTrack {
+  index: number;
+  streamIndex: number;
+  codec: string;
+  language: string;
+  title: string;
+  label: string;
+  channels: number;
+}
+
+interface ProbedSubtitleTrack {
+  subIndex: number;
+  streamIndex: number;
+  codec: string;
+  language: string;
+  title: string;
+  label: string;
+}
+
+interface ProbedMediaInfo {
+  ok: boolean;
+  duration: number;
+  videoCodec: string;
+  pixFmt: string;
+  width: number;
+  height: number;
+  needsTranscode: boolean;
+  canCopyVideo: boolean;
+  audioTracks: ProbedAudioTrack[];
+  subtitleTracks: ProbedSubtitleTrack[];
+}
+
+const LANGUAGE_NAME_MAP: Record<string, string> = {
+  hin: 'Hindi',
+  hi: 'Hindi',
+  tam: 'Tamil',
+  ta: 'Tamil',
+  tel: 'Telugu',
+  te: 'Telugu',
+  eng: 'English',
+  en: 'English',
+  jpn: 'Japanese',
+  ja: 'Japanese',
+  ben: 'Bengali',
+  bn: 'Bengali',
+  kor: 'Korean',
+  ko: 'Korean',
+  chi: 'Chinese',
+  zho: 'Chinese',
+  zh: 'Chinese',
+  spa: 'Spanish',
+  es: 'Spanish',
+  fra: 'French',
+  fre: 'French',
+  fr: 'French',
+  ger: 'German',
+  deu: 'German',
+  de: 'German',
+  rus: 'Russian',
+  ru: 'Russian',
+  ara: 'Arabic',
+  ar: 'Arabic',
+  por: 'Portuguese',
+  pt: 'Portuguese',
+  ita: 'Italian',
+  it: 'Italian',
+  mal: 'Malayalam',
+  ml: 'Malayalam',
+  kan: 'Kannada',
+  kn: 'Kannada',
+  mar: 'Marathi',
+  mr: 'Marathi',
+  urd: 'Urdu',
+  ur: 'Urdu',
+  ind: 'Indonesian',
+  id: 'Indonesian',
+  tha: 'Thai',
+  th: 'Thai',
+  vie: 'Vietnamese',
+  vi: 'Vietnamese',
+};
+
+function formatTrackLanguageName(code?: string): string {
+  if (!code) return '';
+  const clean = code.trim().toLowerCase();
+  if (!clean || clean === 'und') return '';
+  return LANGUAGE_NAME_MAP[clean] || clean.toUpperCase();
+}
+
+const mediaProbeCache = new Map<string, ProbedMediaInfo>();
+
+async function resolveProbeTargetFilePath(
+  fileId: string,
+  chunks: TelegramChunk[],
+  botToken: string
+): Promise<string | null> {
+  const fullPath = path.join(CHUNKS_DIR, fileId);
+  if (fs.existsSync(fullPath)) {
+    try {
+      if (fs.statSync(fullPath).size > 64) {
+        return fullPath;
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  if (chunks && chunks.length > 0) {
+    const sorted = [...chunks].sort((a, b) => a.partIndex - b.partIndex);
+    const firstChunk = sorted[0];
+    if (firstChunk) {
+      const part0Path = path.join(CHUNKS_DIR, `${fileId}.part${firstChunk.partIndex}`);
+      if (fs.existsSync(part0Path)) {
+        try {
+          if (fs.statSync(part0Path).size > 64) {
+            return part0Path;
+          }
+        } catch {
+          // ignore
+        }
+      }
+      const buf = await fetchSingleTelegramChunkCached(fileId, firstChunk, botToken);
+      if (buf && buf.length > 64 && fs.existsSync(part0Path)) {
+        return part0Path;
+      }
+    }
+  }
+  return null;
+}
+
+async function probeMediaFileWithFfprobe(
+  fileId: string,
+  fileName: string,
+  chunks: TelegramChunk[],
+  botToken: string
+): Promise<ProbedMediaInfo | null> {
+  const cached = mediaProbeCache.get(fileId);
+  if (cached) return cached;
+
+  const targetPath = await resolveProbeTargetFilePath(fileId, chunks, botToken);
+  if (!targetPath) return null;
+
+  return new Promise<ProbedMediaInfo | null>((resolve) => {
+    const proc = spawn('ffprobe', [
+      '-v',
+      'quiet',
+      '-print_format',
+      'json',
+      '-show_format',
+      '-show_streams',
+      targetPath,
+    ]);
+
+    const outChunks: Buffer[] = [];
+    proc.stdout.on('data', (d: Buffer) => outChunks.push(d));
+    proc.on('error', () => resolve(null));
+    proc.on('close', (code) => {
+      if (code !== 0 || outChunks.length === 0) {
+        resolve(null);
+        return;
+      }
+      try {
+        const parsed = JSON.parse(Buffer.concat(outChunks).toString('utf-8')) as {
+          streams?: Array<{
+            index?: number;
+            codec_type?: string;
+            codec_name?: string;
+            pix_fmt?: string;
+            width?: number;
+            height?: number;
+            channels?: number;
+            duration?: string;
+            tags?: Record<string, string>;
+          }>;
+          format?: {
+            duration?: string;
+            format_name?: string;
+            tags?: Record<string, string>;
+          };
+        };
+
+        const streams = parsed.streams || [];
+        const videoStream = streams.find((s) => s.codec_type === 'video');
+        const videoCodec = (videoStream?.codec_name || '').toLowerCase();
+        const pixFmt = (videoStream?.pix_fmt || '').toLowerCase();
+        const width = Number(videoStream?.width || 0);
+        const height = Number(videoStream?.height || 0);
+
+        let duration = parseFloat(parsed.format?.duration || videoStream?.duration || '0');
+        if (!Number.isFinite(duration) || duration <= 0) {
+          for (const s of streams) {
+            const dTag = s.tags?.DURATION || s.tags?.duration;
+            if (dTag) {
+              const parts = dTag.split(':').map(Number);
+              if (parts.length === 3 && parts.every((n) => Number.isFinite(n))) {
+                duration = parts[0] * 3600 + parts[1] * 60 + parts[2];
+                break;
+              }
+            }
+          }
+        }
+
+        const audioTracks: ProbedAudioTrack[] = [];
+        const subtitleTracks: ProbedSubtitleTrack[] = [];
+
+        for (const s of streams) {
+          if (s.codec_type === 'audio') {
+            const idx = audioTracks.length;
+            const rawLang = s.tags?.language || s.tags?.LANGUAGE || '';
+            const langName = formatTrackLanguageName(rawLang);
+            const rawTitle = (s.tags?.title || s.tags?.TITLE || '').trim();
+            const isDomainTitle = /\.(me|com|org|net|to|in|cc)\b/i.test(rawTitle);
+            const cleanTitle = isDomainTitle ? '' : rawTitle;
+            const codecUpper = (s.codec_name || 'AUDIO').toUpperCase();
+
+            let label = '';
+            if (langName && cleanTitle && !cleanTitle.toLowerCase().includes(langName.toLowerCase())) {
+              label = `${langName} — ${cleanTitle}`;
+            } else if (langName) {
+              label = `${langName} (${codecUpper})`;
+            } else if (cleanTitle) {
+              label = `${cleanTitle} (${codecUpper})`;
+            } else {
+              label = `Audio Track ${idx + 1} (${codecUpper})`;
+            }
+
+            audioTracks.push({
+              index: idx,
+              streamIndex: Number(s.index ?? idx),
+              codec: (s.codec_name || '').toLowerCase(),
+              language: rawLang.toLowerCase() || `track_${idx + 1}`,
+              title: cleanTitle,
+              label,
+              channels: Number(s.channels || 2),
+            });
+          } else if (s.codec_type === 'subtitle') {
+            const subIdx = subtitleTracks.length;
+            const rawLang = s.tags?.language || s.tags?.LANGUAGE || 'en';
+            const langName = formatTrackLanguageName(rawLang);
+            const rawTitle = (s.tags?.title || s.tags?.TITLE || '').trim();
+            const isDomainTitle = /\.(me|com|org|net|to|in|cc)\b/i.test(rawTitle);
+            const cleanTitle = isDomainTitle ? '' : rawTitle;
+
+            let label = '';
+            if (cleanTitle && langName && !cleanTitle.toLowerCase().includes(langName.toLowerCase())) {
+              label = `${langName} (${cleanTitle})`;
+            } else if (cleanTitle) {
+              label = cleanTitle;
+            } else if (langName) {
+              label = `${langName} Subtitles ${subIdx + 1}`;
+            } else {
+              label = `Subtitle Track ${subIdx + 1}`;
+            }
+
+            subtitleTracks.push({
+              subIndex: subIdx,
+              streamIndex: Number(s.index ?? subIdx),
+              codec: (s.codec_name || '').toLowerCase(),
+              language: rawLang.toLowerCase() || 'en',
+              title: cleanTitle,
+              label,
+            });
+          }
+        }
+
+        const isMkv =
+          fileName.toLowerCase().endsWith('.mkv') ||
+          Boolean(parsed.format?.format_name?.includes('matroska'));
+        const isUnsupportedBrowserVideo =
+          videoCodec === 'hevc' ||
+          videoCodec === 'h265' ||
+          videoCodec === 'mpeg4' ||
+          videoCodec === 'msmpeg4v3' ||
+          videoCodec === 'mpeg2video' ||
+          pixFmt.includes('10');
+        const hasOpusOrMultiAudioInMkv =
+          isMkv &&
+          (audioTracks.length > 1 || audioTracks.some((a) => a.codec !== 'aac' && a.codec !== 'mp3'));
+
+        const needsTranscode = Boolean(
+          isMkv || isUnsupportedBrowserVideo || hasOpusOrMultiAudioInMkv || audioTracks.length > 1
+        );
+        const canCopyVideo = Boolean(
+          videoCodec === 'h264' && !pixFmt.includes('10') && !pixFmt.includes('12')
+        );
+
+        const info: ProbedMediaInfo = {
+          ok: true,
+          duration: Number.isFinite(duration) ? duration : 0,
+          videoCodec,
+          pixFmt,
+          width,
+          height,
+          needsTranscode,
+          canCopyVideo,
+          audioTracks,
+          subtitleTracks,
+        };
+        mediaProbeCache.set(fileId, info);
+        resolve(info);
+      } catch {
+        resolve(null);
+      }
+    });
+  });
+}
+
+async function streamTranscodedVideoWithFfmpeg(params: {
+  req: Request;
+  res: Response;
+  fileId: string;
+  fileName: string;
+  chunks: TelegramChunk[];
+  botToken: string;
+  audioTrackIndex: number;
+  startSeconds: number;
+}): Promise<void> {
+  const { req, res, fileId, fileName, chunks, botToken, audioTrackIndex, startSeconds } = params;
+  const fullPath = path.join(CHUNKS_DIR, fileId);
+  const hasFullFileOnDisk = fs.existsSync(fullPath) && fs.statSync(fullPath).size > 64;
+
+  // Probe media info to check if video stream is already 8-bit H.264 (canCopyVideo)
+  const probed = await probeMediaFileWithFfprobe(fileId, fileName, chunks, botToken);
+  const canCopyVideo = Boolean(probed?.canCopyVideo);
+  const safeAudioIdx = Math.max(0, Math.floor(audioTrackIndex || 0));
+  const safeStart = Math.max(0, Number.isFinite(startSeconds) ? startSeconds : 0);
+
+  // If file is Telegram-chunked and not yet assembled on disk, trigger background full assembly for future seeks
+  if (!hasFullFileOnDisk && chunks && chunks.length > 0) {
+    setImmediate(() => {
+      fetchBufferFromTelegramChunks(chunks, botToken, fileId)
+        .then((buf) => {
+          if (buf && buf.length > 64 && !fs.existsSync(fullPath)) {
+            try {
+              fs.writeFileSync(fullPath, buf);
+            } catch {
+              // ignore
+            }
+          }
+        })
+        .catch(() => null);
+    });
+  }
+
+  const usePipeInput = !hasFullFileOnDisk && chunks && chunks.length > 0;
+  const args: string[] = ['-v', 'error'];
+
+  if (!usePipeInput && safeStart > 0) {
+    args.push('-ss', safeStart.toFixed(3));
+  }
+
+  args.push('-i', usePipeInput ? 'pipe:0' : fullPath);
+
+  if (usePipeInput && safeStart > 0) {
+    args.push('-ss', safeStart.toFixed(3));
+  }
+
+  args.push('-map', '0:v:0', '-map', `0:a:${safeAudioIdx}?`, '-sn', '-dn');
+
+  if (canCopyVideo) {
+    args.push('-c:v', 'copy');
+  } else {
+    args.push(
+      '-c:v',
+      'libx264',
+      '-preset',
+      'ultrafast',
+      '-crf',
+      '24',
+      '-pix_fmt',
+      'yuv420p',
+      '-g',
+      '48',
+      '-sc_threshold',
+      '0'
+    );
+  }
+
+  args.push(
+    '-c:a',
+    'aac',
+    '-b:a',
+    '160k',
+    '-ac',
+    '2',
+    '-ar',
+    '48000',
+    '-movflags',
+    'frag_keyframe+empty_moov+default_base_moof',
+    '-f',
+    'mp4',
+    'pipe:1'
+  );
+
+  res.status(200);
+  res.setHeader('Content-Type', 'video/mp4');
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('X-Accel-Buffering', 'no');
+
+  const ffmpegProc = spawn('ffmpeg', args, {
+    stdio: [usePipeInput ? 'pipe' : 'ignore', 'pipe', 'pipe'],
+  });
+
+  let closed = false;
+  const cleanup = () => {
+    if (closed) return;
+    closed = true;
+    try {
+      ffmpegProc.kill('SIGKILL');
+    } catch {
+      // ignore
+    }
+  };
+
+  req.on('close', cleanup);
+  res.on('close', cleanup);
+  ffmpegProc.on('error', () => {
+    if (!res.headersSent) {
+      res.status(500).end();
+    } else {
+      res.end();
+    }
+  });
+
+  ffmpegProc.stdout.pipe(res);
+
+  if (usePipeInput && ffmpegProc.stdin) {
+    ffmpegProc.stdin.on('error', () => null);
+    const sorted = [...chunks].sort((a, b) => a.partIndex - b.partIndex);
+    for (const chunk of sorted) {
+      if (closed) break;
+      const partBuf = await fetchSingleTelegramChunkCached(fileId, chunk, botToken);
+      if (!partBuf || closed) break;
+      const canContinue = ffmpegProc.stdin.write(partBuf);
+      if (!canContinue && !closed) {
+        await new Promise<void>((r) => ffmpegProc.stdin?.once('drain', () => r()));
+      }
+    }
+    try {
+      ffmpegProc.stdin.end();
+    } catch {
+      // ignore
+    }
+  }
+}
+
+async function extractEmbeddedSubtitleToVtt(params: {
+  req: Request;
+  res: Response;
+  fileId: string;
+  chunks: TelegramChunk[];
+  botToken: string;
+  subIndex: number;
+  startSeconds: number;
+}): Promise<void> {
+  const { req, res, fileId, chunks, botToken, subIndex, startSeconds } = params;
+  const targetPath = await resolveProbeTargetFilePath(fileId, chunks, botToken);
+  if (!targetPath) {
+    res.status(404).send('WEBVTT\n\n');
+    return;
+  }
+
+  const safeSubIdx = Math.max(0, Math.floor(subIndex || 0));
+  const safeStart = Math.max(0, Number.isFinite(startSeconds) ? startSeconds : 0);
+
+  const args: string[] = ['-v', 'error'];
+  if (safeStart > 0) {
+    args.push('-ss', safeStart.toFixed(3));
+  }
+  args.push('-i', targetPath, '-map', `0:s:${safeSubIdx}`, '-f', 'webvtt', 'pipe:1');
+
+  res.status(200);
+  res.setHeader('Content-Type', 'text/vtt; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-store');
+
+  const proc = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'ignore'] });
+  const cleanup = () => {
+    try {
+      proc.kill('SIGKILL');
+    } catch {
+      // ignore
+    }
+  };
+  req.on('close', cleanup);
+  proc.on('error', () => {
+    if (!res.headersSent) res.status(200).send('WEBVTT\n\n');
+    else res.end();
+  });
+  proc.stdout.pipe(res);
 }
 
 function seedStarterFilesForNewUser(user: StoredUser) {
@@ -2320,17 +2969,41 @@ async function startServer() {
         ? 'video/webm'
         : resolveEffectiveMimeType(file.name, file.mimeType);
 
-    // If local disk doesn't have the file yet (e.g. accessed from a new server instance or device),
-    // automatically restore it from Telegram chunks before serving Range or full download!
+    // Fast Preload & Chunk-Aware Byte-Range Streaming:
+    // When inline=1 or Range header is present and full file is not on disk yet,
+    // stream only the requested chunk immediately and preload upcoming chunks in background!
     if (
       !fs.existsSync(chunkPath) &&
       file.telegramChunks &&
       file.telegramChunks.length > 0 &&
-      (db.telegramConfig.botToken || db.telegramConfig.mtprotoSession)
+      (isInline || Boolean(req.headers.range))
+    ) {
+      const servedRange = await serveTelegramChunksFastRange({
+        req,
+        res,
+        fileId: file.id,
+        fileName: file.name,
+        contentType,
+        totalSizeHint: file.sizeBytes,
+        chunks: file.telegramChunks,
+        botToken: db.telegramConfig.botToken || DEFAULT_FALLBACK_BOT_TOKEN,
+        isInline,
+      });
+      if (servedRange) {
+        return;
+      }
+    }
+
+    // For full attachment downloads when local disk doesn't have the full file yet
+    if (
+      !fs.existsSync(chunkPath) &&
+      file.telegramChunks &&
+      file.telegramChunks.length > 0
     ) {
       const restoredBuf = await fetchBufferFromTelegramChunks(
         file.telegramChunks,
-        db.telegramConfig.botToken
+        db.telegramConfig.botToken || DEFAULT_FALLBACK_BOT_TOKEN,
+        file.id
       );
       if (restoredBuf && restoredBuf.length > 0) {
         try {
@@ -2457,6 +3130,107 @@ async function startServer() {
     } else {
       res.end(buffer);
     }
+  });
+
+  // Fast Video Preload Warmup Route (warms up Chunk 0, seek-index last chunk, and FFprobe track metadata in background)
+  app.post('/api/files/:id/preload', requireAuth, (req, res) => {
+    const user = (req as Request & { user: StoredUser }).user;
+    const file = db.files.find((f) => f.id === req.params.id && f.ownerId === user.id);
+    if (!file || file.lockedOverQuota) {
+      res.json({ ok: false });
+      return;
+    }
+    const botToken = db.telegramConfig.botToken || DEFAULT_FALLBACK_BOT_TOKEN;
+    const chunkPath = path.join(CHUNKS_DIR, file.id);
+    if (!fs.existsSync(chunkPath) && file.telegramChunks && file.telegramChunks.length > 0) {
+      preloadTelegramVideoChunks(file.id, file.telegramChunks, botToken, 0);
+    }
+    setImmediate(() => {
+      void probeMediaFileWithFfprobe(file.id, file.name, file.telegramChunks || [], botToken).catch(
+        () => null
+      );
+    });
+    res.json({ ok: true });
+  });
+
+  // Media Track & Codec Inspection Route (detects Multi-Audio tracks, Subtitles, Duration, and HEVC/MKV status)
+  app.get('/api/files/:id/media-info', requireAuth, async (req, res) => {
+    const user = (req as Request & { user: StoredUser }).user;
+    const file = db.files.find((f) => f.id === req.params.id && f.ownerId === user.id);
+    if (!file || file.lockedOverQuota) {
+      res.status(404).json({ ok: false, error: 'File not found or locked' });
+      return;
+    }
+    const botToken = db.telegramConfig.botToken || DEFAULT_FALLBACK_BOT_TOKEN;
+    const info = await probeMediaFileWithFfprobe(
+      file.id,
+      file.name,
+      file.telegramChunks || [],
+      botToken
+    );
+    if (!info) {
+      res.json({
+        ok: false,
+        duration: 0,
+        videoCodec: '',
+        pixFmt: '',
+        width: 0,
+        height: 0,
+        needsTranscode: false,
+        canCopyVideo: false,
+        audioTracks: [],
+        subtitleTracks: [],
+      });
+      return;
+    }
+    res.json(info);
+  });
+
+  // Real-Time FFmpeg H.264/AAC Fragmented MP4 Stream Route (for MKV / 10-bit HEVC / Multi-Audio switching & seeking)
+  app.get('/api/files/:id/stream', requireAuth, async (req, res) => {
+    const user = (req as Request & { user: StoredUser }).user;
+    const file = db.files.find((f) => f.id === req.params.id && f.ownerId === user.id);
+    if (!file || file.lockedOverQuota) {
+      res.status(404).send('File not found or locked');
+      return;
+    }
+    const audioTrackIndex = parseInt(String(req.query.audio || '0'), 10) || 0;
+    const startSeconds = parseFloat(String(req.query.start || '0')) || 0;
+    const botToken = db.telegramConfig.botToken || DEFAULT_FALLBACK_BOT_TOKEN;
+
+    await streamTranscodedVideoWithFfmpeg({
+      req,
+      res,
+      fileId: file.id,
+      fileName: file.name,
+      chunks: file.telegramChunks || [],
+      botToken,
+      audioTrackIndex,
+      startSeconds,
+    });
+  });
+
+  // Embedded MKV/Video Subtitle Track Extraction to WebVTT
+  app.get('/api/files/:id/subtitles', requireAuth, async (req, res) => {
+    const user = (req as Request & { user: StoredUser }).user;
+    const file = db.files.find((f) => f.id === req.params.id && f.ownerId === user.id);
+    if (!file || file.lockedOverQuota) {
+      res.status(404).send('WEBVTT\n\n');
+      return;
+    }
+    const subIndex = parseInt(String(req.query.subIndex || '0'), 10) || 0;
+    const startSeconds = parseFloat(String(req.query.start || '0')) || 0;
+    const botToken = db.telegramConfig.botToken || DEFAULT_FALLBACK_BOT_TOKEN;
+
+    await extractEmbeddedSubtitleToVtt({
+      req,
+      res,
+      fileId: file.id,
+      chunks: file.telegramChunks || [],
+      botToken,
+      subIndex,
+      startSeconds,
+    });
   });
 
   // ============================================================================
@@ -3146,31 +3920,59 @@ async function startServer() {
 
     const file = db.files.find((f) => f.id === share.fileId);
     const chunkPath = path.join(CHUNKS_DIR, share.fileId);
+    const isInline = req.query.inline === '1';
+    const isMkv =
+      share.fileName.toLowerCase().endsWith('.mkv') ||
+      share.fileMimeType === 'video/x-matroska';
+    const contentType =
+      isInline && isMkv
+        ? 'video/webm'
+        : resolveEffectiveMimeType(share.fileName, share.fileMimeType);
     const effectiveThrottle =
       share.throttleKbps || db.bandwidthSettings.globalThrottleKbps || null;
 
     if (fs.existsSync(chunkPath)) {
       const stat = fs.statSync(chunkPath);
-      share.downloadCount += 1;
-      share.bandwidthUsedBytes += stat.size;
-      share.lastAccessedAt = new Date().toISOString();
-      if (file) {
-        file.downloadCount += 1;
-      }
-      saveDb();
+      const totalSize = stat.size;
+      const rangeHeader = req.headers.range;
 
-      res.setHeader(
-        'Content-Type',
-        resolveEffectiveMimeType(share.fileName, share.fileMimeType)
-      );
+      res.setHeader('Accept-Ranges', 'bytes');
+      res.setHeader('Content-Type', contentType);
       res.setHeader(
         'Content-Disposition',
-        `attachment; filename="${encodeURIComponent(share.fileName)}"`
+        `${isInline ? 'inline' : 'attachment'}; filename="${encodeURIComponent(share.fileName)}"`
       );
-      res.setHeader('Content-Length', String(stat.size));
 
+      if (rangeHeader) {
+        const parts = rangeHeader.replace(/bytes=/, '').split('-');
+        const start = parseInt(parts[0], 10) || 0;
+        const end = parts[1] ? Math.min(totalSize - 1, parseInt(parts[1], 10)) : totalSize - 1;
+        if (start >= totalSize || start > end) {
+          res.status(416).setHeader('Content-Range', `bytes */${totalSize}`).end();
+          return;
+        }
+        const chunkLen = end - start + 1;
+        res.status(206);
+        res.setHeader('Content-Range', `bytes ${start}-${end}/${totalSize}`);
+        res.setHeader('Content-Length', String(chunkLen));
+        const stream = fs.createReadStream(chunkPath, { start, end });
+        stream.pipe(res);
+        return;
+      }
+
+      if (!isInline) {
+        share.downloadCount += 1;
+        share.bandwidthUsedBytes += totalSize;
+        share.lastAccessedAt = new Date().toISOString();
+        if (file) {
+          file.downloadCount += 1;
+        }
+        saveDb();
+      }
+
+      res.setHeader('Content-Length', String(totalSize));
       const readStream = fs.createReadStream(chunkPath);
-      if (effectiveThrottle && effectiveThrottle > 0) {
+      if (!isInline && effectiveThrottle && effectiveThrottle > 0) {
         const throttle = new ThrottleStream(effectiveThrottle);
         readStream.pipe(throttle).pipe(res);
       } else {
@@ -3179,16 +3981,35 @@ async function startServer() {
       return;
     }
 
-    let buffer: Buffer | null = null;
+    // Fast Chunk-Aware Range Streaming for Public Share Videos
     if (
       file &&
       file.telegramChunks &&
       file.telegramChunks.length > 0 &&
-      (db.telegramConfig.botToken || db.telegramConfig.mtprotoSession)
+      (isInline || Boolean(req.headers.range))
     ) {
+      const servedRange = await serveTelegramChunksFastRange({
+        req,
+        res,
+        fileId: share.fileId,
+        fileName: share.fileName,
+        contentType,
+        totalSizeHint: share.fileSizeBytes || file.sizeBytes,
+        chunks: file.telegramChunks,
+        botToken: db.telegramConfig.botToken || DEFAULT_FALLBACK_BOT_TOKEN,
+        isInline,
+      });
+      if (servedRange) {
+        return;
+      }
+    }
+
+    let buffer: Buffer | null = null;
+    if (file && file.telegramChunks && file.telegramChunks.length > 0) {
       buffer = await fetchBufferFromTelegramChunks(
         file.telegramChunks,
-        db.telegramConfig.botToken
+        db.telegramConfig.botToken || DEFAULT_FALLBACK_BOT_TOKEN,
+        share.fileId
       );
       if (buffer && buffer.length > 0) {
         try {
@@ -3233,6 +4054,94 @@ async function startServer() {
     } else {
       res.end(buffer);
     }
+  });
+
+  app.get('/api/public/share/:token/media-info', async (req, res) => {
+    const share = await resolveShareFromLocalOrFirestore(req.params.token);
+    if (!share || !share.active) {
+      res.status(404).json({ ok: false });
+      return;
+    }
+    const file = db.files.find((f) => f.id === share.fileId);
+    const botToken = db.telegramConfig.botToken || DEFAULT_FALLBACK_BOT_TOKEN;
+    const info = await probeMediaFileWithFfprobe(
+      share.fileId,
+      share.fileName,
+      file?.telegramChunks || [],
+      botToken
+    );
+    if (!info) {
+      res.json({
+        ok: false,
+        duration: 0,
+        videoCodec: '',
+        pixFmt: '',
+        width: 0,
+        height: 0,
+        needsTranscode: false,
+        canCopyVideo: false,
+        audioTracks: [],
+        subtitleTracks: [],
+      });
+      return;
+    }
+    res.json(info);
+  });
+
+  app.get('/api/public/share/:token/stream', async (req, res) => {
+    const share = await resolveShareFromLocalOrFirestore(req.params.token);
+    if (!share || !share.active) {
+      res.status(404).send('Share link not found or revoked.');
+      return;
+    }
+    const providedKey = (req.query.key as string) || '';
+    const providedPw = (req.query.password as string) || '';
+    if (share.hasPassword) {
+      const validKey =
+        providedKey === share.passwordHash ||
+        (providedPw && hashPassword(providedPw.trim()) === share.passwordHash);
+      if (!validKey) {
+        res.status(403).send('Password verification required.');
+        return;
+      }
+    }
+    const file = db.files.find((f) => f.id === share.fileId);
+    const audioTrackIndex = parseInt(String(req.query.audio || '0'), 10) || 0;
+    const startSeconds = parseFloat(String(req.query.start || '0')) || 0;
+    const botToken = db.telegramConfig.botToken || DEFAULT_FALLBACK_BOT_TOKEN;
+
+    await streamTranscodedVideoWithFfmpeg({
+      req,
+      res,
+      fileId: share.fileId,
+      fileName: share.fileName,
+      chunks: file?.telegramChunks || [],
+      botToken,
+      audioTrackIndex,
+      startSeconds,
+    });
+  });
+
+  app.get('/api/public/share/:token/subtitles', async (req, res) => {
+    const share = await resolveShareFromLocalOrFirestore(req.params.token);
+    if (!share || !share.active) {
+      res.status(404).send('WEBVTT\n\n');
+      return;
+    }
+    const file = db.files.find((f) => f.id === share.fileId);
+    const subIndex = parseInt(String(req.query.subIndex || '0'), 10) || 0;
+    const startSeconds = parseFloat(String(req.query.start || '0')) || 0;
+    const botToken = db.telegramConfig.botToken || DEFAULT_FALLBACK_BOT_TOKEN;
+
+    await extractEmbeddedSubtitleToVtt({
+      req,
+      res,
+      fileId: share.fileId,
+      chunks: file?.telegramChunks || [],
+      botToken,
+      subIndex,
+      startSeconds,
+    });
   });
 
   // ============================================================================
