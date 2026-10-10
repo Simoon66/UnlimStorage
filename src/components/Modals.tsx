@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   X,
   Globe,
@@ -19,9 +19,21 @@ import {
   Sparkles,
   LogOut,
   Eye,
+  FolderInput,
+  Folder,
+  FolderPlus,
+  ChevronRight,
+  RotateCcw,
+  RotateCw,
+  Maximize2,
+  Film,
 } from 'lucide-react';
 import { FileRecord, FolderRecord, ShareLink, User } from '../types';
 import { formatBytes, formatShortDate } from '../utils/format';
+import {
+  getClientBinaryBlob,
+  resolveClientMimeType,
+} from '../services/clientCloudFallback';
 
 // ============================================================================
 // 1. SIMPLE REMOTE URL UPLOAD MODAL
@@ -479,52 +491,125 @@ export const CreateShareModal: React.FC<CreateShareModalProps> = ({
 };
 
 // ============================================================================
-// 3. RICH MULTI-FORMAT FILE PREVIEW MODAL (Images, Video, Audio, PDF, Code/Text)
+// 3. RICH MULTI-FORMAT FILE PREVIEW MODAL (MKV, MP4, WebM, Images, Audio, PDF, Code)
 // ============================================================================
 
 interface FileDetailDrawerProps {
   file: FileRecord;
+  currentFolderName?: string;
   firebaseUid?: string;
   firebaseEmail?: string;
   onClose: () => void;
   onDownload: (file: FileRecord) => void;
   onOpenShareModal: (file: FileRecord) => void;
+  onOpenMoveModal?: (file: FileRecord) => void;
   onRequestDelete: (file: FileRecord) => void;
   onGoToPricing?: () => void;
 }
 
 export const FileDetailDrawer: React.FC<FileDetailDrawerProps> = ({
   file,
+  currentFolderName,
   firebaseUid,
   firebaseEmail,
   onClose,
   onDownload,
   onOpenShareModal,
+  onOpenMoveModal,
   onRequestDelete,
   onGoToPricing,
 }) => {
   const [copiedText, setCopiedText] = useState(false);
+  const [localBlobUrl, setLocalBlobUrl] = useState<string | null>(null);
+  const [playbackRate, setPlaybackRate] = useState<number>(1);
+  const [videoContainerFallback, setVideoContainerFallback] = useState<'webm' | 'mp4'>('webm');
+  const [videoPlaybackError, setVideoPlaybackError] = useState<string | null>(null);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
 
-  const inlineUrl =
-    file.previewDataUrl ||
-    `/api/files/${encodeURIComponent(file.id)}/download?inline=1&uid=${encodeURIComponent(
-      firebaseUid || ''
-    )}&email=${encodeURIComponent(firebaseEmail || '')}`;
-
+  const isMkv =
+    /\.mkv$/i.test(file.name) || file.mimeType.toLowerCase().includes('matroska');
   const isImage =
     file.mimeType.startsWith('image/') ||
     /\.(png|jpg|jpeg|gif|webp|svg|bmp)$/i.test(file.name);
   const isVideo =
-    file.mimeType.startsWith('video/') || /\.(mp4|webm|mov|mkv)$/i.test(file.name);
+    isMkv ||
+    file.mimeType.startsWith('video/') ||
+    /\.(mp4|webm|mov|mkv|avi|m4v)$/i.test(file.name);
   const isAudio =
     file.mimeType.startsWith('audio/') || /\.(mp3|wav|ogg|m4a|flac)$/i.test(file.name);
   const isPdf = file.mimeType === 'application/pdf' || /\.pdf$/i.test(file.name);
+
+  useEffect(() => {
+    let revokedUrl: string | null = null;
+    let cancelled = false;
+    setVideoPlaybackError(null);
+
+    getClientBinaryBlob(file.id)
+      .then((blob) => {
+        if (cancelled || !blob) return;
+        let targetBlob = blob;
+        if (isMkv) {
+          // Wrap Matroska (.mkv) blob in a zero-copy WebM/MP4 MIME view so HTML5 <video> demuxes it natively
+          const containerType =
+            videoContainerFallback === 'mp4' ? 'video/mp4' : 'video/webm';
+          targetBlob = new Blob([blob], { type: containerType });
+        } else if (!blob.type || blob.type === 'application/octet-stream') {
+          targetBlob = new Blob([blob], {
+            type: resolveClientMimeType(file.name, file.mimeType),
+          });
+        }
+        const objUrl = URL.createObjectURL(targetBlob);
+        revokedUrl = objUrl;
+        setLocalBlobUrl(objUrl);
+      })
+      .catch(() => null);
+
+    return () => {
+      cancelled = true;
+      if (revokedUrl) {
+        URL.revokeObjectURL(revokedUrl);
+      }
+    };
+  }, [file.id, file.name, file.mimeType, isMkv, videoContainerFallback]);
+
+  const serverInlineUrl = `/api/files/${encodeURIComponent(
+    file.id
+  )}/download?inline=1&uid=${encodeURIComponent(
+    firebaseUid || ''
+  )}&email=${encodeURIComponent(firebaseEmail || '')}`;
+
+  const inlineUrl = localBlobUrl || file.previewDataUrl || serverInlineUrl;
 
   const handleCopyPreviewText = () => {
     if (!file.previewText) return;
     navigator.clipboard.writeText(file.previewText);
     setCopiedText(true);
     setTimeout(() => setCopiedText(false), 1800);
+  };
+
+  const handleSkipSeconds = (delta: number) => {
+    if (!videoRef.current) return;
+    videoRef.current.currentTime = Math.max(
+      0,
+      Math.min(
+        videoRef.current.duration || Number.MAX_SAFE_INTEGER,
+        videoRef.current.currentTime + delta
+      )
+    );
+  };
+
+  const handleChangeSpeed = (rate: number) => {
+    setPlaybackRate(rate);
+    if (videoRef.current) {
+      videoRef.current.playbackRate = rate;
+    }
+  };
+
+  const handleFullscreen = () => {
+    if (!videoRef.current) return;
+    if (videoRef.current.requestFullscreen) {
+      videoRef.current.requestFullscreen().catch(() => null);
+    }
   };
 
   return (
@@ -545,11 +630,11 @@ export const FileDetailDrawer: React.FC<FileDetailDrawerProps> = ({
         </div>
 
         <div className="p-5 sm:p-6 space-y-5">
-          {/* Metadata Row (Zero Telegram mention — White-Label Encrypted Cloud Vault) */}
+          {/* Metadata Row */}
           <div className="flex flex-wrap items-center gap-2 text-xs text-[#9E978E] tabular-nums">
             <span className="text-[#F2EFE9] font-semibold">{formatBytes(file.sizeBytes)}</span>
             <span aria-hidden="true">·</span>
-            <span>UnlimCloud Encrypted Vault</span>
+            <span>Location: {currentFolderName || 'My Cloud Drive (Root)'}</span>
             <span aria-hidden="true">·</span>
             <span>Added {formatShortDate(file.createdAt)}</span>
             <span aria-hidden="true">·</span>
@@ -594,10 +679,86 @@ export const FileDetailDrawer: React.FC<FileDetailDrawerProps> = ({
               </div>
             </div>
           ) : isVideo ? (
-            <div className="space-y-2">
-              <div className="text-xs font-medium text-[#9E978E]">Video Preview</div>
-              <div className="p-3 bg-[#141311] border border-[#2C2824]">
-                <video src={inlineUrl} controls className="w-full max-h-80 bg-black" />
+            <div className="space-y-2.5">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2 text-xs font-medium text-[#9E978E]">
+                  <Film className="w-3.5 h-3.5 text-[#D97757]" />
+                  <span>{isMkv ? 'MKV Matroska Video Player' : 'HD Video Player'}</span>
+                </div>
+                <div className="flex items-center gap-1">
+                  {[0.5, 1, 1.25, 1.5, 2].map((rate) => (
+                    <button
+                      key={rate}
+                      type="button"
+                      onClick={() => handleChangeSpeed(rate)}
+                      className={`px-2 py-1 text-[11px] font-mono border cursor-pointer ${
+                        playbackRate === rate
+                          ? 'bg-[#D97757] text-[#141311] border-[#D97757] font-bold'
+                          : 'bg-[#141311] text-[#9E978E] border-[#2C2824] hover:text-[#F2EFE9]'
+                      }`}
+                    >
+                      {rate}x
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="p-2.5 bg-[#141311] border border-[#2C2824] space-y-2.5">
+                <video
+                  key={`${file.id}_${videoContainerFallback}_${Boolean(localBlobUrl)}`}
+                  ref={videoRef}
+                  src={inlineUrl}
+                  controls
+                  playsInline
+                  preload="metadata"
+                  onError={() => {
+                    if (isMkv && videoContainerFallback === 'webm') {
+                      setVideoContainerFallback('mp4');
+                    } else {
+                      setVideoPlaybackError(
+                        'Unable to decode this video stream in browser. If this file was uploaded before the large-file binary update (44B), please re-upload it once, or click Download below to play in VLC / Media Player.'
+                      );
+                    }
+                  }}
+                  className="w-full max-h-[360px] bg-black"
+                />
+
+                {/* MKV / Video Transport Controls Bar */}
+                <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => handleSkipSeconds(-10)}
+                      className="min-h-[34px] px-3 py-1 text-xs font-medium bg-[#1C1A17] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <RotateCcw className="w-3.5 h-3.5 text-[#D97757]" />
+                      -10s
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleSkipSeconds(10)}
+                      className="min-h-[34px] px-3 py-1 text-xs font-medium bg-[#1C1A17] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <RotateCw className="w-3.5 h-3.5 text-[#D97757]" />
+                      +10s
+                    </button>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={handleFullscreen}
+                    className="min-h-[34px] px-3 py-1 text-xs font-medium bg-[#1C1A17] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Maximize2 className="w-3.5 h-3.5 text-[#D97757]" />
+                    Fullscreen
+                  </button>
+                </div>
+
+                {videoPlaybackError && (
+                  <div className="p-3 bg-[#1C1A17] border border-[#D99B26] text-xs text-[#D99B26]">
+                    {videoPlaybackError}
+                  </div>
+                )}
               </div>
             </div>
           ) : isAudio ? (
@@ -657,26 +818,318 @@ export const FileDetailDrawer: React.FC<FileDetailDrawerProps> = ({
             </button>
 
             {!file.lockedOverQuota && (
-              <div className="grid grid-cols-2 sm:flex items-center gap-2.5">
+              <div className="grid grid-cols-3 sm:flex items-center gap-2.5">
+                {onOpenMoveModal && (
+                  <button
+                    onClick={() => {
+                      onClose();
+                      onOpenMoveModal(file);
+                    }}
+                    className="min-h-[44px] flex items-center justify-center gap-1.5 px-3.5 py-2.5 text-xs font-semibold text-[#F2EFE9] bg-[#24211D] border border-[#2C2824] hover:border-[#D97757] cursor-pointer"
+                  >
+                    <FolderInput className="w-3.5 h-3.5 text-[#D97757]" />
+                    Move
+                  </button>
+                )}
                 <button
                   onClick={() => {
                     onClose();
                     onOpenShareModal(file);
                   }}
-                  className="min-h-[44px] flex items-center justify-center gap-1.5 px-4 py-2.5 text-xs font-semibold text-[#F2EFE9] bg-[#24211D] border border-[#2C2824] hover:border-[#D97757] cursor-pointer"
+                  className="min-h-[44px] flex items-center justify-center gap-1.5 px-3.5 py-2.5 text-xs font-semibold text-[#F2EFE9] bg-[#24211D] border border-[#2C2824] hover:border-[#D97757] cursor-pointer"
                 >
                   <Link2 className="w-3.5 h-3.5 text-[#D97757]" />
-                  Share Link
+                  Share
                 </button>
                 <button
                   onClick={() => onDownload(file)}
-                  className="min-h-[44px] flex items-center justify-center gap-1.5 px-5 py-2.5 text-xs font-bold bg-[#D97757] text-[#141311] hover:bg-[#E08568] cursor-pointer"
+                  className="min-h-[44px] flex items-center justify-center gap-1.5 px-4 py-2.5 text-xs font-bold bg-[#D97757] text-[#141311] hover:bg-[#E08568] cursor-pointer"
                 >
                   <Download className="w-3.5 h-3.5" />
                   Download
                 </button>
               </div>
             )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ============================================================================
+// 3B. GOOGLE DRIVE-STYLE MOVE FILE MODAL (Move to Folder / Root + Create Folder)
+// ============================================================================
+
+interface MoveFileModalProps {
+  file: FileRecord;
+  folders: FolderRecord[];
+  files: FileRecord[];
+  onClose: () => void;
+  onMoveFile: (file: FileRecord, targetFolderId: string | null) => Promise<void>;
+  onCreateFolder: (name: string, parentId: string | null) => Promise<FolderRecord | null>;
+}
+
+export const MoveFileModal: React.FC<MoveFileModalProps> = ({
+  file,
+  folders,
+  files,
+  onClose,
+  onMoveFile,
+  onCreateFolder,
+}) => {
+  const [selectedFolderId, setSelectedFolderId] = useState<string | null>(file.folderId);
+  const [browsingParentId, setBrowsingParentId] = useState<string | null>(null);
+  const [moving, setMoving] = useState(false);
+  const [creatingSubfolder, setCreatingSubfolder] = useState(false);
+  const [newFolderName, setNewFolderName] = useState('');
+  const [error, setError] = useState<string | null>(null);
+
+  const currentFolderObj = folders.find((f) => f.id === file.folderId) || null;
+  const browsingFolderObj = folders.find((f) => f.id === browsingParentId) || null;
+
+  const visibleFolders = folders.filter((f) => f.parentId === browsingParentId);
+
+  const handleCreateNewFolder = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newFolderName.trim()) return;
+    setError(null);
+    try {
+      const created = await onCreateFolder(newFolderName.trim(), browsingParentId);
+      if (created) {
+        setSelectedFolderId(created.id);
+        setNewFolderName('');
+        setCreatingSubfolder(false);
+      }
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Failed to create folder');
+    }
+  };
+
+  const handleConfirmMove = async () => {
+    if (selectedFolderId === file.folderId) {
+      onClose();
+      return;
+    }
+    setMoving(true);
+    setError(null);
+    try {
+      await onMoveFile(file, selectedFolderId);
+      onClose();
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Could not move file');
+    } finally {
+      setMoving(false);
+    }
+  };
+
+  const targetDestinationName =
+    selectedFolderId === null
+      ? 'My Cloud Drive (Root)'
+      : folders.find((f) => f.id === selectedFolderId)?.name || 'Selected Folder';
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/80 flex items-end sm:items-center justify-center p-0 sm:p-4">
+      <div className="w-full sm:max-w-lg bg-[#1C1A17] border-t sm:border border-[#2C2824] max-h-[90vh] overflow-y-auto">
+        <div className="flex items-center justify-between px-5 py-4 border-b border-[#2C2824] sticky top-0 bg-[#1C1A17] z-10">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <FolderInput className="w-4 h-4 text-[#D97757] shrink-0" />
+            <h2 className="text-base font-bold text-[#F2EFE9] truncate">
+              Move &ldquo;{file.name}&rdquo;
+            </h2>
+          </div>
+          <button
+            onClick={onClose}
+            className="min-w-[44px] min-h-[44px] -mr-2 flex items-center justify-center text-[#9E978E] hover:text-[#F2EFE9] cursor-pointer"
+          >
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        <div className="p-5 sm:p-6 space-y-4">
+          <div className="flex items-center justify-between text-xs text-[#9E978E]">
+            <span>
+              Current location:{' '}
+              <strong className="text-[#F2EFE9]">
+                {currentFolderObj ? currentFolderObj.name : 'My Cloud Drive (Root)'}
+              </strong>
+            </span>
+            <button
+              type="button"
+              onClick={() => setCreatingSubfolder((prev) => !prev)}
+              className="min-h-[34px] px-3 py-1 text-xs font-semibold bg-[#24211D] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center gap-1.5 cursor-pointer"
+            >
+              <FolderPlus className="w-3.5 h-3.5 text-[#D97757]" />
+              New Folder
+            </button>
+          </div>
+
+          {creatingSubfolder && (
+            <form
+              onSubmit={handleCreateNewFolder}
+              className="p-3 bg-[#141311] border border-[#D97757] flex flex-col sm:flex-row gap-2"
+            >
+              <input
+                type="text"
+                required
+                value={newFolderName}
+                onChange={(e) => setNewFolderName(e.target.value)}
+                placeholder="New folder name..."
+                className="flex-1 min-h-[40px] bg-[#1C1A17] border border-[#2C2824] px-3 py-1.5 text-xs text-[#F2EFE9] focus:outline-none focus:border-[#D97757]"
+              />
+              <div className="flex items-center gap-2">
+                <button
+                  type="submit"
+                  className="min-h-[40px] px-4 py-1.5 text-xs font-bold bg-[#D97757] text-[#141311] cursor-pointer"
+                >
+                  Create
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setCreatingSubfolder(false)}
+                  className="min-h-[40px] px-3 py-1.5 text-xs text-[#9E978E] border border-[#2C2824] cursor-pointer"
+                >
+                  Cancel
+                </button>
+              </div>
+            </form>
+          )}
+
+          {/* Breadcrumb navigation inside Move modal */}
+          <div className="flex items-center gap-1.5 text-xs text-[#9E978E] bg-[#141311] border border-[#2C2824] px-3 py-2">
+            <button
+              type="button"
+              onClick={() => {
+                setBrowsingParentId(null);
+                setSelectedFolderId(null);
+              }}
+              className={`hover:text-[#F2EFE9] cursor-pointer ${
+                browsingParentId === null ? 'text-[#D97757] font-bold' : ''
+              }`}
+            >
+              My Cloud Drive (Root)
+            </button>
+            {browsingFolderObj && (
+              <>
+                <ChevronRight className="w-3.5 h-3.5 text-[#9E978E]" />
+                <span className="text-[#F2EFE9] font-semibold truncate">
+                  {browsingFolderObj.name}
+                </span>
+              </>
+            )}
+          </div>
+
+          {/* Folder List */}
+          <div className="border border-[#2C2824] bg-[#141311] divide-y divide-[#2C2824] max-h-64 overflow-y-auto">
+            {/* Root Option */}
+            <div
+              onClick={() => setSelectedFolderId(null)}
+              className={`px-4 py-3 flex items-center justify-between gap-3 cursor-pointer transition-colors ${
+                selectedFolderId === null
+                  ? 'bg-[#24211D] text-[#F2EFE9]'
+                  : 'hover:bg-[#1C1A17] text-[#9E978E]'
+              }`}
+            >
+              <div className="flex items-center gap-2.5 min-w-0">
+                <Folder className="w-4 h-4 text-[#D97757] shrink-0" />
+                <div className="min-w-0">
+                  <div className="text-xs font-bold text-[#F2EFE9] truncate">
+                    My Cloud Drive (Root)
+                  </div>
+                  <div className="text-[11px] text-[#9E978E]">
+                    Main top-level cloud directory
+                  </div>
+                </div>
+              </div>
+              {selectedFolderId === null && (
+                <Check className="w-4 h-4 text-[#D97757] shrink-0" />
+              )}
+            </div>
+
+            {visibleFolders.map((folder) => {
+              const isSelected = selectedFolderId === folder.id;
+              const isCurrent = file.folderId === folder.id;
+              const itemCount = files.filter((f) => f.folderId === folder.id).length;
+              const hasSubfolders = folders.some((sub) => sub.parentId === folder.id);
+
+              return (
+                <div
+                  key={folder.id}
+                  onClick={() => setSelectedFolderId(folder.id)}
+                  onDoubleClick={() => {
+                    setBrowsingParentId(folder.id);
+                    setSelectedFolderId(folder.id);
+                  }}
+                  className={`px-4 py-3 flex items-center justify-between gap-3 cursor-pointer transition-colors ${
+                    isSelected
+                      ? 'bg-[#24211D] text-[#F2EFE9]'
+                      : 'hover:bg-[#1C1A17] text-[#9E978E]'
+                  }`}
+                >
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <Folder className="w-4 h-4 text-[#D97757] shrink-0" />
+                    <div className="min-w-0">
+                      <div className="text-xs font-bold text-[#F2EFE9] truncate">
+                        {folder.name}{' '}
+                        {isCurrent && (
+                          <span className="text-[11px] font-normal text-[#9E978E]">
+                            (Current)
+                          </span>
+                        )}
+                      </div>
+                      <div className="text-[11px] text-[#9E978E]">
+                        {itemCount} {itemCount === 1 ? 'file' : 'files'}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2 shrink-0">
+                    {isSelected && <Check className="w-4 h-4 text-[#D97757]" />}
+                    {hasSubfolders && (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setBrowsingParentId(folder.id);
+                          setSelectedFolderId(folder.id);
+                        }}
+                        className="px-2 py-1 text-[11px] bg-[#1C1A17] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] cursor-pointer"
+                      >
+                        Open
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          {error && (
+            <div className="p-3 bg-[#141311] border border-[#D94848] text-xs text-[#D94848]">
+              {error}
+            </div>
+          )}
+
+          <div className="flex flex-col-reverse sm:flex-row items-stretch sm:items-center justify-between gap-2.5 pt-3 border-t border-[#2C2824]">
+            <button
+              type="button"
+              onClick={onClose}
+              className="min-h-[44px] px-4 py-2.5 text-xs font-medium text-[#9E978E] border border-[#2C2824] bg-[#141311] cursor-pointer"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={handleConfirmMove}
+              disabled={moving || selectedFolderId === file.folderId}
+              className="min-h-[44px] px-5 py-2.5 text-xs font-bold bg-[#D97757] text-[#141311] hover:bg-[#E08568] disabled:opacity-50 cursor-pointer"
+            >
+              {moving
+                ? 'Moving...'
+                : selectedFolderId === file.folderId
+                ? 'Already in This Folder'
+                : `Move to "${targetDestinationName}"`}
+            </button>
           </div>
         </div>
       </div>

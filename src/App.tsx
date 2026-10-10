@@ -28,6 +28,7 @@ import {
   Eye,
   ShieldCheck,
   LogIn,
+  FolderInput,
 } from 'lucide-react';
 import {
   User,
@@ -42,7 +43,11 @@ import {
   StoragePlanId,
 } from './types';
 import { formatBytes, formatShortDate, formatSpeed } from './utils/format';
-import { apiFetch, uploadFilesWithProgress } from './services/clientCloudFallback';
+import {
+  apiFetch,
+  uploadFilesWithProgress,
+  getClientBinaryBlob,
+} from './services/clientCloudFallback';
 import {
   auth,
   onAuthStateChanged,
@@ -59,6 +64,7 @@ import {
   RemoteUploadModal,
   CreateShareModal,
   FileDetailDrawer,
+  MoveFileModal,
   DeleteConfirmModal,
   DeleteTarget,
   BuyTokensModal,
@@ -151,17 +157,21 @@ export default function App() {
     speedBps: number;
   } | null>(null);
 
-  // Modals
+  // Modals & Drag-and-Drop Move State
   const [showRemoteModal, setShowRemoteModal] = useState(false);
   const [shareModalFile, setShareModalFile] = useState<FileRecord | null>(null);
   const [inspectedFile, setInspectedFile] = useState<FileRecord | null>(null);
+  const [moveModalFile, setMoveModalFile] = useState<FileRecord | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
   const [showBuyTokensModal, setShowBuyTokensModal] = useState(false);
   const [showAuthModal, setShowAuthModal] = useState(false);
+  const [draggedFileId, setDraggedFileId] = useState<string | null>(null);
+  const [dragOverFolderId, setDragOverFolderId] = useState<string | null>(null);
 
-  // Real-time notifications
+  // Real-time notifications & Upload AbortController
   const [notifications, setNotifications] = useState<RealtimeNotification[]>([]);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const uploadAbortControllerRef = useRef<AbortController | null>(null);
 
   const authHeaders = useCallback(
     (extra: Record<string, string> = {}) => {
@@ -395,10 +405,13 @@ export default function App() {
     const label =
       arr.length === 1 ? arr[0].name : `${arr.length} files (${arr[0].name}...)`;
 
+    const abortController = new AbortController();
+    uploadAbortControllerRef.current = abortController;
+
     setUploadingFiles(true);
     setUploadProgress({
       fileName: label,
-      percent: 5,
+      percent: 1,
       loadedBytes: 0,
       totalBytes: totalBatchBytes,
       speedBps: 0,
@@ -409,6 +422,7 @@ export default function App() {
         files: arr,
         folderId: currentFolderId,
         headers: authHeaders(),
+        signal: abortController.signal,
         onProgress: (info) => {
           setUploadProgress({
             fileName: label,
@@ -419,6 +433,17 @@ export default function App() {
           });
         },
       });
+
+      if (result.cancelled || abortController.signal.aborted) {
+        pushNotification({
+          id: `cancel_${Date.now()}`,
+          timestamp: new Date().toISOString(),
+          title: 'Upload Cancelled',
+          message: `Upload of "${label}" was cancelled.`,
+          type: 'info',
+        });
+        return;
+      }
 
       if (!result.ok) {
         pushNotification({
@@ -439,11 +464,40 @@ export default function App() {
       }
       await loadWorkspaceData();
     } finally {
+      uploadAbortControllerRef.current = null;
       setTimeout(() => {
         setUploadingFiles(false);
         setUploadProgress(null);
-      }, 350);
+      }, 250);
     }
+  };
+
+  const handleCancelUpload = () => {
+    if (uploadAbortControllerRef.current) {
+      uploadAbortControllerRef.current.abort();
+      uploadAbortControllerRef.current = null;
+    }
+    setUploadingFiles(false);
+    setUploadProgress(null);
+  };
+
+  const handleCancelRemoteTransfer = async (jobId: string) => {
+    await apiFetch(`/api/transfers/${encodeURIComponent(jobId)}/cancel`, {
+      method: 'POST',
+      headers: authHeaders(),
+    }).catch(() => null);
+    setTransfers((prev) =>
+      prev.map((t) =>
+        t.id === jobId ? { ...t, status: 'failed', errorMessage: 'Cancelled by user' } : t
+      )
+    );
+    pushNotification({
+      id: `cancel_rm_${Date.now()}`,
+      timestamp: new Date().toISOString(),
+      title: 'Remote Transfer Cancelled',
+      message: 'The active transfer was stopped.',
+      type: 'info',
+    });
   };
 
   const handleCreateFolder = async (e: React.FormEvent) => {
@@ -463,6 +517,52 @@ export default function App() {
       setNewFolderName('');
       setCreatingFolder(false);
     }
+  };
+
+  const handleCreateFolderFromModal = async (
+    name: string,
+    parentId: string | null
+  ): Promise<FolderRecord | null> => {
+    const res = await apiFetch('/api/folders', {
+      method: 'POST',
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ name, parentId }),
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    setFolders((prev) => [...prev, data.folder]);
+    return data.folder;
+  };
+
+  const handleMoveFile = async (file: FileRecord, targetFolderId: string | null) => {
+    if (file.folderId === targetFolderId) return;
+    const res = await apiFetch(`/api/files/${encodeURIComponent(file.id)}`, {
+      method: 'PATCH',
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ folderId: targetFolderId }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(data.error || 'Failed to move file');
+    }
+    const updatedFile: FileRecord = data.file || {
+      ...file,
+      folderId: targetFolderId,
+      updatedAt: new Date().toISOString(),
+    };
+    setFiles((prev) => prev.map((f) => (f.id === file.id ? updatedFile : f)));
+    syncCloudFileToFirestore(updatedFile, true).catch(() => null);
+    const destName =
+      targetFolderId === null
+        ? 'My Cloud Drive (Root)'
+        : folders.find((fl) => fl.id === targetFolderId)?.name || 'Folder';
+    pushNotification({
+      id: `move_${Date.now()}`,
+      timestamp: new Date().toISOString(),
+      title: 'File Moved',
+      message: `Moved "${file.name}" to ${destName}.`,
+      type: 'completed',
+    });
   };
 
   const executeDeleteTarget = async () => {
@@ -532,6 +632,26 @@ export default function App() {
     }
 
     try {
+      // 1. Check zero-copy client IndexedDB binary vault first (supports 285MB+ MKV/videos)
+      const cachedBinaryBlob = await getClientBinaryBlob(file.id);
+      if (cachedBinaryBlob && cachedBinaryBlob.size > 64) {
+        const blobUrl = URL.createObjectURL(cachedBinaryBlob);
+        const a = document.createElement('a');
+        a.href = blobUrl;
+        a.download = file.name;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(() => URL.revokeObjectURL(blobUrl), 15000);
+        setFiles((prev) =>
+          prev.map((f) =>
+            f.id === file.id ? { ...f, downloadCount: (f.downloadCount || 0) + 1 } : f
+          )
+        );
+        return;
+      }
+
+      // 2. Otherwise stream full binary from server or fallback
       const url = `/api/files/${encodeURIComponent(file.id)}/download?uid=${encodeURIComponent(
         firebaseUser?.uid || ''
       )}&email=${encodeURIComponent(firebaseUser?.email || '')}`;
@@ -541,13 +661,28 @@ export default function App() {
         pushNotification({
           id: `dl_err_${Date.now()}`,
           timestamp: new Date().toISOString(),
-          title: 'Download Blocked',
-          message: errData.error || 'Could not download file',
+          title: 'Re-Upload Required for Full Binary',
+          message:
+            errData.error ||
+            'Could not download full binary stream. If this file was uploaded before the large-file fix, please re-upload it once.',
           type: 'error',
         });
         return;
       }
       const blob = await res.blob();
+      if (file.sizeBytes > 1024 && blob.size <= 64) {
+        pushNotification({
+          id: `dl_44b_${Date.now()}`,
+          timestamp: new Date().toISOString(),
+          title: 'Legacy 44-Byte Placeholder Detected',
+          message: `This "${file.name}" entry was created before the 5 GB binary vault fix. Please delete and re-upload "${file.name}" once to store the full ${formatBytes(
+            file.sizeBytes
+          )} binary.`,
+          type: 'error',
+        });
+        return;
+      }
+
       const blobUrl = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = blobUrl;
@@ -555,7 +690,7 @@ export default function App() {
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
-      setTimeout(() => URL.revokeObjectURL(blobUrl), 5000);
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 15000);
       loadWorkspaceData();
     } catch {
       // ignore
@@ -1132,20 +1267,30 @@ export default function App() {
           </div>
         </div>
 
-        {/* LIVE FILE UPLOAD PROGRESS BAR (Determinate 0% -> 100%) */}
+        {/* LIVE FILE UPLOAD PROGRESS BAR (Determinate 0% -> 100% + Cancel Button) */}
         {(uploadProgress || activeStreamingJobs.length > 0) && (
           <div className="p-4 bg-[#1C1A17] border border-[#D97757] space-y-3">
             {uploadProgress && (
-              <div className="space-y-1.5">
-                <div className="flex items-center justify-between text-xs tabular-nums">
+              <div className="space-y-2">
+                <div className="flex flex-wrap items-center justify-between gap-2 text-xs tabular-nums">
                   <span className="font-bold text-[#F2EFE9] truncate">
                     Uploading: {uploadProgress.fileName}
                   </span>
-                  <span className="text-[#D97757] font-bold shrink-0">
-                    {uploadProgress.percent}% · {formatBytes(uploadProgress.loadedBytes)} /{' '}
-                    {formatBytes(uploadProgress.totalBytes)} ·{' '}
-                    {formatSpeed(uploadProgress.speedBps)}
-                  </span>
+                  <div className="flex items-center gap-3 shrink-0">
+                    <span className="text-[#D97757] font-bold">
+                      {uploadProgress.percent}% · {formatBytes(uploadProgress.loadedBytes)} /{' '}
+                      {formatBytes(uploadProgress.totalBytes)} ·{' '}
+                      {formatSpeed(uploadProgress.speedBps)}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={handleCancelUpload}
+                      className="min-h-[32px] px-3 py-1 text-xs font-bold bg-[#141311] border border-[#D94848] text-[#D94848] hover:bg-[#D94848] hover:text-[#F2EFE9] flex items-center gap-1 cursor-pointer"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                      Cancel Upload
+                    </button>
+                  </div>
                 </div>
                 <div className="h-2.5 w-full bg-[#141311] border border-[#2C2824]">
                   <div
@@ -1163,11 +1308,21 @@ export default function App() {
                   : 60;
               return (
                 <div key={job.id} className="space-y-1.5">
-                  <div className="flex items-center justify-between text-xs tabular-nums">
+                  <div className="flex flex-wrap items-center justify-between gap-2 text-xs tabular-nums">
                     <span className="font-semibold text-[#F2EFE9] truncate">{job.fileName}</span>
-                    <span className="text-[#9E978E] shrink-0">
-                      {pct}% · {formatBytes(job.transferredBytes)} · {formatSpeed(job.speedBps)}
-                    </span>
+                    <div className="flex items-center gap-3 shrink-0">
+                      <span className="text-[#9E978E]">
+                        {pct}% · {formatBytes(job.transferredBytes)} · {formatSpeed(job.speedBps)}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => handleCancelRemoteTransfer(job.id)}
+                        className="min-h-[30px] px-2.5 py-0.5 text-xs font-semibold bg-[#141311] border border-[#D94848] text-[#D94848] hover:bg-[#D94848] hover:text-[#F2EFE9] flex items-center gap-1 cursor-pointer"
+                      >
+                        <X className="w-3 h-3" />
+                        Cancel
+                      </button>
+                    </div>
                   </div>
                   <div className="h-2 w-full bg-[#141311] border border-[#2C2824]">
                     <div
@@ -1307,7 +1462,7 @@ export default function App() {
               </form>
             )}
 
-            {/* Breadcrumb */}
+            {/* Breadcrumb (Also acts as Drop Target to move files back to Root) */}
             {(activeFolder || onlyStarred) && (
               <div className="flex items-center gap-2 text-sm font-semibold">
                 <button
@@ -1315,9 +1470,30 @@ export default function App() {
                     setCurrentFolderId(null);
                     setOnlyStarred(false);
                   }}
-                  className="min-h-[40px] px-2 -ml-2 text-[#9E978E] hover:text-[#F2EFE9] cursor-pointer"
+                  onDragOver={(e) => {
+                    if (draggedFileId) {
+                      e.preventDefault();
+                      setDragOverFolderId('root');
+                    }
+                  }}
+                  onDragLeave={() => {
+                    if (dragOverFolderId === 'root') setDragOverFolderId(null);
+                  }}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setDragOverFolderId(null);
+                    if (draggedFileId) {
+                      const f = files.find((item) => item.id === draggedFileId);
+                      setDraggedFileId(null);
+                      if (f) handleMoveFile(f, null).catch(() => null);
+                    }
+                  }}
+                  className={`min-h-[40px] px-2.5 -ml-2 text-[#9E978E] hover:text-[#F2EFE9] cursor-pointer ${
+                    dragOverFolderId === 'root' ? 'border border-[#D97757] bg-[#24211D] text-[#F2EFE9]' : ''
+                  }`}
                 >
-                  My Files
+                  My Files (Root)
                 </button>
                 <ChevronRight className="w-4 h-4 text-[#9E978E]" />
                 <span className="text-[#D97757] truncate">
@@ -1326,20 +1502,50 @@ export default function App() {
               </div>
             )}
 
-            {/* Folders Section */}
+            {/* Folders Section (Supports Google Drive-style Drag & Drop File onto Folder) */}
             {!onlyStarred && !searchQuery.trim() && visibleSubfolders.length > 0 && (
               <div className="space-y-2.5">
-                <h2 className="text-xs font-semibold text-[#9E978E] uppercase tracking-wider">
-                  Folders
-                </h2>
+                <div className="flex items-center justify-between">
+                  <h2 className="text-xs font-semibold text-[#9E978E] uppercase tracking-wider">
+                    Folders
+                  </h2>
+                  <span className="text-[11px] text-[#9E978E]">
+                    Tip: Drag any file onto a folder or click Move on a file card
+                  </span>
+                </div>
                 <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
                   {visibleSubfolders.map((folder) => {
                     const count = files.filter((f) => f.folderId === folder.id).length;
+                    const isDropTarget = dragOverFolderId === folder.id;
                     return (
                       <div
                         key={folder.id}
                         onClick={() => setCurrentFolderId(folder.id)}
-                        className="min-h-[64px] p-4 bg-[#1C1A17] border border-[#2C2824] hover:border-[#D97757] transition-colors flex items-center justify-between gap-3 cursor-pointer group"
+                        onDragOver={(e) => {
+                          if (draggedFileId) {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            setDragOverFolderId(folder.id);
+                          }
+                        }}
+                        onDragLeave={() => {
+                          if (dragOverFolderId === folder.id) setDragOverFolderId(null);
+                        }}
+                        onDrop={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          setDragOverFolderId(null);
+                          if (draggedFileId) {
+                            const f = files.find((item) => item.id === draggedFileId);
+                            setDraggedFileId(null);
+                            if (f) handleMoveFile(f, folder.id).catch(() => null);
+                          }
+                        }}
+                        className={`min-h-[64px] p-4 bg-[#1C1A17] border transition-colors flex items-center justify-between gap-3 cursor-pointer group ${
+                          isDropTarget
+                            ? 'border-[#D97757] bg-[#24211D]'
+                            : 'border-[#2C2824] hover:border-[#D97757]'
+                        }`}
                       >
                         <div className="flex items-center gap-3 min-w-0">
                           <Folder className="w-6 h-6 text-[#D97757] shrink-0" />
@@ -1382,7 +1588,7 @@ export default function App() {
                   Files ({visibleFiles.length})
                 </h2>
                 <span className="hidden sm:inline text-xs text-[#9E978E]">
-                  Tap any file to preview · Drag & drop files anywhere to upload
+                  Tap any file (including MKV video) to preview · Click Move or drag to organize
                 </span>
               </div>
 
@@ -1421,6 +1627,15 @@ export default function App() {
                     return (
                       <div
                         key={file.id}
+                        draggable={!isLocked}
+                        onDragStart={(e) => {
+                          setDraggedFileId(file.id);
+                          e.dataTransfer.setData('text/plain', file.id);
+                        }}
+                        onDragEnd={() => {
+                          setDraggedFileId(null);
+                          setDragOverFolderId(null);
+                        }}
                         className={`p-4 sm:p-5 bg-[#1C1A17] border transition-colors flex flex-col justify-between gap-4 ${
                           isLocked
                             ? 'border-[#D99B26]/80'
@@ -1448,14 +1663,23 @@ export default function App() {
                             <div className="flex items-center -mr-2 -mt-2">
                               <button
                                 onClick={() => setInspectedFile(file)}
-                                className="min-w-[40px] min-h-[44px] flex items-center justify-center text-[#9E978E] hover:text-[#F2EFE9] cursor-pointer"
-                                title="Preview File"
+                                className="min-w-[38px] min-h-[44px] flex items-center justify-center text-[#9E978E] hover:text-[#F2EFE9] cursor-pointer"
+                                title="Preview File (MKV / Video / Image / PDF)"
                               >
                                 <Eye className="w-4 h-4" />
                               </button>
+                              {!isLocked && (
+                                <button
+                                  onClick={() => setMoveModalFile(file)}
+                                  className="min-w-[38px] min-h-[44px] flex items-center justify-center text-[#9E978E] hover:text-[#D97757] cursor-pointer"
+                                  title="Move to Folder"
+                                >
+                                  <FolderInput className="w-4 h-4" />
+                                </button>
+                              )}
                               <button
                                 onClick={() => handleToggleStar(file)}
-                                className={`min-w-[40px] min-h-[44px] flex items-center justify-center cursor-pointer ${
+                                className={`min-w-[38px] min-h-[44px] flex items-center justify-center cursor-pointer ${
                                   file.starred
                                     ? 'text-[#D97757]'
                                     : 'text-[#9E978E] hover:text-[#F2EFE9]'
@@ -1476,7 +1700,7 @@ export default function App() {
                                     subtitle: `Size: ${formatBytes(file.sizeBytes)}`,
                                   })
                                 }
-                                className="min-w-[40px] min-h-[44px] flex items-center justify-center text-[#9E978E] hover:text-[#D94848] cursor-pointer"
+                                className="min-w-[38px] min-h-[44px] flex items-center justify-center text-[#9E978E] hover:text-[#D94848] cursor-pointer"
                                 title="Delete File"
                               >
                                 <Trash2 className="w-4 h-4" />
@@ -1521,21 +1745,29 @@ export default function App() {
                             </button>
                           </div>
                         ) : (
-                          <div className="grid grid-cols-2 gap-2.5 pt-3 border-t border-[#2C2824]">
+                          <div className="grid grid-cols-3 gap-2 pt-3 border-t border-[#2C2824]">
+                            <button
+                              onClick={() => setMoveModalFile(file)}
+                              className="min-h-[44px] py-2.5 px-2.5 text-xs font-semibold bg-[#24211D] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center justify-center gap-1.5 cursor-pointer"
+                            >
+                              <FolderInput className="w-3.5 h-3.5 text-[#D97757]" />
+                              <span>Move</span>
+                            </button>
+
                             <button
                               onClick={() => setShareModalFile(file)}
-                              className="min-h-[44px] py-2.5 px-3 text-xs font-semibold bg-[#24211D] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center justify-center gap-1.5 cursor-pointer"
+                              className="min-h-[44px] py-2.5 px-2.5 text-xs font-semibold bg-[#24211D] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center justify-center gap-1.5 cursor-pointer"
                             >
-                              <Link2 className="w-4 h-4 text-[#D97757]" />
-                              {existingShare ? 'Shared Link' : 'Share'}
+                              <Link2 className="w-3.5 h-3.5 text-[#D97757]" />
+                              <span>{existingShare ? 'Shared' : 'Share'}</span>
                             </button>
 
                             <button
                               onClick={() => handleDownloadFile(file)}
-                              className="min-h-[44px] py-2.5 px-3 text-xs font-bold bg-[#D97757] text-[#141311] hover:bg-[#E08568] flex items-center justify-center gap-1.5 cursor-pointer"
+                              className="min-h-[44px] py-2.5 px-2.5 text-xs font-bold bg-[#D97757] text-[#141311] hover:bg-[#E08568] flex items-center justify-center gap-1.5 cursor-pointer"
                             >
-                              <Download className="w-4 h-4" />
-                              Download
+                              <Download className="w-3.5 h-3.5" />
+                              <span>Download</span>
                             </button>
                           </div>
                         )}
@@ -1724,11 +1956,16 @@ export default function App() {
       {inspectedFile && (
         <FileDetailDrawer
           file={inspectedFile}
+          currentFolderName={
+            folders.find((fl) => fl.id === inspectedFile.folderId)?.name ||
+            'My Cloud Drive (Root)'
+          }
           firebaseUid={firebaseUser?.uid}
           firebaseEmail={firebaseUser?.email || ''}
           onClose={() => setInspectedFile(null)}
           onDownload={handleDownloadFile}
           onOpenShareModal={(f) => setShareModalFile(f)}
+          onOpenMoveModal={(f) => setMoveModalFile(f)}
           onRequestDelete={(f) =>
             setDeleteTarget({
               type: 'file',
@@ -1738,6 +1975,17 @@ export default function App() {
             })
           }
           onGoToPricing={() => setActiveView('pricing')}
+        />
+      )}
+
+      {moveModalFile && (
+        <MoveFileModal
+          file={moveModalFile}
+          folders={folders}
+          files={files}
+          onClose={() => setMoveModalFile(null)}
+          onMoveFile={handleMoveFile}
+          onCreateFolder={handleCreateFolderFromModal}
         />
       )}
 

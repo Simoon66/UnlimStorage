@@ -1050,21 +1050,93 @@ async function startServer() {
     res.json({ ok: true });
   });
 
+  function resolveEffectiveMimeType(fileName: string, rawMime?: string): string {
+    const lower = (fileName || '').toLowerCase();
+    if (lower.endsWith('.mkv')) return 'video/x-matroska';
+    if (lower.endsWith('.mp4') || lower.endsWith('.m4v')) return 'video/mp4';
+    if (lower.endsWith('.webm')) return 'video/webm';
+    if (lower.endsWith('.mov')) return 'video/quicktime';
+    if (lower.endsWith('.avi')) return 'video/x-msvideo';
+    if (lower.endsWith('.mp3')) return 'audio/mpeg';
+    if (lower.endsWith('.wav')) return 'audio/wav';
+    if (lower.endsWith('.ogg')) return 'audio/ogg';
+    if (lower.endsWith('.flac')) return 'audio/flac';
+    if (rawMime && rawMime !== 'application/octet-stream') return rawMime;
+    return rawMime || 'application/octet-stream';
+  }
+
+  function computeFastFileSha256(filePath: string, sizeBytes: number): string {
+    const hash = crypto.createHash('sha256');
+    const SAMPLE_BYTES = 1024 * 1024; // 1 MB head + 1 MB tail for huge files
+    if (sizeBytes <= 25 * 1024 * 1024) {
+      const buf = fs.readFileSync(filePath);
+      return hash.update(buf).digest('hex');
+    }
+    const fd = fs.openSync(filePath, 'r');
+    try {
+      const headBuf = Buffer.alloc(Math.min(SAMPLE_BYTES, sizeBytes));
+      fs.readSync(fd, headBuf, 0, headBuf.length, 0);
+      hash.update(headBuf);
+      if (sizeBytes > SAMPLE_BYTES * 2) {
+        const tailBuf = Buffer.alloc(SAMPLE_BYTES);
+        fs.readSync(fd, tailBuf, 0, SAMPLE_BYTES, sizeBytes - SAMPLE_BYTES);
+        hash.update(tailBuf);
+      }
+      hash.update(String(sizeBytes));
+      return hash.digest('hex');
+    } finally {
+      fs.closeSync(fd);
+    }
+  }
+
   const upload = multer({
-    storage: multer.memoryStorage(),
-    limits: { fileSize: 100 * 1024 * 1024 },
+    storage: multer.diskStorage({
+      destination: (_req, _file, cb) => {
+        cb(null, CHUNKS_DIR);
+      },
+      filename: (_req, _file, cb) => {
+        const tmpName = `tmp_upload_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+        cb(null, tmpName);
+      },
+    }),
+    limits: { fileSize: 5 * 1024 * 1024 * 1024 }, // 5 GB per file limit
   });
+
+  const uploadMiddleware: express.RequestHandler = (req, res, next) => {
+    const handler = upload.array('files', 10) as unknown as express.RequestHandler;
+    handler(req, res, (err: unknown) => {
+      if (err) {
+        const msg = err instanceof Error ? err.message : 'File upload failed';
+        res.status(413).json({ error: msg });
+        return;
+      }
+      next();
+    });
+  };
 
   app.post(
     '/api/files/upload',
     requireAuth,
-    upload.array('files', 10) as unknown as express.RequestHandler,
+    uploadMiddleware,
     async (req, res) => {
       const user = (req as Request & { user: StoredUser }).user;
       evaluateUserQuotaAndLocks(user);
 
       const uploadedFiles = (req.files as Express.Multer.File[]) || [];
       const folderId = (req.body.folderId as string) || null;
+
+      if (req.aborted) {
+        for (const f of uploadedFiles) {
+          if (f.path && fs.existsSync(f.path)) {
+            try {
+              fs.unlinkSync(f.path);
+            } catch {
+              // ignore
+            }
+          }
+        }
+        return;
+      }
 
       if (uploadedFiles.length === 0) {
         res.status(400).json({ error: 'No files provided for upload' });
@@ -1073,6 +1145,15 @@ async function startServer() {
 
       const totalBatchBytes = uploadedFiles.reduce((acc, f) => acc + f.size, 0);
       if (user.storageUsedBytes + totalBatchBytes > user.bandwidthLimitBytes) {
+        for (const f of uploadedFiles) {
+          if (f.path && fs.existsSync(f.path)) {
+            try {
+              fs.unlinkSync(f.path);
+            } catch {
+              // ignore
+            }
+          }
+        }
         res.status(429).json({
           error: `Storage limit reached (${formatBytesServer(
             user.bandwidthLimitBytes
@@ -1091,7 +1172,15 @@ async function startServer() {
       for (const rawFile of uploadedFiles) {
         const fileId = `file_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
         const transferId = `trf_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
-        const sha256 = computeSha256(rawFile.buffer);
+        const finalChunkPath = path.join(CHUNKS_DIR, fileId);
+
+        if (rawFile.path && fs.existsSync(rawFile.path)) {
+          fs.renameSync(rawFile.path, finalChunkPath);
+        } else if (rawFile.buffer) {
+          fs.writeFileSync(finalChunkPath, rawFile.buffer);
+        }
+
+        const sha256 = computeFastFileSha256(finalChunkPath, rawFile.size);
 
         const job: TransferJob = {
           id: transferId,
@@ -1102,7 +1191,7 @@ async function startServer() {
           folderId: folderId === 'null' || folderId === '' ? null : folderId,
           totalBytes: rawFile.size,
           transferredBytes: Math.round(rawFile.size * 0.5),
-          speedBps: Math.max(1_048_576, rawFile.size * 2),
+          speedBps: Math.max(1_048_576, Math.min(rawFile.size * 2, 50 * 1024 * 1024)),
           status: 'streaming',
           storageDriver: hasLiveTelegram ? 'telegram' : 'local_vault',
           fileId,
@@ -1113,15 +1202,15 @@ async function startServer() {
         db.transfers.unshift(job);
         broadcast('transfer:progress', job);
 
-        fs.writeFileSync(path.join(CHUNKS_DIR, fileId), rawFile.buffer);
-
         let storageDriver: 'telegram' | 'local_vault' = 'local_vault';
         let telegramChunks: TelegramChunk[] = [];
         let telegramChatId: string | undefined;
 
-        if (hasLiveTelegram) {
+        // Sync to Telegram Bot API when under 45 MB per-chunk Bot API limit
+        if (hasLiveTelegram && rawFile.size <= 45 * 1024 * 1024) {
+          const fileBuffer = fs.readFileSync(finalChunkPath);
           const tgResult = await pushBufferToTelegram(
-            rawFile.buffer,
+            fileBuffer,
             rawFile.originalname,
             db.telegramConfig.botToken,
             db.telegramConfig.chatId
@@ -1133,20 +1222,35 @@ async function startServer() {
           }
         }
 
-        const mime = rawFile.mimetype || 'application/octet-stream';
+        const mime = resolveEffectiveMimeType(rawFile.originalname, rawFile.mimetype);
         const isTextPreviewable =
-          mime.startsWith('text/') ||
-          mime === 'application/json' ||
-          /\.(md|txt|json|csv|sh|ts|tsx|js|py|yaml|yml|log|html|css|xml)$/i.test(
-            rawFile.originalname
-          );
+          (mime.startsWith('text/') ||
+            mime === 'application/json' ||
+            /\.(md|txt|json|csv|sh|ts|tsx|js|py|yaml|yml|log|html|css|xml)$/i.test(
+              rawFile.originalname
+            )) &&
+          rawFile.size <= 5 * 1024 * 1024;
 
         const isMediaPreviewable =
-          (mime.startsWith('image/') ||
-            mime.startsWith('audio/') ||
-            mime.startsWith('video/') ||
-            mime === 'application/pdf') &&
-          rawFile.size <= 15 * 1024 * 1024;
+          mime.startsWith('image/') && rawFile.size <= 8 * 1024 * 1024;
+
+        let previewText: string | undefined;
+        if (isTextPreviewable) {
+          const fd = fs.openSync(finalChunkPath, 'r');
+          try {
+            const sample = Buffer.alloc(Math.min(24000, rawFile.size));
+            fs.readSync(fd, sample, 0, sample.length, 0);
+            previewText = sample.toString('utf-8');
+          } finally {
+            fs.closeSync(fd);
+          }
+        }
+
+        let previewDataUrl: string | undefined;
+        if (isMediaPreviewable) {
+          const imgBuf = fs.readFileSync(finalChunkPath);
+          previewDataUrl = `data:${mime};base64,${imgBuf.toString('base64')}`;
+        }
 
         const record: FileRecord = {
           id: fileId,
@@ -1164,12 +1268,8 @@ async function startServer() {
           downloadCount: 0,
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
-          previewText: isTextPreviewable
-            ? rawFile.buffer.subarray(0, 24000).toString('utf-8')
-            : undefined,
-          previewDataUrl: isMediaPreviewable
-            ? `data:${mime};base64,${rawFile.buffer.toString('base64')}`
-            : undefined,
+          previewText,
+          previewDataUrl,
           lockedOverQuota: false,
         };
 
@@ -1301,11 +1401,75 @@ async function startServer() {
     }
 
     const chunkPath = path.join(CHUNKS_DIR, file.id);
-    let buffer: Buffer | null = null;
+    const isInline = req.query.inline === '1';
+    const isMkv =
+      file.name.toLowerCase().endsWith('.mkv') || file.mimeType === 'video/x-matroska';
+    const contentType =
+      isInline && isMkv
+        ? 'video/webm'
+        : resolveEffectiveMimeType(file.name, file.mimeType);
 
     if (fs.existsSync(chunkPath)) {
-      buffer = fs.readFileSync(chunkPath);
-    } else if (
+      const stat = fs.statSync(chunkPath);
+      const totalSize = stat.size;
+      const rangeHeader = req.headers.range;
+
+      res.setHeader('Accept-Ranges', 'bytes');
+      res.setHeader('Content-Type', contentType);
+      res.setHeader(
+        'Content-Disposition',
+        `${isInline ? 'inline' : 'attachment'}; filename="${encodeURIComponent(file.name)}"`
+      );
+
+      if (rangeHeader) {
+        const parts = rangeHeader.replace(/bytes=/, '').split('-');
+        const start = parseInt(parts[0], 10) || 0;
+        const end = parts[1] ? Math.min(totalSize - 1, parseInt(parts[1], 10)) : totalSize - 1;
+        if (start >= totalSize || start > end) {
+          res.status(416).setHeader('Content-Range', `bytes */${totalSize}`).end();
+          return;
+        }
+        const chunkLen = end - start + 1;
+        res.status(206);
+        res.setHeader('Content-Range', `bytes ${start}-${end}/${totalSize}`);
+        res.setHeader('Content-Length', String(chunkLen));
+        const stream = fs.createReadStream(chunkPath, { start, end });
+        stream.pipe(res);
+        return;
+      }
+
+      if (!isInline) {
+        file.downloadCount += 1;
+        user.bandwidthUsedBytes += totalSize;
+        recordDailyBandwidth('downloadBytes', totalSize);
+        saveDb();
+
+        recordAuditLog({
+          userId: user.id,
+          userName: user.name,
+          action: 'FILE_DOWNLOAD',
+          targetName: file.name,
+          bytesTransferred: totalSize,
+          integrityHash: file.sha256.slice(0, 16),
+          status: 'success',
+          details: `Downloaded file from encrypted cloud vault`,
+        });
+      }
+
+      res.setHeader('Content-Length', String(totalSize));
+      const throttleKbps = db.bandwidthSettings.globalThrottleKbps;
+      const readStream = fs.createReadStream(chunkPath);
+      if (!isInline && throttleKbps && throttleKbps > 0) {
+        const throttle = new ThrottleStream(throttleKbps);
+        readStream.pipe(throttle).pipe(res);
+      } else {
+        readStream.pipe(res);
+      }
+      return;
+    }
+
+    let buffer: Buffer | null = null;
+    if (
       file.storageDriver === 'telegram' &&
       file.telegramChunks.length > 0 &&
       db.telegramConfig.botToken
@@ -1314,6 +1478,13 @@ async function startServer() {
         file.telegramChunks,
         db.telegramConfig.botToken
       );
+      if (buffer) {
+        try {
+          fs.writeFileSync(chunkPath, buffer);
+        } catch {
+          // ignore
+        }
+      }
     }
 
     if (!buffer) {
@@ -1321,7 +1492,6 @@ async function startServer() {
       return;
     }
 
-    const isInline = req.query.inline === '1';
     if (!isInline) {
       file.downloadCount += 1;
       user.bandwidthUsedBytes += buffer.length;
@@ -1340,7 +1510,7 @@ async function startServer() {
       });
     }
 
-    res.setHeader('Content-Type', file.mimeType || 'application/octet-stream');
+    res.setHeader('Content-Type', contentType);
     res.setHeader(
       'Content-Disposition',
       `${isInline ? 'inline' : 'attachment'}; filename="${encodeURIComponent(file.name)}"`
@@ -1358,8 +1528,30 @@ async function startServer() {
   });
 
   // ============================================================================
-  // REMOTE URL UPLOAD ENGINE
+  // REMOTE URL UPLOAD ENGINE & TRANSFER CANCELLATION
   // ============================================================================
+
+  const activeTransferControllers = new Map<string, AbortController>();
+
+  app.post('/api/transfers/:id/cancel', requireAuth, (req, res) => {
+    const user = (req as Request & { user: StoredUser }).user;
+    const job = db.transfers.find((t) => t.id === req.params.id && t.userId === user.id);
+    if (!job) {
+      res.status(404).json({ error: 'Transfer job not found' });
+      return;
+    }
+    const ctrl = activeTransferControllers.get(job.id);
+    if (ctrl) {
+      ctrl.abort();
+      activeTransferControllers.delete(job.id);
+    }
+    job.status = 'failed';
+    job.error = 'Cancelled by user';
+    job.completedAt = new Date().toISOString();
+    saveDb();
+    broadcast('transfer:failed', { job });
+    res.json({ ok: true, job });
+  });
 
   app.post('/api/transfers/remote', requireAuth, async (req, res) => {
     const user = (req as Request & { user: StoredUser }).user;
@@ -1412,12 +1604,13 @@ async function startServer() {
 
     (async () => {
       const startTime = Date.now();
+      const controller = new AbortController();
+      activeTransferControllers.set(transferId, controller);
       try {
         job.status = 'streaming';
         broadcast('transfer:progress', job);
 
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 30000);
+        const timeout = setTimeout(() => controller.abort(), 120000);
 
         const remoteRes = await fetch(cleanUrl, {
           signal: controller.signal,
@@ -1820,11 +2013,41 @@ async function startServer() {
 
     const file = db.files.find((f) => f.id === share.fileId);
     const chunkPath = path.join(CHUNKS_DIR, share.fileId);
-    let buffer: Buffer | null = null;
+    const effectiveThrottle =
+      share.throttleKbps || db.bandwidthSettings.globalThrottleKbps || null;
 
     if (fs.existsSync(chunkPath)) {
-      buffer = fs.readFileSync(chunkPath);
-    } else if (
+      const stat = fs.statSync(chunkPath);
+      share.downloadCount += 1;
+      share.bandwidthUsedBytes += stat.size;
+      share.lastAccessedAt = new Date().toISOString();
+      if (file) {
+        file.downloadCount += 1;
+      }
+      saveDb();
+
+      res.setHeader(
+        'Content-Type',
+        resolveEffectiveMimeType(share.fileName, share.fileMimeType)
+      );
+      res.setHeader(
+        'Content-Disposition',
+        `attachment; filename="${encodeURIComponent(share.fileName)}"`
+      );
+      res.setHeader('Content-Length', String(stat.size));
+
+      const readStream = fs.createReadStream(chunkPath);
+      if (effectiveThrottle && effectiveThrottle > 0) {
+        const throttle = new ThrottleStream(effectiveThrottle);
+        readStream.pipe(throttle).pipe(res);
+      } else {
+        readStream.pipe(res);
+      }
+      return;
+    }
+
+    let buffer: Buffer | null = null;
+    if (
       file &&
       file.storageDriver === 'telegram' &&
       file.telegramChunks.length > 0 &&
@@ -1848,9 +2071,6 @@ async function startServer() {
       file.downloadCount += 1;
     }
     saveDb();
-
-    const effectiveThrottle =
-      share.throttleKbps || db.bandwidthSettings.globalThrottleKbps || null;
 
     res.setHeader('Content-Type', share.fileMimeType || 'application/octet-stream');
     res.setHeader(

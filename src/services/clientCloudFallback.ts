@@ -75,6 +75,110 @@ function saveBlobStore(store: Record<string, string>) {
   }
 }
 
+// ============================================================================
+// INDEXEDDB + IN-MEMORY BINARY VAULT (Supports 285 MB+ MKV & Large Binary Files)
+// ============================================================================
+
+const IDB_NAME = 'unlimcloud_binary_vault_v1';
+const IDB_STORE = 'file_blobs';
+const memoryBlobCache = new Map<string, Blob>();
+
+export function resolveClientMimeType(fileName: string, rawMime?: string): string {
+  const lower = (fileName || '').toLowerCase();
+  if (lower.endsWith('.mkv')) return 'video/x-matroska';
+  if (lower.endsWith('.mp4') || lower.endsWith('.m4v')) return 'video/mp4';
+  if (lower.endsWith('.webm')) return 'video/webm';
+  if (lower.endsWith('.mov')) return 'video/quicktime';
+  if (lower.endsWith('.avi')) return 'video/x-msvideo';
+  if (lower.endsWith('.mp3')) return 'audio/mpeg';
+  if (lower.endsWith('.wav')) return 'audio/wav';
+  if (lower.endsWith('.ogg')) return 'audio/ogg';
+  if (lower.endsWith('.flac')) return 'audio/flac';
+  if (rawMime && rawMime !== 'application/octet-stream') return rawMime;
+  return rawMime || 'application/octet-stream';
+}
+
+function openBinaryVaultDb(): Promise<IDBDatabase | null> {
+  if (typeof indexedDB === 'undefined') return Promise.resolve(null);
+  return new Promise((resolve) => {
+    try {
+      const req = indexedDB.open(IDB_NAME, 1);
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        if (!db.objectStoreNames.contains(IDB_STORE)) {
+          db.createObjectStore(IDB_STORE);
+        }
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => resolve(null);
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
+export async function storeClientBinaryBlob(fileId: string, blob: Blob): Promise<void> {
+  memoryBlobCache.set(fileId, blob);
+  const idb = await openBinaryVaultDb();
+  if (!idb) return;
+  await new Promise<void>((resolve) => {
+    try {
+      const tx = idb.transaction(IDB_STORE, 'readwrite');
+      const store = tx.objectStore(IDB_STORE);
+      store.put(blob, fileId);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => resolve();
+    } catch {
+      resolve();
+    }
+  });
+}
+
+export async function getClientBinaryBlob(fileId: string): Promise<Blob | null> {
+  const inMem = memoryBlobCache.get(fileId);
+  if (inMem) return inMem;
+
+  const idb = await openBinaryVaultDb();
+  if (!idb) return null;
+
+  return new Promise<Blob | null>((resolve) => {
+    try {
+      const tx = idb.transaction(IDB_STORE, 'readonly');
+      const store = tx.objectStore(IDB_STORE);
+      const req = store.get(fileId);
+      req.onsuccess = () => {
+        const res = req.result;
+        if (res instanceof Blob) {
+          memoryBlobCache.set(fileId, res);
+          resolve(res);
+        } else {
+          resolve(null);
+        }
+      };
+      req.onerror = () => resolve(null);
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
+export async function deleteClientBinaryBlob(fileId: string): Promise<void> {
+  memoryBlobCache.delete(fileId);
+  const idb = await openBinaryVaultDb();
+  if (!idb) return;
+  await new Promise<void>((resolve) => {
+    try {
+      const tx = idb.transaction(IDB_STORE, 'readwrite');
+      const store = tx.objectStore(IDB_STORE);
+      store.delete(fileId);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => resolve();
+    } catch {
+      resolve();
+    }
+  });
+}
+
 function createInitialClientDb(): ClientDatabase {
   const now = new Date();
   const iso = (minsAgo: number) => new Date(now.getTime() - minsAgo * 60000).toISOString();
@@ -440,10 +544,22 @@ async function handleClientApi(urlStr: string, init?: RequestInit): Promise<Resp
     );
     const share = db.shares.find((s) => s.token === tok && s.active);
     if (!share) return new Response('Not found', { status: 404 });
-    const blobs = getBlobStore();
-    const content = blobs[share.fileId] || `Shared file: ${share.fileName}`;
     share.downloadCount += 1;
     saveClientDb(db);
+
+    const binaryBlob = await getClientBinaryBlob(share.fileId);
+    if (binaryBlob) {
+      return new Response(binaryBlob, {
+        status: 200,
+        headers: {
+          'Content-Type': resolveClientMimeType(share.fileName, share.fileMimeType),
+          'Content-Length': String(binaryBlob.size),
+        },
+      });
+    }
+
+    const blobs = getBlobStore();
+    const content = blobs[share.fileId] || `Shared file: ${share.fileName}`;
     return new Response(content, {
       status: 200,
       headers: { 'Content-Type': share.fileMimeType || 'application/octet-stream' },
@@ -731,17 +847,16 @@ async function handleClientApi(urlStr: string, init?: RequestInit): Promise<Resp
 
     for (const f of uploadedFiles) {
       const fileId = `file_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
-      const mime = f.type || 'application/octet-stream';
+      const mime = resolveClientMimeType(f.name, f.type);
       const isText =
-        mime.startsWith('text/') ||
-        mime === 'application/json' ||
-        /\.(md|txt|json|csv|sh|ts|tsx|js|py|html|css|xml)$/i.test(f.name);
-      const isMedia =
-        (mime.startsWith('image/') ||
-          mime.startsWith('audio/') ||
-          mime.startsWith('video/') ||
-          mime === 'application/pdf') &&
-        f.size <= 8 * 1024 * 1024;
+        (mime.startsWith('text/') ||
+          mime === 'application/json' ||
+          /\.(md|txt|json|csv|sh|ts|tsx|js|py|html|css|xml)$/i.test(f.name)) &&
+        f.size <= 5 * 1024 * 1024;
+      const isSmallImage = mime.startsWith('image/') && f.size <= 4 * 1024 * 1024;
+
+      // Always store the true binary File/Blob in IndexedDB + memory cache (supports 285 MB+ MKV files)
+      await storeClientBinaryBlob(fileId, f);
 
       let textContent = '';
       try {
@@ -753,17 +868,19 @@ async function handleClientApi(urlStr: string, init?: RequestInit): Promise<Resp
       }
 
       let previewDataUrl: string | undefined;
-      if (isMedia) {
+      if (isSmallImage) {
         const dUrl = await fileToDataUrl(f);
         if (dUrl) previewDataUrl = dUrl;
       }
 
-      blobs[fileId] = previewDataUrl || textContent || `Binary payload for ${f.name}`;
+      if (previewDataUrl || textContent) {
+        blobs[fileId] = previewDataUrl || textContent;
+      }
 
       let storageDriver: 'telegram' | 'local_vault' = 'local_vault';
       const telegramChunks: TelegramChunk[] = [];
 
-      if (db.telegramConfig.botToken && db.telegramConfig.chatId) {
+      if (db.telegramConfig.botToken && db.telegramConfig.chatId && f.size <= 45 * 1024 * 1024) {
         try {
           const tgForm = new FormData();
           tgForm.append('chat_id', db.telegramConfig.chatId);
@@ -847,10 +964,47 @@ async function handleClientApi(urlStr: string, init?: RequestInit): Promise<Resp
         403
       );
     }
+
+    const isInline = parsed.searchParams.get('inline') === '1';
+    if (!isInline) {
+      file.downloadCount += 1;
+      saveClientDb(db);
+    }
+
+    // 1. Check IndexedDB / in-memory binary vault first (full 285 MB+ binary fidelity)
+    const binaryBlob = await getClientBinaryBlob(file.id);
+    if (binaryBlob) {
+      const isMkv =
+        file.name.toLowerCase().endsWith('.mkv') || file.mimeType === 'video/x-matroska';
+      const effectiveMime =
+        isInline && isMkv
+          ? 'video/webm'
+          : resolveClientMimeType(file.name, file.mimeType);
+      return new Response(binaryBlob, {
+        status: 200,
+        headers: {
+          'Content-Type': effectiveMime,
+          'Content-Length': String(binaryBlob.size),
+        },
+      });
+    }
+
+    // 2. Fallback to small text/SVG blobs in localStorage
     const blobs = getBlobStore();
-    const content = blobs[file.id] || file.previewText || `UnlimCloud File: ${file.name}`;
-    file.downloadCount += 1;
-    saveClientDb(db);
+    const content = blobs[file.id] || file.previewText || '';
+
+    if (
+      (!content || content.startsWith('Binary payload for ')) &&
+      file.sizeBytes > 1024
+    ) {
+      return jsonResponse(
+        {
+          error:
+            'This file was uploaded before the large-file binary engine upgrade (only 44-byte placeholder metadata was cached). Please delete and re-upload this file once to store the full binary payload.',
+        },
+        404
+      );
+    }
 
     if (content.startsWith('data:')) {
       const res = await originalFetch(content);
@@ -861,7 +1015,7 @@ async function handleClientApi(urlStr: string, init?: RequestInit): Promise<Resp
       });
     }
 
-    return new Response(content, {
+    return new Response(content || `UnlimCloud File: ${file.name}`, {
       status: 200,
       headers: { 'Content-Type': file.mimeType || 'application/octet-stream' },
     });
@@ -874,6 +1028,7 @@ async function handleClientApi(urlStr: string, init?: RequestInit): Promise<Resp
     const body = await parseBody();
     if (typeof body.starred === 'boolean') file.starred = body.starred;
     if (typeof body.name === 'string' && body.name.trim()) file.name = body.name.trim();
+    if (body.folderId !== undefined) file.folderId = body.folderId;
     file.updatedAt = new Date().toISOString();
     saveClientDb(db);
     return jsonResponse({ file });
@@ -883,9 +1038,28 @@ async function handleClientApi(urlStr: string, init?: RequestInit): Promise<Resp
     const fileId = decodeURIComponent(path.slice('/api/files/'.length));
     db.files = db.files.filter((f) => !(f.id === fileId && f.ownerId === currentUser.id));
     db.shares = db.shares.filter((s) => s.fileId !== fileId);
+    const blobs = getBlobStore();
+    if (blobs[fileId]) {
+      delete blobs[fileId];
+      saveBlobStore(blobs);
+    }
+    await deleteClientBinaryBlob(fileId);
     evaluateClientQuotaAndLocks(db, currentUser);
     saveClientDb(db);
     return jsonResponse({ ok: true, user: currentUser });
+  }
+
+  if (path.startsWith('/api/transfers/') && path.endsWith('/cancel') && method === 'POST') {
+    const transferId = decodeURIComponent(
+      path.slice('/api/transfers/'.length, path.length - '/cancel'.length)
+    );
+    const job = db.transfers.find((t) => t.id === transferId && t.userId === currentUser.id);
+    if (!job) return jsonResponse({ error: 'Transfer job not found' }, 404);
+    job.status = 'failed';
+    job.error = 'Cancelled by user';
+    job.completedAt = new Date().toISOString();
+    saveClientDb(db);
+    return jsonResponse({ ok: true, job });
   }
 
   if (path === '/api/transfers/remote' && method === 'POST') {
@@ -1063,10 +1237,22 @@ async function handleClientApi(urlStr: string, init?: RequestInit): Promise<Resp
     );
     const share = db.shares.find((s) => s.token === tok && s.active);
     if (!share) return new Response('Not found', { status: 404 });
-    const blobs = getBlobStore();
-    const content = blobs[share.fileId] || `Shared file: ${share.fileName}`;
     share.downloadCount += 1;
     saveClientDb(db);
+
+    const binaryBlob = await getClientBinaryBlob(share.fileId);
+    if (binaryBlob) {
+      return new Response(binaryBlob, {
+        status: 200,
+        headers: {
+          'Content-Type': resolveClientMimeType(share.fileName, share.fileMimeType),
+          'Content-Length': String(binaryBlob.size),
+        },
+      });
+    }
+
+    const blobs = getBlobStore();
+    const content = blobs[share.fileId] || `Shared file: ${share.fileName}`;
     return new Response(content, {
       status: 200,
       headers: { 'Content-Type': share.fileMimeType || 'application/octet-stream' },
@@ -1205,13 +1391,23 @@ export async function uploadFilesWithProgress(params: {
   files: File[];
   folderId: string | null;
   headers: Record<string, string>;
+  signal?: AbortSignal;
   onProgress: (info: {
     percent: number;
     loadedBytes: number;
     totalBytes: number;
     speedBps: number;
   }) => void;
-}): Promise<{ ok: boolean; status: number; data: any }> {
+}): Promise<{ ok: boolean; cancelled?: boolean; status: number; data: any }> {
+  if (params.signal?.aborted) {
+    return {
+      ok: false,
+      cancelled: true,
+      status: 0,
+      data: { error: 'Upload cancelled by user' },
+    };
+  }
+
   const totalBytes = params.files.reduce((acc, f) => acc + f.size, 0);
   const formData = new FormData();
   if (params.folderId) {
@@ -1221,7 +1417,15 @@ export async function uploadFilesWithProgress(params: {
 
   if (staticFallbackMode === true) {
     const startMs = Date.now();
-    for (const step of [20, 48, 76, 95]) {
+    for (const step of [15, 35, 60, 82, 95]) {
+      if (params.signal?.aborted) {
+        return {
+          ok: false,
+          cancelled: true,
+          status: 0,
+          data: { error: 'Upload cancelled by user' },
+        };
+      }
       const loaded = Math.round((totalBytes * step) / 100);
       const elapsedSec = Math.max(0.08, (Date.now() - startMs) / 1000);
       params.onProgress({
@@ -1230,8 +1434,18 @@ export async function uploadFilesWithProgress(params: {
         totalBytes,
         speedBps: Math.max(1_500_000, Math.round(loaded / elapsedSec)),
       });
-      await new Promise((r) => setTimeout(r, 90));
+      await new Promise((r) => setTimeout(r, 110));
     }
+
+    if (params.signal?.aborted) {
+      return {
+        ok: false,
+        cancelled: true,
+        status: 0,
+        data: { error: 'Upload cancelled by user' },
+      };
+    }
+
     const res = await handleClientApi('/api/files/upload', {
       method: 'POST',
       headers: params.headers,
@@ -1255,10 +1469,29 @@ export async function uploadFilesWithProgress(params: {
       xhr.setRequestHeader(k, v);
     });
 
+    const onSignalAbort = () => {
+      try {
+        xhr.abort();
+      } catch {
+        // ignore
+      }
+    };
+
+    if (params.signal) {
+      params.signal.addEventListener('abort', onSignalAbort, { once: true });
+    }
+
+    const cleanupSignal = () => {
+      if (params.signal) {
+        params.signal.removeEventListener('abort', onSignalAbort);
+      }
+    };
+
     xhr.upload.onprogress = (evt) => {
+      if (params.signal?.aborted) return;
       const total = evt.lengthComputable && evt.total > 0 ? evt.total : Math.max(1, totalBytes);
       const loaded = Math.min(total, evt.loaded);
-      const pct = Math.min(99, Math.max(5, Math.round((loaded / total) * 100)));
+      const pct = Math.min(99, Math.max(2, Math.round((loaded / total) * 100)));
       const elapsedSec = Math.max(0.08, (Date.now() - startMs) / 1000);
       params.onProgress({
         percent: pct,
@@ -1268,9 +1501,30 @@ export async function uploadFilesWithProgress(params: {
       });
     };
 
+    xhr.onabort = () => {
+      cleanupSignal();
+      resolve({
+        ok: false,
+        cancelled: true,
+        status: 0,
+        data: { error: 'Upload cancelled by user' },
+      });
+    };
+
     xhr.onload = async () => {
+      cleanupSignal();
+      if (params.signal?.aborted) {
+        resolve({
+          ok: false,
+          cancelled: true,
+          status: 0,
+          data: { error: 'Upload cancelled by user' },
+        });
+        return;
+      }
+
       const contentType = xhr.getResponseHeader('content-type') || '';
-      if (xhr.status === 404 || contentType.includes('text/html')) {
+      if (xhr.status === 404 || xhr.status === 405 || (xhr.status === 200 && contentType.includes('text/html'))) {
         staticFallbackMode = true;
         const fallbackRes = await handleClientApi('/api/files/upload', {
           method: 'POST',
@@ -1296,6 +1550,16 @@ export async function uploadFilesWithProgress(params: {
       });
       try {
         const parsed = JSON.parse(xhr.responseText || '{}');
+        if (xhr.status >= 200 && xhr.status < 300 && Array.isArray(parsed.files)) {
+          // Cache uploaded File blobs locally as well for zero-latency MKV preview & instant download
+          for (let i = 0; i < parsed.files.length; i++) {
+            const createdFile = parsed.files[i] as FileRecord | undefined;
+            const rawFile = params.files[i];
+            if (createdFile?.id && rawFile) {
+              storeClientBinaryBlob(createdFile.id, rawFile).catch(() => null);
+            }
+          }
+        }
         resolve({ ok: xhr.status >= 200 && xhr.status < 300, status: xhr.status, data: parsed });
       } catch {
         resolve({ ok: false, status: xhr.status, data: { error: 'Upload failed' } });
@@ -1303,6 +1567,16 @@ export async function uploadFilesWithProgress(params: {
     };
 
     xhr.onerror = async () => {
+      cleanupSignal();
+      if (params.signal?.aborted) {
+        resolve({
+          ok: false,
+          cancelled: true,
+          status: 0,
+          data: { error: 'Upload cancelled by user' },
+        });
+        return;
+      }
       staticFallbackMode = true;
       const fallbackRes = await handleClientApi('/api/files/upload', {
         method: 'POST',
