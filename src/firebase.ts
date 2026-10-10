@@ -123,7 +123,9 @@ export interface FirestoreUserProfileData {
   usedPromoCodes: string;
 }
 
-export async function ensureFirestoreUserProfile(
+const inFlightProfilePromises = new Map<string, Promise<FirestoreUserProfileData | null>>();
+
+async function ensureFirestoreUserProfileInternal(
   fbUser: FirebaseUser
 ): Promise<FirestoreUserProfileData | null> {
   if (!fbUser.emailVerified) return null;
@@ -167,8 +169,42 @@ export async function ensureFirestoreUserProfile(
     });
     return initial;
   } catch (error) {
+    // Check if a concurrent session/listener created the profile right before this write
+    try {
+      const retrySnap = await getDoc(ref);
+      if (retrySnap.exists()) {
+        const d = retrySnap.data();
+        return {
+          uid: String(d.uid || safeUid),
+          displayName: String(d.displayName || fbUser.displayName || 'Cloud User'),
+          planId: (d.planId as StoragePlanId) || 'free_25gb',
+          tokenBalance: typeof d.tokenBalance === 'number' ? d.tokenBalance : 0,
+          planExpiresAt: String(d.planExpiresAt || ''),
+          graceEndsAt: String(d.graceEndsAt || ''),
+          usedPromoCodes: String(d.usedPromoCodes || ''),
+        };
+      }
+    } catch {
+      // ignore fallback check error and report original error
+    }
     handleFirestoreError(error, OperationType.CREATE, path);
   }
+}
+
+export async function ensureFirestoreUserProfile(
+  fbUser: FirebaseUser
+): Promise<FirestoreUserProfileData | null> {
+  if (!fbUser.emailVerified) return null;
+  const safeUid = sanitizeId(fbUser.uid);
+  const existingPromise = inFlightProfilePromises.get(safeUid);
+  if (existingPromise) {
+    return existingPromise;
+  }
+  const promise = ensureFirestoreUserProfileInternal(fbUser).finally(() => {
+    inFlightProfilePromises.delete(safeUid);
+  });
+  inFlightProfilePromises.set(safeUid, promise);
+  return promise;
 }
 
 export async function updateFirestoreUserProfile(
@@ -176,6 +212,7 @@ export async function updateFirestoreUserProfile(
 ): Promise<void> {
   const fbUser = auth.currentUser;
   if (!fbUser || !fbUser.emailVerified) return;
+  await ensureFirestoreUserProfile(fbUser);
   const safeUid = sanitizeId(fbUser.uid);
   const path = `userProfiles/${safeUid}`;
   const ref = doc(db, 'userProfiles', safeUid);
@@ -209,13 +246,42 @@ export async function updateFirestoreUserProfile(
   }
 }
 
-export async function syncCloudFileToFirestore(file: FileRecord): Promise<void> {
+function isStarterSeedFile(fileId: string): boolean {
+  return (
+    fileId.startsWith('file_welcome_') ||
+    fileId === 'file_spec_01' ||
+    fileId === 'file_diagram_02'
+  );
+}
+
+export async function syncCloudFileToFirestore(
+  file: FileRecord,
+  isUpdate = false
+): Promise<void> {
   const fbUser = auth.currentUser;
   if (!fbUser || !fbUser.emailVerified) return;
+  if (isStarterSeedFile(file.id)) return;
+
+  await ensureFirestoreUserProfile(fbUser);
   const safeUid = sanitizeId(fbUser.uid);
   const safeFileId = sanitizeId(file.id);
   const path = `cloudFiles/${safeFileId}`;
   const ref = doc(db, 'cloudFiles', safeFileId);
+
+  if (isUpdate) {
+    try {
+      await updateDoc(ref, {
+        name: truncateString(file.name, 255, 'file.bin'),
+        folderId: sanitizeId(file.folderId || 'root'),
+        starred: Boolean(file.starred),
+        downloadCount: Math.max(0, Math.min(100000000, Math.floor(file.downloadCount || 0))),
+        updatedAt: serverTimestamp(),
+      });
+      return;
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, path);
+    }
+  }
 
   try {
     await setDoc(ref, {
@@ -239,6 +305,8 @@ export async function syncCloudFileToFirestore(file: FileRecord): Promise<void> 
 export async function deleteCloudFileFromFirestore(fileId: string): Promise<void> {
   const fbUser = auth.currentUser;
   if (!fbUser || !fbUser.emailVerified) return;
+  if (isStarterSeedFile(fileId)) return;
+
   const safeFileId = sanitizeId(fileId);
   const path = `cloudFiles/${safeFileId}`;
   const ref = doc(db, 'cloudFiles', safeFileId);

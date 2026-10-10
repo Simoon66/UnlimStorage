@@ -359,7 +359,6 @@ export default function App() {
     try {
       const fbUser = await signInWithGooglePopup();
       setFirebaseUser(fbUser);
-      await ensureFirestoreUserProfile(fbUser).catch(() => null);
       pushNotification({
         id: `auth_${Date.now()}`,
         timestamp: new Date().toISOString(),
@@ -515,7 +514,7 @@ export default function App() {
     if (res.ok) {
       const data = await res.json();
       setFiles((prev) => prev.map((f) => (f.id === file.id ? data.file : f)));
-      syncCloudFileToFirestore(data.file).catch(() => null);
+      syncCloudFileToFirestore(data.file, true).catch(() => null);
     }
   };
 
