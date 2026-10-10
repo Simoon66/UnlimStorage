@@ -23,7 +23,14 @@ import {
   Timestamp,
 } from 'firebase/firestore';
 import firebaseConfig from '../firebase-applet-config.json';
-import { FileRecord, FolderRecord, StorageDriver, StoragePlanId, TelegramChunk } from './types';
+import {
+  FileRecord,
+  FolderRecord,
+  ShareLink,
+  StorageDriver,
+  StoragePlanId,
+  TelegramChunk,
+} from './types';
 
 const app = initializeApp(firebaseConfig);
 export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
@@ -343,23 +350,23 @@ export async function syncCloudFileToFirestore(
   const safePreviewDataUrl =
     file.previewDataUrl && file.previewDataUrl.length <= 500000 ? file.previewDataUrl : '';
 
-  if (isUpdate) {
-    try {
-      await updateDoc(ref, {
-        name: truncateString(file.name, 255, 'file.bin'),
-        folderId: sanitizeId(file.folderId || 'root'),
-        starred: Boolean(file.starred),
-        downloadCount: Math.max(0, Math.min(100000000, Math.floor(file.downloadCount || 0))),
-        sha256: safeSha256,
-        storageDriver,
-        telegramChatId: safeChatId,
-        telegramChunksJson: chunksJson,
-        updatedAt: serverTimestamp(),
-      });
-      return;
-    } catch {
-      // If the document wasn't created yet on Firestore, fall through to setDoc
-    }
+  try {
+    await updateDoc(ref, {
+      name: truncateString(file.name, 255, 'file.bin'),
+      folderId: sanitizeId(file.folderId || 'root'),
+      starred: Boolean(file.starred),
+      downloadCount: Math.max(0, Math.min(100000000, Math.floor(file.downloadCount || 0))),
+      sha256: safeSha256,
+      storageDriver,
+      telegramChatId: safeChatId,
+      telegramChunksJson: chunksJson,
+      previewText: safePreviewText,
+      previewDataUrl: safePreviewDataUrl,
+      updatedAt: serverTimestamp(),
+    });
+    return;
+  } catch {
+    // Document does not exist yet on Firestore; proceed to setDoc creation below
   }
 
   try {
@@ -414,6 +421,17 @@ export async function syncCloudFolderToFirestore(folder: FolderRecord): Promise<
   const ref = doc(db, 'cloudFolders', safeFolderId);
 
   try {
+    await updateDoc(ref, {
+      name: truncateString(folder.name, 255, 'Folder'),
+      parentId: sanitizeId(folder.parentId || 'root'),
+      updatedAt: serverTimestamp(),
+    });
+    return;
+  } catch {
+    // Proceed to create if document does not exist
+  }
+
+  try {
     await setDoc(ref, {
       id: safeFolderId,
       ownerId: safeUid,
@@ -443,9 +461,19 @@ export async function deleteCloudFolderFromFirestore(folderId: string): Promise<
   }
 }
 
+export interface PublicShareCloudRecord extends ShareLink {
+  passwordHash: string | null;
+  storageDriver: StorageDriver;
+  telegramChatId?: string;
+  telegramChunks: TelegramChunk[];
+  cloudChunkCount: number;
+  previewText?: string;
+  previewDataUrl?: string;
+}
+
 /**
- * Fetches all cloud files and folders belonging to the authenticated user from Firestore
- * so that logging in from any browser or device immediately restores the user's drive.
+ * Fetches all cloud files, folders, and share links belonging to the authenticated user from Firestore
+ * so that logging in from any browser or device immediately restores the user's drive & shared links.
  */
 export async function fetchUserCloudDriveFromFirestore(
   fbUser: FirebaseUser
@@ -453,9 +481,10 @@ export async function fetchUserCloudDriveFromFirestore(
   profile: FirestoreUserProfileData | null;
   files: FileRecord[];
   folders: FolderRecord[];
+  shares: PublicShareCloudRecord[];
 }> {
   if (!fbUser || !fbUser.emailVerified) {
-    return { profile: null, files: [], folders: [] };
+    return { profile: null, files: [], folders: [], shares: [] };
   }
 
   const profile = await ensureFirestoreUserProfile(fbUser).catch((err) => {
@@ -468,6 +497,7 @@ export async function fetchUserCloudDriveFromFirestore(
 
   const files: FileRecord[] = [];
   const folders: FolderRecord[] = [];
+  const shares: PublicShareCloudRecord[] = [];
 
   try {
     const filesQuery = query(collection(db, 'cloudFiles'), where('ownerId', '==', safeUid));
@@ -529,10 +559,344 @@ export async function fetchUserCloudDriveFromFirestore(
     console.warn('Could not query cloudFolders from Firestore:', err);
   }
 
-  // Sort newest files first
-  files.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  try {
+    const sharesQuery = query(collection(db, 'publicShares'), where('creatorId', '==', safeUid));
+    const sharesSnap = await getDocs(sharesQuery);
+    sharesSnap.forEach((docSnap) => {
+      const d = docSnap.data();
+      let parsedChunks: TelegramChunk[] = [];
+      if (typeof d.telegramChunksJson === 'string' && d.telegramChunksJson.trim()) {
+        try {
+          const arr = JSON.parse(d.telegramChunksJson);
+          if (Array.isArray(arr)) parsedChunks = arr;
+        } catch {
+          parsedChunks = [];
+        }
+      }
+      shares.push({
+        id: String(d.id || `shr_${docSnap.id}`),
+        token: String(d.token || docSnap.id),
+        fileId: String(d.fileId || ''),
+        fileName: String(d.fileName || 'Shared-File.bin'),
+        fileSizeBytes: typeof d.fileSizeBytes === 'number' ? d.fileSizeBytes : 0,
+        fileMimeType: String(d.fileMimeType || 'application/octet-stream'),
+        fileSha256: String(d.fileSha256 || ''),
+        creatorId: String(d.creatorId || safeUid),
+        creatorName: String(d.creatorName || fbUser.displayName || 'Cloud User'),
+        hasPassword: Boolean(d.hasPassword),
+        passwordHash: d.passwordHash ? String(d.passwordHash) : null,
+        expiresAt: null,
+        maxDownloads: null,
+        downloadCount: typeof d.downloadCount === 'number' ? d.downloadCount : 0,
+        throttleKbps:
+          typeof d.throttleKbps === 'number' && d.throttleKbps > 0 ? d.throttleKbps : null,
+        bandwidthCapBytes: null,
+        bandwidthUsedBytes: 0,
+        active: d.active !== false,
+        createdAt: toIsoDateString(d.createdAt),
+        lastAccessedAt: null,
+        storageDriver:
+          d.storageDriver === 'telegram' || parsedChunks.length > 0 ? 'telegram' : 'local_vault',
+        telegramChatId: d.telegramChatId ? String(d.telegramChatId) : undefined,
+        telegramChunks: parsedChunks,
+        cloudChunkCount: typeof d.cloudChunkCount === 'number' ? d.cloudChunkCount : 0,
+        previewText: d.previewText ? String(d.previewText) : undefined,
+        previewDataUrl: d.previewDataUrl ? String(d.previewDataUrl) : undefined,
+      });
+    });
+  } catch (err) {
+    console.warn('Could not query publicShares from Firestore:', err);
+  }
 
-  return { profile, files, folders };
+  // Sort newest files & shares first
+  files.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  shares.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+
+  return { profile, files, folders, shares };
+}
+
+/**
+ * Syncs a share link and its associated file download metadata (Telegram chunks, preview, passwordHash)
+ * to `/publicShares/{shareToken}` in Firestore so anyone with the public link can open & download it on any device.
+ */
+export async function syncPublicShareToFirestore(params: {
+  share: ShareLink;
+  file?: FileRecord | null;
+  passwordHash?: string | null;
+  cloudChunkCount?: number;
+}): Promise<void> {
+  const fbUser = auth.currentUser;
+  if (!fbUser || !fbUser.emailVerified) return;
+
+  await ensureFirestoreUserProfile(fbUser);
+  const safeUid = sanitizeId(fbUser.uid);
+  const safeToken = sanitizeId(params.share.token);
+  const safeShareId = sanitizeId(params.share.id || `shr_${safeToken}`);
+  const safeFileId = sanitizeId(params.share.fileId || params.file?.id || 'file_shared');
+  const path = `publicShares/${safeToken}`;
+  const ref = doc(db, 'publicShares', safeToken);
+
+  const tgChunks = params.file?.telegramChunks || [];
+  const chunksJson = JSON.stringify(tgChunks).slice(0, 130000);
+  const storageDriver: StorageDriver =
+    params.file?.storageDriver === 'telegram' || tgChunks.length > 0 ? 'telegram' : 'local_vault';
+  const safeChatId = String(params.file?.telegramChatId || '').slice(0, 64);
+  const safePreviewText = String(params.file?.previewText || '').slice(0, 28000);
+  const safePreviewDataUrl =
+    params.file?.previewDataUrl && params.file.previewDataUrl.length <= 500000
+      ? params.file.previewDataUrl
+      : '';
+  const safePasswordHash = String(params.passwordHash || '').slice(0, 128);
+  const safeThrottle =
+    typeof params.share.throttleKbps === 'number' && params.share.throttleKbps > 0
+      ? Math.min(10000000, Math.floor(params.share.throttleKbps))
+      : 0;
+  const safeCloudChunkCount = Math.max(
+    0,
+    Math.min(100, Math.floor(params.cloudChunkCount || 0))
+  );
+
+  // Try updateDoc first in case the share document already exists
+  try {
+    const updatePayload: Record<string, unknown> = {
+      fileName: truncateString(params.share.fileName || params.file?.name || 'file.bin', 255),
+      hasPassword: Boolean(params.share.hasPassword),
+      passwordHash: safePasswordHash,
+      active: params.share.active !== false,
+      downloadCount: Math.max(
+        0,
+        Math.min(100000000, Math.floor(params.share.downloadCount || 0))
+      ),
+      throttleKbps: safeThrottle,
+      storageDriver,
+      telegramChatId: safeChatId,
+      telegramChunksJson: chunksJson,
+      cloudChunkCount: safeCloudChunkCount,
+      previewText: safePreviewText,
+      previewDataUrl: safePreviewDataUrl,
+      updatedAt: serverTimestamp(),
+    };
+    await updateDoc(ref, updatePayload);
+    return;
+  } catch {
+    // Document does not exist yet; create it below
+  }
+
+  try {
+    await setDoc(ref, {
+      id: safeShareId,
+      token: safeToken,
+      fileId: safeFileId,
+      fileName: truncateString(params.share.fileName || params.file?.name || 'file.bin', 255),
+      fileSizeBytes: Math.max(
+        0,
+        Math.min(
+          54975581388800,
+          Math.floor(params.share.fileSizeBytes || params.file?.sizeBytes || 0)
+        )
+      ),
+      fileMimeType: truncateString(
+        params.share.fileMimeType || params.file?.mimeType || 'application/octet-stream',
+        128
+      ),
+      fileSha256: String(params.share.fileSha256 || params.file?.sha256 || '').slice(0, 128),
+      creatorId: safeUid,
+      creatorName: truncateString(
+        params.share.creatorName || fbUser.displayName || 'Cloud User',
+        120
+      ),
+      hasPassword: Boolean(params.share.hasPassword),
+      passwordHash: safePasswordHash,
+      active: params.share.active !== false,
+      downloadCount: Math.max(
+        0,
+        Math.min(100000000, Math.floor(params.share.downloadCount || 0))
+      ),
+      throttleKbps: safeThrottle,
+      storageDriver,
+      telegramChatId: safeChatId,
+      telegramChunksJson: chunksJson,
+      cloudChunkCount: safeCloudChunkCount,
+      previewText: safePreviewText,
+      previewDataUrl: safePreviewDataUrl,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.CREATE, path);
+  }
+}
+
+export async function deletePublicShareFromFirestore(token: string): Promise<void> {
+  const fbUser = auth.currentUser;
+  if (!fbUser || !fbUser.emailVerified) return;
+
+  const safeToken = sanitizeId(token);
+  const path = `publicShares/${safeToken}`;
+  const ref = doc(db, 'publicShares', safeToken);
+
+  try {
+    await deleteDoc(ref);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, path);
+  }
+}
+
+/**
+ * Publicly resolves a share link by its capability token from Firestore (`/publicShares/{shareToken}`).
+ * Works without authentication so anyone who receives a `/?share=dl-...` link can open and download it.
+ */
+export async function fetchPublicShareByTokenFromFirestore(
+  token: string
+): Promise<PublicShareCloudRecord | null> {
+  const safeToken = sanitizeId(token);
+  const ref = doc(db, 'publicShares', safeToken);
+
+  try {
+    const snap = await getDoc(ref);
+    if (!snap.exists()) return null;
+    const d = snap.data();
+    let parsedChunks: TelegramChunk[] = [];
+    if (typeof d.telegramChunksJson === 'string' && d.telegramChunksJson.trim()) {
+      try {
+        const arr = JSON.parse(d.telegramChunksJson);
+        if (Array.isArray(arr)) parsedChunks = arr;
+      } catch {
+        parsedChunks = [];
+      }
+    }
+
+    return {
+      id: String(d.id || `shr_${safeToken}`),
+      token: String(d.token || safeToken),
+      fileId: String(d.fileId || ''),
+      fileName: String(d.fileName || 'Shared-File.bin'),
+      fileSizeBytes: typeof d.fileSizeBytes === 'number' ? d.fileSizeBytes : 0,
+      fileMimeType: String(d.fileMimeType || 'application/octet-stream'),
+      fileSha256: String(d.fileSha256 || ''),
+      creatorId: String(d.creatorId || ''),
+      creatorName: String(d.creatorName || 'UnlimStorage User'),
+      hasPassword: Boolean(d.hasPassword),
+      passwordHash: d.passwordHash ? String(d.passwordHash) : null,
+      expiresAt: null,
+      maxDownloads: null,
+      downloadCount: typeof d.downloadCount === 'number' ? d.downloadCount : 0,
+      throttleKbps:
+        typeof d.throttleKbps === 'number' && d.throttleKbps > 0 ? d.throttleKbps : null,
+      bandwidthCapBytes: null,
+      bandwidthUsedBytes: 0,
+      active: d.active !== false,
+      createdAt: toIsoDateString(d.createdAt),
+      lastAccessedAt: null,
+      storageDriver:
+        d.storageDriver === 'telegram' || parsedChunks.length > 0 ? 'telegram' : 'local_vault',
+      telegramChatId: d.telegramChatId ? String(d.telegramChatId) : undefined,
+      telegramChunks: parsedChunks,
+      cloudChunkCount: typeof d.cloudChunkCount === 'number' ? d.cloudChunkCount : 0,
+      previewText: d.previewText ? String(d.previewText) : undefined,
+      previewDataUrl: d.previewDataUrl ? String(d.previewDataUrl) : undefined,
+    };
+  } catch {
+    return null;
+  }
+}
+
+const FIRESTORE_BINARY_CHUNK_BYTES = 650 * 1024; // 650 KB raw binary (~867 KB Base64, safely under 1 MiB Firestore doc limit)
+const MAX_FIRESTORE_DIRECT_FILE_BYTES = 15 * 1024 * 1024; // Up to 15 MB stored directly in Firestore chunks
+
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  const step = 0x8000;
+  for (let i = 0; i < bytes.length; i += step) {
+    binary += String.fromCharCode.apply(
+      null,
+      Array.from(bytes.subarray(i, Math.min(i + step, bytes.length)))
+    );
+  }
+  return btoa(binary);
+}
+
+function base64ToUint8Array(base64: string): Uint8Array {
+  const binary = atob(base64);
+  const out = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    out[i] = binary.charCodeAt(i);
+  }
+  return out;
+}
+
+/**
+ * Stores binary chunks of a shared file (up to 15 MB) directly in `/publicShareChunks/{chunkId}`
+ * so that public share links download across any device even without Telegram configured.
+ */
+export async function syncPublicShareBinaryChunksToFirestore(
+  fileId: string,
+  blob: Blob
+): Promise<number> {
+  const fbUser = auth.currentUser;
+  if (!fbUser || !fbUser.emailVerified) return 0;
+  if (!blob || blob.size === 0 || blob.size > MAX_FIRESTORE_DIRECT_FILE_BYTES) return 0;
+
+  await ensureFirestoreUserProfile(fbUser);
+  const safeUid = sanitizeId(fbUser.uid);
+  const safeFileId = sanitizeId(fileId);
+  const totalParts = Math.ceil(blob.size / FIRESTORE_BINARY_CHUNK_BYTES);
+  if (totalParts > 100) return 0;
+
+  for (let partIdx = 0; partIdx < totalParts; partIdx++) {
+    const start = partIdx * FIRESTORE_BINARY_CHUNK_BYTES;
+    const end = Math.min(blob.size, start + FIRESTORE_BINARY_CHUNK_BYTES);
+    const slice = blob.slice(start, end);
+    const arrBuf = await slice.arrayBuffer();
+    const dataBase64 = arrayBufferToBase64(arrBuf);
+    const chunkId = sanitizeId(`${safeFileId}_part_${partIdx}`);
+    const ref = doc(db, 'publicShareChunks', chunkId);
+
+    try {
+      await setDoc(ref, {
+        id: chunkId,
+        fileId: safeFileId,
+        ownerId: safeUid,
+        partIndex: partIdx,
+        sizeBytes: slice.size,
+        dataBase64,
+        createdAt: serverTimestamp(),
+      });
+    } catch {
+      return 0;
+    }
+  }
+
+  return totalParts;
+}
+
+/**
+ * Reassembles a shared file's binary Blob from `/publicShareChunks/{chunkId}` in Firestore.
+ */
+export async function fetchPublicShareBinaryChunksFromFirestore(
+  fileId: string,
+  chunkCount: number,
+  mimeType: string
+): Promise<Blob | null> {
+  if (!fileId || chunkCount <= 0) return null;
+  const safeFileId = sanitizeId(fileId);
+  const parts: Uint8Array[] = [];
+
+  try {
+    for (let partIdx = 0; partIdx < chunkCount; partIdx++) {
+      const chunkId = sanitizeId(`${safeFileId}_part_${partIdx}`);
+      const snap = await getDoc(doc(db, 'publicShareChunks', chunkId));
+      if (!snap.exists()) return null;
+      const d = snap.data();
+      if (typeof d.dataBase64 !== 'string' || !d.dataBase64) return null;
+      parts.push(base64ToUint8Array(d.dataBase64));
+    }
+    if (parts.length === 0) return null;
+    return new Blob(parts, { type: mimeType || 'application/octet-stream' });
+  } catch {
+    return null;
+  }
 }
 
 export interface CloudStorageNodeCredentials {
@@ -591,9 +955,6 @@ export async function saveStorageNodeConfigToFirestore(config: {
 }
 
 export async function fetchStorageNodeConfigFromFirestore(): Promise<CloudStorageNodeCredentials | null> {
-  const fbUser = auth.currentUser;
-  if (!fbUser) return null;
-
   try {
     const ref = doc(db, 'storageNodeConfig', 'global');
     const snap = await getDoc(ref);
@@ -611,4 +972,5 @@ export async function fetchStorageNodeConfigFromFirestore(): Promise<CloudStorag
 }
 
 export const loadStorageNodeConfigFromFirestore = fetchStorageNodeConfigFromFirestore;
+
 

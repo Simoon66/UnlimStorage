@@ -1125,7 +1125,7 @@ async function startServer() {
 
   app.post('/api/files/sync-from-cloud', requireAuth, (req, res) => {
     const user = (req as Request & { user: StoredUser }).user;
-    const { profile, files, folders, storageNodeConfig } = req.body as {
+    const { profile, files, folders, shares, storageNodeConfig } = req.body as {
       profile?: {
         planId?: StoragePlanId;
         tokenBalance?: number;
@@ -1135,6 +1135,7 @@ async function startServer() {
       } | null;
       files?: FileRecord[];
       folders?: FolderRecord[];
+      shares?: Array<ShareLink & { passwordHash?: string | null }>;
       storageNodeConfig?: {
         botToken?: string;
         chatId?: string;
@@ -1229,6 +1230,29 @@ async function startServer() {
       db.files.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
     }
 
+    if (Array.isArray(shares)) {
+      for (const cs of shares) {
+        if (!cs || !cs.token) continue;
+        const existingIdx = db.shares.findIndex((s) => s.token === cs.token);
+        if (existingIdx === -1) {
+          db.shares.unshift({
+            ...cs,
+            creatorId: user.id,
+            creatorName: user.name,
+            passwordHash: cs.passwordHash || null,
+          });
+        } else {
+          const cur = db.shares[existingIdx];
+          db.shares[existingIdx] = {
+            ...cur,
+            ...cs,
+            passwordHash: cs.passwordHash ?? cur.passwordHash ?? null,
+            downloadCount: Math.max(cur.downloadCount || 0, cs.downloadCount || 0),
+          };
+        }
+      }
+    }
+
     evaluateUserQuotaAndLocks(user);
     saveDb();
 
@@ -1237,6 +1261,7 @@ async function startServer() {
       user: sanitizeUser(user),
       folders: db.folders.filter((f) => f.ownerId === user.id),
       files: db.files.filter((f) => f.ownerId === user.id),
+      shares: db.shares.filter((s) => s.creatorId === user.id).map(sanitizeShare),
     });
   });
 
@@ -1547,6 +1572,7 @@ async function startServer() {
                   record.telegramChunks = tgResult.chunks;
                   record.telegramChatId = chatIdSnap;
                   saveDb();
+                  broadcast('file:updated', { file: record });
                 }
               })
               .catch(() => null);
@@ -1807,6 +1833,7 @@ async function startServer() {
               record.telegramChunks = tgResult.chunks;
               record.telegramChatId = chatIdSnap;
               saveDb();
+              broadcast('file:updated', { file: record });
             }
           })
           .catch(() => null);
@@ -2443,7 +2470,7 @@ async function startServer() {
       details: `Direct link created (${hasPw ? 'password-protected' : 'public'})`,
     });
 
-    res.json({ share: sanitizeShare(newShare) });
+    res.json({ share: { ...sanitizeShare(newShare), passwordHash: newShare.passwordHash } });
   });
 
   app.patch('/api/shares/:id', requireAuth, (req, res) => {
@@ -2473,7 +2500,7 @@ async function startServer() {
       }
     }
     saveDb();
-    res.json({ share: sanitizeShare(share) });
+    res.json({ share: { ...sanitizeShare(share), passwordHash: share.passwordHash } });
   });
 
   app.delete('/api/shares/:id', requireAuth, (req, res) => {
@@ -2483,9 +2510,195 @@ async function startServer() {
     res.json({ ok: true });
   });
 
+  // Helper to resolve public shares from local DB or Firestore REST API (cross-device / Cloudflare Pages support)
+  async function resolveShareFromLocalOrFirestore(token: string): Promise<StoredShareLink | null> {
+    const cleanToken = String(token || '').trim();
+    if (!cleanToken) return null;
+
+    const localShare = db.shares.find((s) => s.token === cleanToken);
+    if (localShare) return localShare;
+
+    // Fallback: query Firestore REST API for `/publicShares/{token}`
+    try {
+      const safeToken = cleanToken.replace(/[^a-zA-Z0-9_-]/g, '_');
+      const firestoreUrl = `https://firestore.googleapis.com/v1/projects/gen-lang-client-0907549657/databases/ai-studio-unlimcloudtelegr-0eb3a2e2-2d58-497e-9bc3-59da213721d0/documents/publicShares/${encodeURIComponent(
+        safeToken
+      )}`;
+      const fsRes = await fetch(firestoreUrl);
+      if (!fsRes.ok) return null;
+      const docJson = (await fsRes.json()) as {
+        fields?: Record<
+          string,
+          {
+            stringValue?: string;
+            integerValue?: string;
+            doubleValue?: number;
+            booleanValue?: boolean;
+            timestampValue?: string;
+          }
+        >;
+      };
+      const f = docJson.fields;
+      if (!f) return null;
+
+      const str = (k: string, def = '') => f[k]?.stringValue ?? def;
+      const num = (k: string, def = 0) =>
+        f[k]?.integerValue !== undefined
+          ? Number(f[k]?.integerValue)
+          : f[k]?.doubleValue !== undefined
+          ? Number(f[k]?.doubleValue)
+          : def;
+      const bool = (k: string, def = false) => f[k]?.booleanValue ?? def;
+
+      let telegramChunks: TelegramChunk[] = [];
+      const chunksRaw = str('telegramChunksJson', '');
+      if (chunksRaw) {
+        try {
+          const parsed = JSON.parse(chunksRaw);
+          if (Array.isArray(parsed)) telegramChunks = parsed;
+        } catch {
+          telegramChunks = [];
+        }
+      }
+
+      const fileId = str('fileId', `file_${safeToken}`);
+      const fileName = str('fileName', 'Shared-File.bin');
+      const fileSizeBytes = num('fileSizeBytes', 0);
+      const fileMimeType = str('fileMimeType', 'application/octet-stream');
+      const fileSha256 = str('fileSha256', '');
+      const creatorId = str('creatorId', 'usr_cloud');
+      const creatorName = str('creatorName', 'UnlimStorage User');
+      const createdAt = f.createdAt?.timestampValue || new Date().toISOString();
+
+      const restoredShare: StoredShareLink = {
+        id: str('id', `shr_${safeToken}`),
+        token: str('token', safeToken),
+        fileId,
+        fileName,
+        fileSizeBytes,
+        fileMimeType,
+        fileSha256,
+        creatorId,
+        creatorName,
+        hasPassword: bool('hasPassword', false),
+        passwordHash: str('passwordHash', '') || null,
+        expiresAt: null,
+        maxDownloads: null,
+        downloadCount: num('downloadCount', 0),
+        throttleKbps: num('throttleKbps', 0) > 0 ? num('throttleKbps', 0) : null,
+        bandwidthCapBytes: null,
+        bandwidthUsedBytes: 0,
+        active: bool('active', true),
+        createdAt,
+        lastAccessedAt: null,
+      };
+
+      db.shares.unshift(restoredShare);
+
+      // Ensure corresponding file record & Telegram chunks exist in db.files
+      const existingFile = db.files.find((fl) => fl.id === fileId);
+      if (!existingFile) {
+        db.files.unshift({
+          id: fileId,
+          name: fileName,
+          folderId: null,
+          ownerId: creatorId,
+          ownerName: creatorName,
+          sizeBytes: fileSizeBytes,
+          mimeType: fileMimeType,
+          sha256: fileSha256,
+          storageDriver:
+            str('storageDriver') === 'telegram' || telegramChunks.length > 0
+              ? 'telegram'
+              : 'local_vault',
+          telegramChatId: str('telegramChatId') || undefined,
+          telegramChunks,
+          starred: false,
+          downloadCount: restoredShare.downloadCount,
+          createdAt,
+          updatedAt: createdAt,
+          previewText: str('previewText') || undefined,
+          previewDataUrl: str('previewDataUrl') || undefined,
+          lockedOverQuota: false,
+        });
+      } else if (telegramChunks.length > 0 && existingFile.telegramChunks.length === 0) {
+        existingFile.telegramChunks = telegramChunks;
+        existingFile.storageDriver = 'telegram';
+      }
+
+      saveDb();
+      return restoredShare;
+    } catch {
+      return null;
+    }
+  }
+
+  // PUBLIC TELEGRAM CHUNK STREAMING PROXY (CORS-free chunk download for PublicSharePortal & video streaming)
+  app.get('/api/public/tg-chunk', async (req, res) => {
+    const fileId = String(req.query.fileId || '').trim();
+    const botToken = String(req.query.botToken || db.telegramConfig.botToken || '').trim();
+    if (!fileId || !botToken) {
+      res.status(400).send('Missing fileId or botToken');
+      return;
+    }
+    try {
+      const metaRes = await fetch(
+        `https://api.telegram.org/bot${botToken}/getFile?file_id=${encodeURIComponent(fileId)}`
+      );
+      const metaJson = (await metaRes.json()) as {
+        ok: boolean;
+        result?: { file_path?: string };
+      };
+      if (!metaJson.ok || !metaJson.result?.file_path) {
+        res.status(404).send('Telegram chunk file_path not found');
+        return;
+      }
+      const fileRes = await fetch(
+        `https://api.telegram.org/file/bot${botToken}/${metaJson.result.file_path}`
+      );
+      if (!fileRes.ok) {
+        res.status(fileRes.status).send('Failed to download Telegram chunk');
+        return;
+      }
+      const arrBuf = await fileRes.arrayBuffer();
+      const buf = Buffer.from(arrBuf);
+      res.setHeader('Content-Type', 'application/octet-stream');
+      res.setHeader('Content-Length', String(buf.length));
+      res.setHeader('Cache-Control', 'public, max-age=86400');
+      res.end(buf);
+    } catch {
+      res.status(500).send('Error proxying Telegram chunk');
+    }
+  });
+
+  app.get('/api/public/tg-proxy-file', async (req, res) => {
+    const filePath = String(req.query.filePath || '').trim();
+    const botToken = String(req.query.botToken || db.telegramConfig.botToken || '').trim();
+    if (!filePath || !botToken) {
+      res.status(400).send('Missing filePath or botToken');
+      return;
+    }
+    try {
+      const fileRes = await fetch(
+        `https://api.telegram.org/file/bot${botToken}/${filePath}`
+      );
+      if (!fileRes.ok) {
+        res.status(fileRes.status).send('Failed to fetch Telegram file');
+        return;
+      }
+      const arrBuf = await fileRes.arrayBuffer();
+      const buf = Buffer.from(arrBuf);
+      res.setHeader('Content-Type', 'application/octet-stream');
+      res.setHeader('Content-Length', String(buf.length));
+      res.end(buf);
+    } catch {
+      res.status(500).send('Error proxying Telegram file');
+    }
+  });
+
   // PUBLIC SHARE PORTAL ENDPOINTS
-  app.get('/api/public/share/:token', (req, res) => {
-    const share = db.shares.find((s) => s.token === req.params.token);
+  app.get('/api/public/share/:token', async (req, res) => {
+    const share = await resolveShareFromLocalOrFirestore(req.params.token);
     if (!share || !share.active) {
       res
         .status(404)
@@ -2504,6 +2717,7 @@ async function startServer() {
     res.json({
       share: {
         token: share.token,
+        fileId: share.fileId,
         fileName: share.fileName,
         fileSizeBytes: share.fileSizeBytes,
         fileMimeType: share.fileMimeType,
@@ -2521,15 +2735,29 @@ async function startServer() {
     });
   });
 
-  app.post('/api/public/share/:token/verify', (req, res) => {
-    const share = db.shares.find((s) => s.token === req.params.token);
+  app.post('/api/public/share/:token/verify', async (req, res) => {
+    const share = await resolveShareFromLocalOrFirestore(req.params.token);
     if (!share || !share.active) {
       res.status(404).json({ error: 'Share link not found or inactive' });
       return;
     }
     const { password } = req.body as { password?: string };
     if (share.hasPassword) {
-      if (!password || hashPassword(password.trim()) !== share.passwordHash) {
+      const cleanPw = (password || '').trim();
+      const shaHash = cleanPw ? hashPassword(cleanPw) : '';
+      let fnvHash = '';
+      if (cleanPw) {
+        let h = 2166136261;
+        for (let i = 0; i < cleanPw.length; i++) {
+          h ^= cleanPw.charCodeAt(i);
+          h = Math.imul(h, 16777619);
+        }
+        fnvHash = (h >>> 0).toString(16).padStart(8, '0') + '9f86d081884c7d659a2feaa0';
+      }
+      if (
+        !cleanPw ||
+        (shaHash !== share.passwordHash && fnvHash !== share.passwordHash)
+      ) {
         res.status(403).json({ error: 'Incorrect password for this protected link.' });
         return;
       }
@@ -2539,7 +2767,7 @@ async function startServer() {
   });
 
   app.get('/api/public/share/:token/download', async (req, res) => {
-    const share = db.shares.find((s) => s.token === req.params.token);
+    const share = await resolveShareFromLocalOrFirestore(req.params.token);
     if (!share || !share.active) {
       res.status(404).send('Share link not found or revoked.');
       return;
@@ -2594,7 +2822,7 @@ async function startServer() {
     let buffer: Buffer | null = null;
     if (
       file &&
-      file.storageDriver === 'telegram' &&
+      file.telegramChunks &&
       file.telegramChunks.length > 0 &&
       db.telegramConfig.botToken
     ) {
@@ -2602,6 +2830,17 @@ async function startServer() {
         file.telegramChunks,
         db.telegramConfig.botToken
       );
+      if (buffer && buffer.length > 0) {
+        try {
+          fs.writeFileSync(chunkPath, buffer);
+        } catch {
+          // ignore
+        }
+      }
+    }
+
+    if (!buffer && file?.previewText) {
+      buffer = Buffer.from(file.previewText, 'utf-8');
     }
 
     if (!buffer) {
@@ -2617,7 +2856,10 @@ async function startServer() {
     }
     saveDb();
 
-    res.setHeader('Content-Type', share.fileMimeType || 'application/octet-stream');
+    res.setHeader(
+      'Content-Type',
+      resolveEffectiveMimeType(share.fileName, share.fileMimeType)
+    );
     res.setHeader(
       'Content-Disposition',
       `attachment; filename="${encodeURIComponent(share.fileName)}"`

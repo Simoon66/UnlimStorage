@@ -283,6 +283,207 @@
         "autoSyncUploads",
         "updatedAt"
       ]
+    },
+    "PublicShareDoc": {
+      "title": "PublicShareDoc",
+      "description": "Publicly resolvable share link metadata and chunk manifest indexed by shareToken.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique share record identifier.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "token": {
+          "type": "string",
+          "description": "Public share capability token matching document ID.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "fileId": {
+          "type": "string",
+          "description": "Target shared file ID.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "fileName": {
+          "type": "string",
+          "description": "Shared file name.",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "fileSizeBytes": {
+          "type": "number",
+          "description": "Shared file size in bytes."
+        },
+        "fileMimeType": {
+          "type": "string",
+          "description": "Shared file MIME type.",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "fileSha256": {
+          "type": "string",
+          "description": "Shared file SHA-256 hash.",
+          "maxLength": 128
+        },
+        "creatorId": {
+          "type": "string",
+          "description": "Firebase Auth UID of the share creator.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "creatorName": {
+          "type": "string",
+          "description": "Display name of the share creator.",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "hasPassword": {
+          "type": "boolean",
+          "description": "Whether the share link requires a password."
+        },
+        "passwordHash": {
+          "type": "string",
+          "description": "Hashed password or empty string if public.",
+          "maxLength": 128
+        },
+        "active": {
+          "type": "boolean",
+          "description": "Whether the share link is currently active."
+        },
+        "downloadCount": {
+          "type": "number",
+          "description": "Number of downloads via this link."
+        },
+        "throttleKbps": {
+          "type": "number",
+          "description": "Bandwidth speed limit in KB/s (0 for unlimited)."
+        },
+        "storageDriver": {
+          "type": "string",
+          "description": "Storage driver backing the shared file.",
+          "enum": ["telegram", "local_vault"],
+          "maxLength": 32
+        },
+        "telegramChatId": {
+          "type": "string",
+          "description": "Telegram channel chat ID for chunk retrieval.",
+          "maxLength": 64
+        },
+        "telegramChunksJson": {
+          "type": "string",
+          "description": "Serialized JSON array of TelegramChunk descriptors.",
+          "maxLength": 131072
+        },
+        "cloudChunkCount": {
+          "type": "number",
+          "description": "Number of Firestore binary chunks stored in publicShareChunks."
+        },
+        "previewText": {
+          "type": "string",
+          "description": "Optional text preview snippet.",
+          "maxLength": 30000
+        },
+        "previewDataUrl": {
+          "type": "string",
+          "description": "Optional base64 data URL preview for small images.",
+          "maxLength": 524288
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when share was created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when share was last updated."
+        }
+      },
+      "required": [
+        "id",
+        "token",
+        "fileId",
+        "fileName",
+        "fileSizeBytes",
+        "fileMimeType",
+        "fileSha256",
+        "creatorId",
+        "creatorName",
+        "hasPassword",
+        "passwordHash",
+        "active",
+        "downloadCount",
+        "throttleKbps",
+        "storageDriver",
+        "telegramChatId",
+        "telegramChunksJson",
+        "cloudChunkCount",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "PublicShareChunk": {
+      "title": "PublicShareChunk",
+      "description": "Binary chunk stored in Firestore for cross-device public file downloads.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Chunk document ID ({fileId}_part_{partIndex}).",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "fileId": {
+          "type": "string",
+          "description": "Parent file ID.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerId": {
+          "type": "string",
+          "description": "Firebase Auth UID of the file owner.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "partIndex": {
+          "type": "number",
+          "description": "Zero-based chunk part index."
+        },
+        "sizeBytes": {
+          "type": "number",
+          "description": "Byte length of this chunk."
+        },
+        "dataBase64": {
+          "type": "string",
+          "description": "Base64-encoded binary slice.",
+          "minLength": 1,
+          "maxLength": 980000
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when chunk was stored."
+        }
+      },
+      "required": [
+        "id",
+        "fileId",
+        "ownerId",
+        "partIndex",
+        "sizeBytes",
+        "dataBase64",
+        "createdAt"
+      ]
     }
   },
   "firestore": {
@@ -309,6 +510,18 @@
         "$ref": "#/entities/StorageNodeConfig"
       },
       "description": "Stores admin-configured Telegram storage node credentials for cross-device persistence."
+    },
+    "/publicShares/{shareToken}": {
+      "schema": {
+        "$ref": "#/entities/PublicShareDoc"
+      },
+      "description": "Stores publicly resolvable share links indexed by capability shareToken."
+    },
+    "/publicShareChunks/{chunkId}": {
+      "schema": {
+        "$ref": "#/entities/PublicShareChunk"
+      },
+      "description": "Stores binary chunks in Firestore for direct cross-device public file downloads."
     }
   }
 }

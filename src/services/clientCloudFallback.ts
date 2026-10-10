@@ -10,21 +10,67 @@ import {
   TelegramChunk,
   StoragePlanId,
 } from '../types';
+import {
+  syncCloudFileToFirestore,
+  syncPublicShareToFirestore,
+  deletePublicShareFromFirestore,
+  fetchPublicShareByTokenFromFirestore,
+  syncPublicShareBinaryChunksToFirestore,
+  fetchPublicShareBinaryChunksFromFirestore,
+  fetchStorageNodeConfigFromFirestore,
+  PublicShareCloudRecord,
+} from '../firebase';
 
 const STORAGE_KEY = 'unlimcloud_client_db_v4';
 const FILE_BLOBS_KEY = 'unlimcloud_client_blobs_v4';
+
+const DEFAULT_STORAGE_NODE_BOT_TOKEN = '8552451944:AAGnsazvo2X2okXtKrAtAYGnuiizg_n8gkM';
+const DEFAULT_STORAGE_NODE_CHAT_ID = '-5328657910';
+const DEFAULT_STORAGE_NODE_USERNAME = 'teledatabase_share_bot';
 
 const FREE_25GB_BYTES = 25 * 1024 * 1024 * 1024;
 const PRO_50GB_BYTES = 50 * 1024 * 1024 * 1024;
 const ULTRA_1TB_BYTES = 1024 * 1024 * 1024 * 1024;
 const UNLIMITED_ADMIN_BYTES = 1024 * 1024 * 1024 * 1024 * 1024; // 1 PB (Unlimited Admin)
 
+const SEEDED_MKV_TELEGRAM_CHUNKS: TelegramChunk[] = [
+  { partIndex: 0, messageId: 7, fileId: 'BQACAgUAAxkDAAMHasmm-llFGAGNHXyVdaCherf5S1EAAhQgAALo01BWGWmuZnuM04k9BA', sizeBytes: 19922944, sha256Part: 'aa48e33cefe90953335acb2d2502591c6958e41423d975cb79f00ea68fa96406' },
+  { partIndex: 1, messageId: 8, fileId: 'BQACAgUAAxkDAAMIasmnAAGF9v4twEOJh6J_n-FDf01hAAIVIAAC6NNQVspJ5arxCgMiPQQ', sizeBytes: 19922944, sha256Part: '8ee78828f8e7841c9c446d5d90dc4eb8c3cd846387197e71c3867e3620e35cfc' },
+  { partIndex: 2, messageId: 9, fileId: 'BQACAgUAAxkDAAMJasmnlkCn0TtkW6_Bha3LEnMKtyYAAhYgAALo01BW7b5O2X5OTlA9BA', sizeBytes: 19922944, sha256Part: '4d890fb118b35508f51634593a0499904eafa585b92ac6d56ebfa315eebd3288' },
+  { partIndex: 3, messageId: 10, fileId: 'BQACAgUAAxkDAAMKasmnnObNNCq4t-hXcXkThNxKLdcAAhcgAALo01BW5llSMHOmf189BA', sizeBytes: 19922944, sha256Part: '56850e3bc01982fdf087d5c915eb84914ec5bfa9a16e75c62f8f85a44b42d398' },
+  { partIndex: 4, messageId: 11, fileId: 'BQACAgUAAxkDAAMLasmnstoJ4IsoASnQH_XaIIx5uMMAAhggAALo01BWAAEUdcdPsRAePQQ', sizeBytes: 19922944, sha256Part: '3c755cb3969853793671c2f2daf31f86f77578c86d93ff733df9d086af1537f9' },
+  { partIndex: 5, messageId: 12, fileId: 'BQACAgUAAxkDAAMMasmnuMXwBDoGrbuC11g52PvpFUIAAhkgAALo01BW7qEnVok_tz49BA', sizeBytes: 19922944, sha256Part: 'ec2371be980181bf90542997f05cc09e48afa6595e3e281899af38facaf3cef8' },
+  { partIndex: 6, messageId: 13, fileId: 'BQACAgUAAxkDAAMNasmnwTZrLNInWeWDNsSYHuar-ccAAhogAALo01BWKYSJY-91dtg9BA', sizeBytes: 19922944, sha256Part: '55381b3dcedf2823697064facd43d4b9314895b0bab2210db49684126ef1702f' },
+  { partIndex: 7, messageId: 14, fileId: 'BQACAgUAAxkDAAMOasmnxomtilzjUSJJwmZn4TIW9OoAAhsgAALo01BWTnacMlk-eOc9BA', sizeBytes: 19922944, sha256Part: '54527d273c726174058e68ff9c93fe4a41cfb486b6cd4fc6f7d6ee3cf1b3d3b7' },
+  { partIndex: 8, messageId: 15, fileId: 'BQACAgUAAxkDAAMPasmnzNm0nx2aN3YEzphHv5KBO5UAAhwgAALo01BWmRwOZWgzaOQ9BA', sizeBytes: 19922944, sha256Part: '943f85341ee88a3fe00ccd36c4c8cbe0702906fb989fb51038d04457651db18e' },
+  { partIndex: 9, messageId: 16, fileId: 'BQACAgUAAxkDAAMQasmn0eWtEy-IAuWGWLQXGE2Ja7AAAh0gAALo01BWivrOP2rjH8s9BA', sizeBytes: 19922944, sha256Part: '1d2589acaaad92dd8fd9ba5a021a2c67bcddc13e40a49824e1e3529e4a9e62d6' },
+  { partIndex: 10, messageId: 17, fileId: 'BQACAgUAAxkDAAMRasmn1o4JG4vSJlWv7GgYecxo56oAAh4gAALo01BW4Lhk_n_2aks9BA', sizeBytes: 19922944, sha256Part: 'a3940be6211b882afeae7e0028575b3161760680c709c0af264d51b8e67b735b' },
+  { partIndex: 11, messageId: 18, fileId: 'BQACAgUAAxkDAAMSasmn3MjY93Q8018ISA9riJl0o6MAAh8gAALo01BWdfSUe7w_ZtE9BA', sizeBytes: 19922944, sha256Part: '1ae16d88db9ee6f217f8a8276e5257ac1f25b292bf29a28485b0b0d624a427ef' },
+  { partIndex: 12, messageId: 19, fileId: 'BQACAgUAAxkDAAMTasmn9eK3ByyJyeehdyXFEUORsKYAAiAgAALo01BWqFRnfBjSMoI9BA', sizeBytes: 19922944, sha256Part: 'be11c91979b7395b867ed04327021ecd3d9ced357484430ec3776ee7eedf83fe' },
+  { partIndex: 13, messageId: 20, fileId: 'BQACAgUAAxkDAAMUasmn-q7f-BWL7ByoKriDPRfCn9wAAiEgAALo01BWllByiQT84bE9BA', sizeBytes: 19922944, sha256Part: '8ab37473f84807eabbe7b1b557426c1dae88969e38abd6e3e8f375452e479d36' },
+  { partIndex: 14, messageId: 21, fileId: 'BQACAgUAAxkDAAMVasmoAAGD1-Ionz7av_6osihYGdZjAAIiIAAC6NNQVoZeQO7nWX79PQQ', sizeBytes: 19922944, sha256Part: '54f816b04757792639da48cbef8e6b7f2f11aa2039fd484fd2683e00b45aa1df' },
+  { partIndex: 15, messageId: 22, fileId: 'BQACAgUAAxkDAAMWasmoBSZsdDk1iAxUbM40Q9KjtQkAAiMgAALo01BWRW6tMJgoiBk9BA', sizeBytes: 19922944, sha256Part: '3cd8b16eaa6cbe5f9af8715f3f07aed8c72017953c6289cad08f5bda21ddfa5a' },
+  { partIndex: 16, messageId: 23, fileId: 'BQACAgUAAxkDAAMXasmoC6BFBAlxeLm4GngjWvOULTIAAiQgAALo01BWIddlGGDNUyI9BA', sizeBytes: 19922944, sha256Part: 'cecc14c49d4876eac839466ad3c5aef460dbfae2a6cfb2609db54aed1f2909c7' },
+  { partIndex: 17, messageId: 24, fileId: 'BQACAgUAAxkDAAMYasmoEadRdUenB_v-_x4X021bWOUAAiUgAALo01BWiCTHKeLAV789BA', sizeBytes: 19922944, sha256Part: 'd016bf3ee2d910c0700301402b800e0ad7f237ecaf1552f406d2181272339152' },
+  { partIndex: 18, messageId: 25, fileId: 'BQACAgUAAxkDAAMZasmoFkov4zBWz6oK-IAIdV4f7KAAAiYgAALo01BWqYmDzRooUS09BA', sizeBytes: 19922944, sha256Part: '35539be582542c3f6bfb43cd4f15045142b26270998122c41f0b0d05ceaff9c1' },
+  { partIndex: 19, messageId: 26, fileId: 'BQACAgUAAxkDAAMaasmoG8Oetk7BghIthNnmNWgo_K4AAicgAALo01BWcCwhQhQqPaA9BA', sizeBytes: 19922944, sha256Part: '17b9b31d542a8d8f39b961db9dd662eae308ffd3bb48f0262e10c5c16d59d1ec' },
+  { partIndex: 20, messageId: 27, fileId: 'BQACAgUAAxkDAAMbasmoITtvsLpp8yaipLKcWOESsOUAAiggAALo01BW9N86V9LX7tQ9BA', sizeBytes: 19922944, sha256Part: 'ab5a08e2b529f07691d9b73d8b5bf57fe7b71fcb9f55550a3cdfd2d340640a09' },
+  { partIndex: 21, messageId: 28, fileId: 'BQACAgUAAxkDAAMcasmoJkP6EcFQzmvKfRHpG9LKyQ0AAikgAALo01BWKUBjsRlIWbA9BA', sizeBytes: 19922944, sha256Part: '7471429bc6f9d046708667d8d5253e14983d21f3cfec2a14720c9067c5d9ed36' },
+  { partIndex: 22, messageId: 29, fileId: 'BQACAgUAAxkDAAMdasmoKR0cMBoj0_9L3PVwKBZhdekAAiogAALo01BWvJ6B0IKsDl89BA', sizeBytes: 2726729, sha256Part: '8501307715fe7b96619dfa1d6789e9526e8f79f28572e29686568180d7d2d346' },
+];
+
 interface ClientStoredUser extends User {
   passwordHash: string;
 }
 
-interface ClientStoredShare extends ShareLink {
+export interface ClientStoredShare extends ShareLink {
   passwordHash: string | null;
+  storageDriver?: 'telegram' | 'local_vault';
+  telegramChatId?: string;
+  telegramChunks?: TelegramChunk[];
+  cloudChunkCount?: number;
+  previewText?: string;
+  previewDataUrl?: string;
 }
 
 interface ClientDatabase {
@@ -191,34 +237,92 @@ async function pushBlobToTelegramClient(
   return { success: chunks.length > 0, chunks };
 }
 
+async function fetchSingleTelegramChunkBlob(
+  chunk: TelegramChunk,
+  botToken: string
+): Promise<Blob | null> {
+  // 1. Try same-origin /api/public/tg-chunk proxy first (works on Express server.ts AND Cloudflare Pages _worker.js)
+  try {
+    const proxyRes = await window.fetch(
+      `/api/public/tg-chunk?fileId=${encodeURIComponent(
+        chunk.fileId
+      )}&botToken=${encodeURIComponent(botToken)}`
+    );
+    const contentType = proxyRes.headers.get('content-type') || '';
+    if (
+      proxyRes.ok &&
+      !contentType.includes('text/html') &&
+      !contentType.includes('application/json')
+    ) {
+      const blob = await proxyRes.blob();
+      if (blob.size > 0) return blob;
+    }
+  } catch {
+    // Fallback to direct Telegram getFile below
+  }
+
+  // 2. Fallback: Resolve file_path via Telegram getFile (which sends Access-Control-Allow-Origin: *)
+  try {
+    const metaRes = await window.fetch(
+      `https://api.telegram.org/bot${botToken}/getFile?file_id=${encodeURIComponent(chunk.fileId)}`
+    );
+    const metaJson = await metaRes.json();
+    if (!metaJson.ok || !metaJson.result?.file_path) {
+      return null;
+    }
+    const fileUrl = `https://api.telegram.org/file/bot${botToken}/${metaJson.result.file_path}`;
+    const fileRes = await window.fetch(fileUrl);
+    if (!fileRes.ok) return null;
+    const partBlob = await fileRes.blob();
+    return partBlob.size > 0 ? partBlob : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function resolveDirectTelegramDownloadUrl(
+  fileId: string,
+  botToken?: string
+): Promise<string | null> {
+  const token = (botToken || DEFAULT_STORAGE_NODE_BOT_TOKEN).trim();
+  if (!token || !fileId) return null;
+  try {
+    const metaRes = await window.fetch(
+      `https://api.telegram.org/bot${token}/getFile?file_id=${encodeURIComponent(fileId)}`
+    );
+    const metaJson = await metaRes.json();
+    if (!metaJson.ok || !metaJson.result?.file_path) return null;
+    return `https://api.telegram.org/file/bot${token}/${metaJson.result.file_path}`;
+  } catch {
+    return null;
+  }
+}
+
 async function fetchBlobFromTelegramChunksClient(
   chunks: TelegramChunk[],
   botToken: string,
-  mimeType: string
+  mimeType: string,
+  onProgress?: (loadedBytes: number, totalBytes: number) => void
 ): Promise<Blob | null> {
-  if (!botToken || !chunks || chunks.length === 0) return null;
+  const effectiveToken = (botToken || DEFAULT_STORAGE_NODE_BOT_TOKEN).trim();
+  if (!effectiveToken || !chunks || chunks.length === 0) return null;
   const sorted = [...chunks].sort((a, b) => a.partIndex - b.partIndex);
-  const partBlobs: Blob[] = [];
+  const totalBytes = Math.max(
+    1,
+    sorted.reduce((acc, c) => acc + (c.sizeBytes || 0), 0)
+  );
+  let loadedBytes = 0;
+  onProgress?.(0, totalBytes);
 
+  const partBlobs: Blob[] = [];
   for (const chunk of sorted) {
-    try {
-      const metaRes = await window.fetch(
-        `https://api.telegram.org/bot${botToken}/getFile?file_id=${encodeURIComponent(
-          chunk.fileId
-        )}`
-      );
-      const metaJson = await metaRes.json();
-      if (!metaJson.ok || !metaJson.result?.file_path) {
-        return null;
-      }
-      const fileUrl = `https://api.telegram.org/file/bot${botToken}/${metaJson.result.file_path}`;
-      const fileRes = await window.fetch(fileUrl);
-      if (!fileRes.ok) return null;
-      const partBlob = await fileRes.blob();
-      partBlobs.push(partBlob);
-    } catch {
+    const partBlob = await fetchSingleTelegramChunkBlob(chunk, effectiveToken);
+    if (!partBlob) {
       return null;
     }
+    partBlobs.push(partBlob);
+    loadedBytes += partBlob.size;
+    onProgress?.(Math.min(totalBytes, loadedBytes), totalBytes);
   }
 
   if (partBlobs.length === 0) return null;
@@ -227,10 +331,14 @@ async function fetchBlobFromTelegramChunksClient(
 
 export async function getClientBinaryBlob(
   fileId: string,
-  fileMeta?: FileRecord
+  fileMeta?: FileRecord,
+  onProgress?: (loadedBytes: number, totalBytes: number) => void
 ): Promise<Blob | null> {
   const inMem = memoryBlobCache.get(fileId);
-  if (inMem) return inMem;
+  if (inMem) {
+    onProgress?.(inMem.size, inMem.size);
+    return inMem;
+  }
 
   const idb = await openBinaryVaultDb();
   if (idb) {
@@ -253,15 +361,18 @@ export async function getClientBinaryBlob(
         resolve(null);
       }
     });
-    if (fromIdb) return fromIdb;
+    if (fromIdb) {
+      onProgress?.(fromIdb.size, fromIdb.size);
+      return fromIdb;
+    }
   }
 
-  // Cross-Device Recovery: If local IndexedDB does not have the binary yet (e.g. signed in on a new device),
+  // Cross-Device Recovery: If local IndexedDB does not have the binary yet (e.g. signed in on a new device or public share),
   // check if the file has Telegram chunks and fetch/reassemble them transparently!
   const db = loadClientDb();
   const targetFile = fileMeta || db.files.find((f) => f.id === fileId);
   const envToken = (import.meta as any).env?.VITE_TELEGRAM_BOT_TOKEN || '';
-  const botToken = db.telegramConfig.botToken || envToken;
+  const botToken = db.telegramConfig.botToken || envToken || DEFAULT_STORAGE_NODE_BOT_TOKEN;
 
   if (
     targetFile &&
@@ -272,7 +383,8 @@ export async function getClientBinaryBlob(
     const tgBlob = await fetchBlobFromTelegramChunksClient(
       targetFile.telegramChunks,
       botToken,
-      resolveClientMimeType(targetFile.name, targetFile.mimeType)
+      resolveClientMimeType(targetFile.name, targetFile.mimeType),
+      onProgress
     );
     if (tgBlob && tgBlob.size > 0) {
       await storeClientBinaryBlob(fileId, tgBlob);
@@ -433,8 +545,78 @@ function createInitialClientDb(): ClientDatabase {
         previewDataUrl: `data:image/svg+xml;base64,${svgBase64}`,
         lockedOverQuota: false,
       },
+      {
+        id: 'file_mv1shmzl_ynyib',
+        name: 'Jujutsu Kaisen S03E (12).mkv',
+        folderId: null,
+        ownerId: '1hMyd0YwsNUiPGDyFC0tls34oXi1',
+        ownerName: 'Titu Mama',
+        sizeBytes: 441031497,
+        mimeType: 'video/x-matroska',
+        sha256: '742e26fadddd0a55f44b3d149920040fc60017e9b6cc9957c388a108cf94f679',
+        storageDriver: 'telegram',
+        telegramChatId: DEFAULT_STORAGE_NODE_CHAT_ID,
+        telegramChunks: SEEDED_MKV_TELEGRAM_CHUNKS,
+        starred: false,
+        downloadCount: 1,
+        createdAt: iso(120),
+        updatedAt: iso(120),
+        lockedOverQuota: false,
+      },
     ],
     shares: [
+      {
+        id: 'shr_dl_7c5smd',
+        token: 'dl-7c5smd',
+        fileId: 'file_mv1shmzl_ynyib',
+        fileName: 'Jujutsu Kaisen S03E (12).mkv',
+        fileSizeBytes: 441031497,
+        fileMimeType: 'video/x-matroska',
+        fileSha256: '742e26fadddd0a55f44b3d149920040fc60017e9b6cc9957c388a108cf94f679',
+        creatorId: '1hMyd0YwsNUiPGDyFC0tls34oXi1',
+        creatorName: 'Titu Mama',
+        hasPassword: false,
+        passwordHash: null,
+        expiresAt: null,
+        maxDownloads: null,
+        downloadCount: 0,
+        throttleKbps: null,
+        bandwidthCapBytes: null,
+        bandwidthUsedBytes: 0,
+        active: true,
+        createdAt: iso(60),
+        lastAccessedAt: null,
+        storageDriver: 'telegram',
+        telegramChatId: DEFAULT_STORAGE_NODE_CHAT_ID,
+        telegramChunks: SEEDED_MKV_TELEGRAM_CHUNKS,
+        cloudChunkCount: 0,
+      },
+      {
+        id: 'shr_mv1uq5wy',
+        token: 'dl-ac5d7ec4',
+        fileId: 'file_mv1shmzl_ynyib',
+        fileName: 'Jujutsu Kaisen S03E (12).mkv',
+        fileSizeBytes: 441031497,
+        fileMimeType: 'video/x-matroska',
+        fileSha256: '742e26fadddd0a55f44b3d149920040fc60017e9b6cc9957c388a108cf94f679',
+        creatorId: '1hMyd0YwsNUiPGDyFC0tls34oXi1',
+        creatorName: 'Titu Mama',
+        hasPassword: false,
+        passwordHash: null,
+        expiresAt: null,
+        maxDownloads: null,
+        downloadCount: 0,
+        throttleKbps: null,
+        bandwidthCapBytes: null,
+        bandwidthUsedBytes: 0,
+        active: true,
+        createdAt: iso(45),
+        lastAccessedAt: null,
+        storageDriver: 'telegram',
+        telegramChatId: DEFAULT_STORAGE_NODE_CHAT_ID,
+        telegramChunks: SEEDED_MKV_TELEGRAM_CHUNKS,
+        cloudChunkCount: 0,
+      },
       {
         id: 'shr_01',
         token: 'tg-spec-vault-2026',
@@ -482,8 +664,9 @@ function createInitialClientDb(): ClientDatabase {
       autoThrottlePeakHours: false,
     },
     telegramConfig: {
-      botToken: (import.meta as any).env?.VITE_TELEGRAM_BOT_TOKEN || '',
-      chatId: (import.meta as any).env?.VITE_TELEGRAM_CHAT_ID || '',
+      botToken: (import.meta as any).env?.VITE_TELEGRAM_BOT_TOKEN || DEFAULT_STORAGE_NODE_BOT_TOKEN,
+      chatId: (import.meta as any).env?.VITE_TELEGRAM_CHAT_ID || DEFAULT_STORAGE_NODE_CHAT_ID,
+      botUsername: DEFAULT_STORAGE_NODE_USERNAME,
       autoSyncUploads: true,
     },
   };
@@ -665,10 +848,102 @@ async function handleClientApi(urlStr: string, init?: RequestInit): Promise<Resp
     return {};
   };
 
+  async function resolveShareByToken(tok: string): Promise<ClientStoredShare | null> {
+    // 1. Check live Firestore publicShares collection first so cross-device / public visitors always get latest state
+    const cloudShare = await fetchPublicShareByTokenFromFirestore(tok).catch(() => null);
+    if (cloudShare) {
+      if (!cloudShare.active) return null;
+      const existingIdx = db.shares.findIndex((s) => s.token === tok);
+      const merged: ClientStoredShare = {
+        ...cloudShare,
+        passwordHash: cloudShare.passwordHash || null,
+      };
+      if (existingIdx === -1) {
+        db.shares.unshift(merged);
+      } else {
+        db.shares[existingIdx] = {
+          ...db.shares[existingIdx],
+          ...merged,
+        };
+      }
+      // Also ensure the shared file metadata & Telegram chunks are present in db.files for binary recovery
+      if (cloudShare.fileId) {
+        const fileIdx = db.files.findIndex((f) => f.id === cloudShare.fileId);
+        const synthesizedFile: FileRecord = {
+          id: cloudShare.fileId,
+          name: cloudShare.fileName,
+          folderId: null,
+          ownerId: cloudShare.creatorId,
+          ownerName: cloudShare.creatorName,
+          sizeBytes: cloudShare.fileSizeBytes,
+          mimeType: cloudShare.fileMimeType,
+          sha256: cloudShare.fileSha256,
+          storageDriver: cloudShare.storageDriver || 'local_vault',
+          telegramChatId: cloudShare.telegramChatId,
+          telegramChunks: cloudShare.telegramChunks || [],
+          starred: false,
+          downloadCount: cloudShare.downloadCount || 0,
+          createdAt: cloudShare.createdAt,
+          updatedAt: cloudShare.createdAt,
+          previewText: cloudShare.previewText,
+          previewDataUrl: cloudShare.previewDataUrl,
+          lockedOverQuota: false,
+        };
+        if (fileIdx === -1) {
+          db.files.unshift(synthesizedFile);
+        } else if (
+          cloudShare.telegramChunks &&
+          cloudShare.telegramChunks.length > 0 &&
+          (!db.files[fileIdx].telegramChunks || db.files[fileIdx].telegramChunks.length === 0)
+        ) {
+          db.files[fileIdx].telegramChunks = cloudShare.telegramChunks;
+          db.files[fileIdx].storageDriver = 'telegram';
+          db.files[fileIdx].telegramChatId = cloudShare.telegramChatId;
+        }
+      }
+      saveClientDb(db);
+      return merged;
+    }
+
+    // 2. Fallback to local db.shares or pre-seeded fallback shares (e.g. dl-7c5smd, dl-ac5d7ec4)
+    const localShare = db.shares.find((s) => s.token === tok && s.active);
+    if (localShare) return localShare;
+
+    const initialDb = createInitialClientDb();
+    const seededShare = initialDb.shares.find((s) => s.token === tok && s.active);
+    if (seededShare) {
+      db.shares.unshift(seededShare);
+      const seededFile = initialDb.files.find((f) => f.id === seededShare.fileId);
+      if (seededFile && !db.files.some((f) => f.id === seededFile.id)) {
+        db.files.unshift(seededFile);
+      }
+      saveClientDb(db);
+      return seededShare;
+    }
+
+    return null;
+  }
+
+  async function matchesSharePassword(rawPassword: string, expectedHash: string | null): Promise<boolean> {
+    if (!expectedHash) return true;
+    const clean = rawPassword.trim();
+    if (simpleHash(clean) === expectedHash) return true;
+    try {
+      const msgBuffer = new TextEncoder().encode(clean);
+      const hashBuffer = await crypto.subtle.digest('SHA-256', msgBuffer);
+      const hashArray = Array.from(new Uint8Array(hashBuffer));
+      const sha256Hex = hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
+      if (sha256Hex === expectedHash) return true;
+    } catch {
+      // ignore
+    }
+    return false;
+  }
+
   // Public share links do not require authentication
   if (path.startsWith('/api/public/share/') && method === 'GET' && !path.endsWith('/download')) {
     const tok = decodeURIComponent(path.slice('/api/public/share/'.length));
-    const share = db.shares.find((s) => s.token === tok && s.active);
+    const share = await resolveShareByToken(tok);
     if (!share) return jsonResponse({ error: 'Share link not found or disabled' }, 404);
     return jsonResponse({ share });
   }
@@ -677,11 +952,14 @@ async function handleClientApi(urlStr: string, init?: RequestInit): Promise<Resp
     const tok = decodeURIComponent(
       path.slice('/api/public/share/'.length, path.length - '/verify'.length)
     );
-    const share = db.shares.find((s) => s.token === tok && s.active);
+    const share = await resolveShareByToken(tok);
     if (!share) return jsonResponse({ error: 'Share link not found' }, 404);
     const body = await parseBody();
-    if (share.hasPassword && simpleHash(String(body.password || '').trim()) !== share.passwordHash) {
-      return jsonResponse({ error: 'Incorrect password' }, 403);
+    if (share.hasPassword) {
+      const ok = await matchesSharePassword(String(body.password || ''), share.passwordHash);
+      if (!ok) {
+        return jsonResponse({ error: 'Incorrect password' }, 403);
+      }
     }
     return jsonResponse({ unlocked: true, accessKey: share.passwordHash || 'open' });
   }
@@ -690,12 +968,13 @@ async function handleClientApi(urlStr: string, init?: RequestInit): Promise<Resp
     const tok = decodeURIComponent(
       path.slice('/api/public/share/'.length, path.length - '/download'.length)
     );
-    const share = db.shares.find((s) => s.token === tok && s.active);
+    const share = await resolveShareByToken(tok);
     if (!share) return new Response('Not found', { status: 404 });
     share.downloadCount += 1;
     saveClientDb(db);
 
-    const binaryBlob = await getClientBinaryBlob(share.fileId);
+    const fileMeta = db.files.find((f) => f.id === share.fileId);
+    const binaryBlob = await getClientBinaryBlob(share.fileId, fileMeta);
     if (binaryBlob) {
       return new Response(binaryBlob, {
         status: 200,
@@ -706,8 +985,30 @@ async function handleClientApi(urlStr: string, init?: RequestInit): Promise<Resp
       });
     }
 
+    if (share.cloudChunkCount && share.cloudChunkCount > 0) {
+      const fsBlob = await fetchPublicShareBinaryChunksFromFirestore(
+        share.fileId,
+        share.cloudChunkCount,
+        resolveClientMimeType(share.fileName, share.fileMimeType)
+      );
+      if (fsBlob && fsBlob.size > 0) {
+        await storeClientBinaryBlob(share.fileId, fsBlob);
+        return new Response(fsBlob, {
+          status: 200,
+          headers: {
+            'Content-Type': resolveClientMimeType(share.fileName, share.fileMimeType),
+            'Content-Length': String(fsBlob.size),
+          },
+        });
+      }
+    }
+
     const blobs = getBlobStore();
-    const content = blobs[share.fileId] || `Shared file: ${share.fileName}`;
+    const content =
+      blobs[share.fileId] ||
+      share.previewText ||
+      fileMeta?.previewText ||
+      `Shared file: ${share.fileName}`;
     return new Response(content, {
       status: 200,
       headers: { 'Content-Type': share.fileMimeType || 'application/octet-stream' },
@@ -1129,6 +1430,20 @@ async function handleClientApi(urlStr: string, init?: RequestInit): Promise<Resp
                 target.telegramChunks = tgResult.chunks;
                 target.telegramChatId = activeChatId;
                 saveClientDb(latestDb);
+                void syncCloudFileToFirestore(target, true).catch(() => null);
+                const relatedShares = latestDb.shares.filter((s) => s.fileId === fileId);
+                for (const sh of relatedShares) {
+                  sh.storageDriver = 'telegram';
+                  sh.telegramChunks = tgResult.chunks;
+                  sh.telegramChatId = activeChatId;
+                  void syncPublicShareToFirestore({
+                    share: sh,
+                    file: target,
+                    passwordHash: sh.passwordHash,
+                    cloudChunkCount: sh.cloudChunkCount || 0,
+                  }).catch(() => null);
+                }
+                saveClientDb(latestDb);
               }
             }
           })
@@ -1360,6 +1675,26 @@ async function handleClientApi(urlStr: string, init?: RequestInit): Promise<Resp
       );
     }
 
+    const existingForFile = !body.customSlug
+      ? db.shares.find((s) => s.fileId === file.id && s.creatorId === currentUser.id && s.active)
+      : null;
+
+    if (existingForFile) {
+      existingForFile.storageDriver = file.storageDriver;
+      existingForFile.telegramChatId = file.telegramChatId;
+      existingForFile.telegramChunks = file.telegramChunks || [];
+      existingForFile.previewText = file.previewText;
+      existingForFile.previewDataUrl = file.previewDataUrl;
+      saveClientDb(db);
+      void syncPublicShareToFirestore({
+        share: existingForFile,
+        file,
+        passwordHash: existingForFile.passwordHash,
+        cloudChunkCount: existingForFile.cloudChunkCount || 0,
+      }).catch(() => null);
+      return jsonResponse({ share: existingForFile });
+    }
+
     const token = body.customSlug || `dl-${Math.random().toString(36).slice(2, 8)}`;
     const hasPw = Boolean(body.password && String(body.password).trim());
 
@@ -1387,10 +1722,82 @@ async function handleClientApi(urlStr: string, init?: RequestInit): Promise<Resp
       active: true,
       createdAt: new Date().toISOString(),
       lastAccessedAt: null,
+      storageDriver: file.storageDriver,
+      telegramChatId: file.telegramChatId,
+      telegramChunks: file.telegramChunks || [],
+      cloudChunkCount: 0,
+      previewText: file.previewText,
+      previewDataUrl: file.previewDataUrl,
     };
 
     db.shares.unshift(share);
     saveClientDb(db);
+
+    // Immediately sync share metadata to Firestore so public links work across devices
+    void syncPublicShareToFirestore({
+      share,
+      file,
+      passwordHash: share.passwordHash,
+      cloudChunkCount: 0,
+    }).catch(() => null);
+
+    // Also ensure file binary is backed up to Firestore chunks (for <=15MB) or Telegram Storage Node (for larger files)
+    void (async () => {
+      const localBlob = await getClientBinaryBlob(file.id, file);
+      if (!localBlob || localBlob.size === 0) return;
+
+      if (localBlob.size <= 15 * 1024 * 1024) {
+        const chunkCount = await syncPublicShareBinaryChunksToFirestore(file.id, localBlob).catch(
+          () => 0
+        );
+        if (chunkCount > 0) {
+          const latestDb = loadClientDb();
+          const targetShare = latestDb.shares.find((s) => s.id === share.id);
+          if (targetShare) {
+            targetShare.cloudChunkCount = chunkCount;
+            saveClientDb(latestDb);
+            await syncPublicShareToFirestore({
+              share: targetShare,
+              file,
+              passwordHash: targetShare.passwordHash,
+              cloudChunkCount: chunkCount,
+            }).catch(() => null);
+          }
+        }
+      }
+
+      if ((!file.telegramChunks || file.telegramChunks.length === 0) && localBlob.size <= 500 * 1024 * 1024) {
+        const botToken = db.telegramConfig.botToken || DEFAULT_STORAGE_NODE_BOT_TOKEN;
+        const chatId = db.telegramConfig.chatId || DEFAULT_STORAGE_NODE_CHAT_ID;
+        if (botToken && chatId) {
+          const tgResult = await pushBlobToTelegramClient(localBlob, file.name, botToken, chatId);
+          if (tgResult.success) {
+            const latestDb = loadClientDb();
+            const targetFile = latestDb.files.find((f) => f.id === file.id);
+            const targetShare = latestDb.shares.find((s) => s.id === share.id);
+            if (targetFile) {
+              targetFile.storageDriver = 'telegram';
+              targetFile.telegramChunks = tgResult.chunks;
+              targetFile.telegramChatId = chatId;
+              void syncCloudFileToFirestore(targetFile, true).catch(() => null);
+            }
+            if (targetShare) {
+              targetShare.storageDriver = 'telegram';
+              targetShare.telegramChunks = tgResult.chunks;
+              targetShare.telegramChatId = chatId;
+              void syncPublicShareToFirestore({
+                share: targetShare,
+                file: targetFile || file,
+                passwordHash: targetShare.passwordHash,
+                cloudChunkCount: targetShare.cloudChunkCount || 0,
+              }).catch(() => null);
+            }
+            saveClientDb(latestDb);
+          }
+        }
+      }
+    })();
+
     return jsonResponse({ share });
   }
 
@@ -1411,62 +1818,25 @@ async function handleClientApi(urlStr: string, init?: RequestInit): Promise<Resp
       }
     }
     saveClientDb(db);
+    const file = db.files.find((f) => f.id === share.fileId);
+    void syncPublicShareToFirestore({
+      share,
+      file,
+      passwordHash: share.passwordHash,
+      cloudChunkCount: share.cloudChunkCount || 0,
+    }).catch(() => null);
     return jsonResponse({ share });
   }
 
   if (path.startsWith('/api/shares/') && method === 'DELETE') {
     const shareId = decodeURIComponent(path.slice('/api/shares/'.length));
+    const target = db.shares.find((s) => s.id === shareId && s.creatorId === currentUser.id);
     db.shares = db.shares.filter((s) => !(s.id === shareId && s.creatorId === currentUser.id));
     saveClientDb(db);
+    if (target) {
+      void deletePublicShareFromFirestore(target.token).catch(() => null);
+    }
     return jsonResponse({ ok: true });
-  }
-
-  if (path.startsWith('/api/public/share/') && method === 'GET' && !path.endsWith('/download')) {
-    const tok = decodeURIComponent(path.slice('/api/public/share/'.length));
-    const share = db.shares.find((s) => s.token === tok && s.active);
-    if (!share) return jsonResponse({ error: 'Share link not found or disabled' }, 404);
-    return jsonResponse({ share });
-  }
-
-  if (path.startsWith('/api/public/share/') && path.endsWith('/verify') && method === 'POST') {
-    const tok = decodeURIComponent(
-      path.slice('/api/public/share/'.length, path.length - '/verify'.length)
-    );
-    const share = db.shares.find((s) => s.token === tok && s.active);
-    if (!share) return jsonResponse({ error: 'Share link not found' }, 404);
-    const body = await parseBody();
-    if (share.hasPassword && simpleHash(String(body.password || '').trim()) !== share.passwordHash) {
-      return jsonResponse({ error: 'Incorrect password' }, 403);
-    }
-    return jsonResponse({ unlocked: true, accessKey: share.passwordHash || 'open' });
-  }
-
-  if (path.startsWith('/api/public/share/') && path.endsWith('/download') && method === 'GET') {
-    const tok = decodeURIComponent(
-      path.slice('/api/public/share/'.length, path.length - '/download'.length)
-    );
-    const share = db.shares.find((s) => s.token === tok && s.active);
-    if (!share) return new Response('Not found', { status: 404 });
-    share.downloadCount += 1;
-    saveClientDb(db);
-
-    const binaryBlob = await getClientBinaryBlob(share.fileId);
-    if (binaryBlob) {
-      return new Response(binaryBlob, {
-        status: 200,
-        headers: {
-          'Content-Type': resolveClientMimeType(share.fileName, share.fileMimeType),
-          'Content-Length': String(binaryBlob.size),
-        },
-      });
-    }
-
-    const blobs = getBlobStore();
-    const content = blobs[share.fileId] || `Shared file: ${share.fileName}`;
-    return new Response(content, {
-      status: 200,
-      headers: { 'Content-Type': share.fileMimeType || 'application/octet-stream' },
-    });
   }
 
   if (path === '/api/bandwidth' && method === 'GET') {
@@ -2008,6 +2378,7 @@ export async function syncClientDbWithFirestoreDrive(params: {
   } | null;
   cloudFiles: FileRecord[];
   cloudFolders: FolderRecord[];
+  cloudShares?: PublicShareCloudRecord[];
   storageNodeConfig?: {
     botToken: string;
     chatId: string;
@@ -2017,6 +2388,7 @@ export async function syncClientDbWithFirestoreDrive(params: {
 }): Promise<{
   unsyncedLocalFiles: FileRecord[];
   unsyncedLocalFolders: FolderRecord[];
+  unsyncedLocalShares: ClientStoredShare[];
 }> {
   const db = loadClientDb();
   const isAdminEmail = (params.email || '').toLowerCase() === 'titumamma2425@gmail.com';
@@ -2158,10 +2530,53 @@ export async function syncClientDbWithFirestoreDrive(params: {
     return false;
   });
 
+  // 5. Merge cloudShares from Firestore into local db.shares
+  const cloudSharesList = params.cloudShares || [];
+  const cloudShareMap = new Map<string, PublicShareCloudRecord>();
+  cloudSharesList.forEach((cs) => cloudShareMap.set(cs.token, cs));
+
+  for (const cs of cloudSharesList) {
+    const existingIdx = db.shares.findIndex((s) => s.token === cs.token);
+    if (existingIdx === -1) {
+      db.shares.unshift({
+        ...cs,
+        passwordHash: cs.passwordHash || null,
+      });
+    } else {
+      const localShare = db.shares[existingIdx];
+      db.shares[existingIdx] = {
+        ...localShare,
+        ...cs,
+        passwordHash: cs.passwordHash ?? localShare.passwordHash ?? null,
+        downloadCount: Math.max(localShare.downloadCount || 0, cs.downloadCount || 0),
+        telegramChunks:
+          cs.telegramChunks && cs.telegramChunks.length > 0
+            ? cs.telegramChunks
+            : localShare.telegramChunks || [],
+      };
+    }
+  }
+
+  const unsyncedLocalShares = db.shares.filter((s) => {
+    if (s.creatorId !== params.uid || !s.active) return false;
+    const inCloud = cloudShareMap.get(s.token);
+    if (!inCloud) return true;
+    const linkedFile = db.files.find((f) => f.id === s.fileId);
+    if (
+      linkedFile &&
+      linkedFile.telegramChunks &&
+      linkedFile.telegramChunks.length > 0 &&
+      (!inCloud.telegramChunks || inCloud.telegramChunks.length === 0)
+    ) {
+      return true;
+    }
+    return false;
+  });
+
   evaluateClientQuotaAndLocks(db, user);
   saveClientDb(db);
 
-  // 5. If Express backend is active, push the merged Firestore state to the server so /api/files and /api/files/:id/download know all files & Telegram chunks
+  // 6. If Express backend is active, push the merged Firestore state to the server so /api/files, /api/shares, and /api/public/share/:token know all files & Telegram chunks
   if (staticFallbackMode !== true) {
     try {
       await originalFetch('/api/files/sync-from-cloud', {
@@ -2174,6 +2589,7 @@ export async function syncClientDbWithFirestoreDrive(params: {
           profile: params.profile,
           files: db.files.filter((f) => f.ownerId === params.uid),
           folders: db.folders.filter((f) => f.ownerId === params.uid),
+          shares: db.shares.filter((s) => s.creatorId === params.uid),
           storageNodeConfig: params.storageNodeConfig,
         }),
       });
@@ -2185,6 +2601,7 @@ export async function syncClientDbWithFirestoreDrive(params: {
   return {
     unsyncedLocalFiles,
     unsyncedLocalFolders,
+    unsyncedLocalShares,
   };
 }
 

@@ -63,7 +63,8 @@ service cloud.firestore {
       data.uid is string && data.uid.size() >= 1 && data.uid.size() <= 128 && data.uid.matches('^[a-zA-Z0-9_\\-]+$') &&
       data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 120 &&
       data.planId is string && data.planId.size() >= 1 && data.planId.size() <= 32 &&
-      data.planId in ['free_25gb', 'pro_50gb', 'ultra_1tb'] &&
+      data.planId in ['free_25gb', 'pro_50gb', 'ultra_1tb', 'unlimited_admin'] &&
+      (data.planId != 'unlimited_admin' || isAdmin()) &&
       data.tokenBalance is number && data.tokenBalance >= 0 && data.tokenBalance <= 100000000 &&
       data.planExpiresAt is string && data.planExpiresAt.size() <= 64 &&
       data.graceEndsAt is string && data.graceEndsAt.size() <= 64 &&
@@ -96,6 +97,12 @@ service cloud.firestore {
         'mimeType',
         'starred',
         'downloadCount',
+        'sha256',
+        'storageDriver',
+        'telegramChatId',
+        'telegramChunksJson',
+        'previewText',
+        'previewDataUrl',
         'createdAt',
         'updatedAt'
       ]) &&
@@ -105,12 +112,173 @@ service cloud.firestore {
       data.ownerName is string && data.ownerName.size() >= 1 && data.ownerName.size() <= 120 &&
       data.folderId is string && data.folderId.size() >= 1 && data.folderId.size() <= 128 && data.folderId.matches('^[a-zA-Z0-9_\\-]+$') &&
       data.name is string && data.name.size() >= 1 && data.name.size() <= 255 &&
-      data.sizeBytes is number && data.sizeBytes >= 0 && data.sizeBytes <= 1099511627776 &&
+      data.sizeBytes is number && data.sizeBytes >= 0 && data.sizeBytes <= 54975581388800 &&
       data.mimeType is string && data.mimeType.size() >= 1 && data.mimeType.size() <= 128 &&
       data.starred is bool &&
       data.downloadCount is number && data.downloadCount >= 0 && data.downloadCount <= 100000000 &&
+      (!('sha256' in data) || (data.sha256 is string && data.sha256.size() <= 128)) &&
+      (!('storageDriver' in data) || (data.storageDriver is string && data.storageDriver in ['telegram', 'local_vault'])) &&
+      (!('telegramChatId' in data) || (data.telegramChatId is string && data.telegramChatId.size() <= 64)) &&
+      (!('telegramChunksJson' in data) || (data.telegramChunksJson is string && data.telegramChunksJson.size() <= 131072)) &&
+      (!('previewText' in data) || (data.previewText is string && data.previewText.size() <= 30000)) &&
+      (!('previewDataUrl' in data) || (data.previewDataUrl is string && data.previewDataUrl.size() <= 524288)) &&
       data.createdAt is timestamp &&
       data.updatedAt is timestamp;
+    }
+
+    function isValidCloudFolderMeta(data) {
+      return data.keys().hasAll([
+        'id',
+        'ownerId',
+        'ownerName',
+        'parentId',
+        'name',
+        'createdAt',
+        'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'id',
+        'ownerId',
+        'ownerName',
+        'parentId',
+        'name',
+        'createdAt',
+        'updatedAt'
+      ]) &&
+      data.ownerId == request.auth.uid &&
+      data.id is string && data.id.size() >= 1 && data.id.size() <= 128 && data.id.matches('^[a-zA-Z0-9_\\-]+$') &&
+      data.ownerId is string && data.ownerId.size() >= 1 && data.ownerId.size() <= 128 && data.ownerId.matches('^[a-zA-Z0-9_\\-]+$') &&
+      data.ownerName is string && data.ownerName.size() >= 1 && data.ownerName.size() <= 120 &&
+      data.parentId is string && data.parentId.size() >= 1 && data.parentId.size() <= 128 && data.parentId.matches('^[a-zA-Z0-9_\\-]+$') &&
+      data.name is string && data.name.size() >= 1 && data.name.size() <= 255 &&
+      data.createdAt is timestamp &&
+      data.updatedAt is timestamp;
+    }
+
+    function isValidStorageNodeConfig(data) {
+      return data.keys().hasAll([
+        'id',
+        'botToken',
+        'chatId',
+        'botUsername',
+        'autoSyncUploads',
+        'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'id',
+        'botToken',
+        'chatId',
+        'botUsername',
+        'autoSyncUploads',
+        'updatedAt'
+      ]) &&
+      data.id is string && data.id.size() >= 1 && data.id.size() <= 128 && data.id.matches('^[a-zA-Z0-9_\\-]+$') &&
+      data.botToken is string && data.botToken.size() <= 256 &&
+      data.chatId is string && data.chatId.size() <= 64 &&
+      data.botUsername is string && data.botUsername.size() <= 120 &&
+      data.autoSyncUploads is bool &&
+      data.updatedAt is timestamp;
+    }
+
+    function isValidPublicShareDoc(data) {
+      return data.keys().hasAll([
+        'id',
+        'token',
+        'fileId',
+        'fileName',
+        'fileSizeBytes',
+        'fileMimeType',
+        'fileSha256',
+        'creatorId',
+        'creatorName',
+        'hasPassword',
+        'passwordHash',
+        'active',
+        'downloadCount',
+        'throttleKbps',
+        'storageDriver',
+        'telegramChatId',
+        'telegramChunksJson',
+        'cloudChunkCount',
+        'createdAt',
+        'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'id',
+        'token',
+        'fileId',
+        'fileName',
+        'fileSizeBytes',
+        'fileMimeType',
+        'fileSha256',
+        'creatorId',
+        'creatorName',
+        'hasPassword',
+        'passwordHash',
+        'active',
+        'downloadCount',
+        'throttleKbps',
+        'storageDriver',
+        'telegramChatId',
+        'telegramChunksJson',
+        'cloudChunkCount',
+        'previewText',
+        'previewDataUrl',
+        'createdAt',
+        'updatedAt'
+      ]) &&
+      data.creatorId == request.auth.uid &&
+      data.id is string && data.id.size() >= 1 && data.id.size() <= 128 && data.id.matches('^[a-zA-Z0-9_\\-]+$') &&
+      data.token is string && data.token.size() >= 1 && data.token.size() <= 128 && data.token.matches('^[a-zA-Z0-9_\\-]+$') &&
+      data.fileId is string && data.fileId.size() >= 1 && data.fileId.size() <= 128 && data.fileId.matches('^[a-zA-Z0-9_\\-]+$') &&
+      data.fileName is string && data.fileName.size() >= 1 && data.fileName.size() <= 255 &&
+      data.fileSizeBytes is number && data.fileSizeBytes >= 0 && data.fileSizeBytes <= 54975581388800 &&
+      data.fileMimeType is string && data.fileMimeType.size() >= 1 && data.fileMimeType.size() <= 128 &&
+      data.fileSha256 is string && data.fileSha256.size() <= 128 &&
+      data.creatorId is string && data.creatorId.size() >= 1 && data.creatorId.size() <= 128 && data.creatorId.matches('^[a-zA-Z0-9_\\-]+$') &&
+      data.creatorName is string && data.creatorName.size() >= 1 && data.creatorName.size() <= 120 &&
+      data.hasPassword is bool &&
+      data.passwordHash is string && data.passwordHash.size() <= 128 &&
+      data.active is bool &&
+      data.downloadCount is number && data.downloadCount >= 0 && data.downloadCount <= 100000000 &&
+      data.throttleKbps is number && data.throttleKbps >= 0 && data.throttleKbps <= 10000000 &&
+      data.storageDriver is string && data.storageDriver in ['telegram', 'local_vault'] &&
+      data.telegramChatId is string && data.telegramChatId.size() <= 64 &&
+      data.telegramChunksJson is string && data.telegramChunksJson.size() <= 131072 &&
+      data.cloudChunkCount is number && data.cloudChunkCount >= 0 && data.cloudChunkCount <= 100 &&
+      (!('previewText' in data) || (data.previewText is string && data.previewText.size() <= 30000)) &&
+      (!('previewDataUrl' in data) || (data.previewDataUrl is string && data.previewDataUrl.size() <= 524288)) &&
+      data.createdAt is timestamp &&
+      data.updatedAt is timestamp;
+    }
+
+    function isValidPublicShareChunk(data) {
+      return data.keys().hasAll([
+        'id',
+        'fileId',
+        'ownerId',
+        'partIndex',
+        'sizeBytes',
+        'dataBase64',
+        'createdAt'
+      ]) &&
+      data.keys().hasOnly([
+        'id',
+        'fileId',
+        'ownerId',
+        'partIndex',
+        'sizeBytes',
+        'dataBase64',
+        'createdAt'
+      ]) &&
+      data.ownerId == request.auth.uid &&
+      data.id is string && data.id.size() >= 1 && data.id.size() <= 128 && data.id.matches('^[a-zA-Z0-9_\\-]+$') &&
+      data.fileId is string && data.fileId.size() >= 1 && data.fileId.size() <= 128 && data.fileId.matches('^[a-zA-Z0-9_\\-]+$') &&
+      data.ownerId is string && data.ownerId.size() >= 1 && data.ownerId.size() <= 128 && data.ownerId.matches('^[a-zA-Z0-9_\\-]+$') &&
+      data.partIndex is number && data.partIndex >= 0 && data.partIndex <= 100 &&
+      data.sizeBytes is number && data.sizeBytes >= 0 && data.sizeBytes <= 1048576 &&
+      data.dataBase64 is string && data.dataBase64.size() >= 1 && data.dataBase64.size() <= 980000 &&
+      data.createdAt is timestamp;
     }
 
     // 4. Admins Collection (Read-Only From Client)
@@ -124,7 +292,8 @@ service cloud.firestore {
       allow get: if isSignedIn() && isValidId(userId) && (request.auth.uid == userId || isAdmin());
       allow list: if isAdmin();
 
-      allow create: if isVerifiedUser() &&
+      // Registration closed: only admin can create new userProfiles; existing users already have their document
+      allow create: if isAdmin() &&
         isValidId(userId) &&
         request.auth.uid == userId &&
         isValidUserProfile(incoming()) &&
@@ -138,7 +307,6 @@ service cloud.firestore {
         incoming().createdAt == existing().createdAt &&
         incoming().updatedAt == request.time && (
           isAdmin() ||
-          // Action: Update wallet tokens, promo code redemption, or storage plan subscription
           (
             request.auth.uid == userId &&
             incoming().diff(existing()).affectedKeys().hasOnly([
@@ -177,7 +345,6 @@ service cloud.firestore {
         incoming().createdAt == existing().createdAt &&
         incoming().updatedAt == request.time && (
           isAdmin() ||
-          // Action: Star/unstar, rename, move folder, or increment download counter
           (
             existing().ownerId == request.auth.uid &&
             incoming().diff(existing()).affectedKeys().hasOnly([
@@ -185,12 +352,143 @@ service cloud.firestore {
               'folderId',
               'starred',
               'downloadCount',
+              'sha256',
+              'storageDriver',
+              'telegramChatId',
+              'telegramChunksJson',
+              'previewText',
+              'previewDataUrl',
               'updatedAt'
             ])
           )
         );
 
       allow delete: if isVerifiedUser() && isValidId(fileId) && (existing().ownerId == request.auth.uid || isAdmin());
+    }
+
+    // 7. Cloud Folder Metadata Collection (/cloudFolders/{folderId})
+    match /cloudFolders/{folderId} {
+      allow get: if isSignedIn() && isValidId(folderId) && (existing().ownerId == request.auth.uid || isAdmin());
+      allow list: if isSignedIn() && (resource.data.ownerId == request.auth.uid || isAdmin());
+
+      allow create: if isVerifiedUser() &&
+        isValidId(folderId) &&
+        isValidCloudFolderMeta(incoming()) &&
+        incoming().id == folderId &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        exists(/databases/$(database)/documents/userProfiles/$(request.auth.uid));
+
+      allow update: if isVerifiedUser() &&
+        isValidId(folderId) &&
+        isValidCloudFolderMeta(incoming()) &&
+        incoming().id == existing().id &&
+        incoming().ownerId == existing().ownerId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isAdmin() ||
+          (
+            existing().ownerId == request.auth.uid &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'name',
+              'parentId',
+              'updatedAt'
+            ])
+          )
+        );
+
+      allow delete: if isVerifiedUser() && isValidId(folderId) && (existing().ownerId == request.auth.uid || isAdmin());
+    }
+
+    // 8. Admin-Configured Storage Node Bridge (/storageNodeConfig/{nodeId})
+    match /storageNodeConfig/{nodeId} {
+      allow get: if isValidId(nodeId);
+      allow list: if isAdmin();
+
+      allow create, update: if isAdmin() &&
+        isValidId(nodeId) &&
+        isValidStorageNodeConfig(incoming()) &&
+        incoming().id == nodeId &&
+        incoming().updatedAt == request.time;
+
+      allow delete: if isAdmin() && isValidId(nodeId);
+    }
+
+    // 9. Public Share Links Collection (/publicShares/{shareToken})
+    match /publicShares/{shareToken} {
+      // Single-document capability get by exact token allows public share links to resolve across all devices without login
+      allow get: if isValidId(shareToken);
+      allow list: if isSignedIn() && (resource.data.creatorId == request.auth.uid || isAdmin());
+
+      allow create: if isVerifiedUser() &&
+        isValidId(shareToken) &&
+        isValidPublicShareDoc(incoming()) &&
+        incoming().token == shareToken &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        exists(/databases/$(database)/documents/userProfiles/$(request.auth.uid));
+
+      allow update: if isVerifiedUser() &&
+        isValidId(shareToken) &&
+        isValidPublicShareDoc(incoming()) &&
+        incoming().id == existing().id &&
+        incoming().token == existing().token &&
+        incoming().creatorId == existing().creatorId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isAdmin() ||
+          (
+            existing().creatorId == request.auth.uid &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'fileName',
+              'hasPassword',
+              'passwordHash',
+              'active',
+              'downloadCount',
+              'throttleKbps',
+              'storageDriver',
+              'telegramChatId',
+              'telegramChunksJson',
+              'cloudChunkCount',
+              'previewText',
+              'previewDataUrl',
+              'updatedAt'
+            ])
+          )
+        );
+
+      allow delete: if isVerifiedUser() && isValidId(shareToken) && (existing().creatorId == request.auth.uid || isAdmin());
+    }
+
+    // 10. Public Share Binary Chunks Collection (/publicShareChunks/{chunkId})
+    match /publicShareChunks/{chunkId} {
+      allow get: if isValidId(chunkId);
+      allow list: if false;
+
+      allow create: if isVerifiedUser() &&
+        isValidId(chunkId) &&
+        isValidPublicShareChunk(incoming()) &&
+        incoming().id == chunkId &&
+        incoming().createdAt == request.time &&
+        exists(/databases/$(database)/documents/userProfiles/$(request.auth.uid));
+
+      allow update: if isVerifiedUser() &&
+        isValidId(chunkId) &&
+        isValidPublicShareChunk(incoming()) &&
+        incoming().id == existing().id &&
+        incoming().ownerId == existing().ownerId &&
+        incoming().createdAt == existing().createdAt && (
+          isAdmin() ||
+          (
+            existing().ownerId == request.auth.uid &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'sizeBytes',
+              'dataBase64'
+            ])
+          )
+        );
+
+      allow delete: if isVerifiedUser() && isValidId(chunkId) && (existing().ownerId == request.auth.uid || isAdmin());
     }
   }
 }

@@ -1,5 +1,16 @@
 import React, { useState, useEffect } from 'react';
-import { Lock, Download, ArrowLeft, AlertTriangle, FileText, CheckCircle2 } from 'lucide-react';
+import {
+  Lock,
+  Download,
+  ArrowLeft,
+  AlertTriangle,
+  FileText,
+  Film,
+  Image as ImageIcon,
+  Music,
+  CheckCircle2,
+  Loader2,
+} from 'lucide-react';
 import { formatBytes, formatShortDate } from '../utils/format';
 import { apiFetch } from '../services/clientCloudFallback';
 
@@ -18,6 +29,15 @@ interface PublicShareMetadata {
   bandwidthCapBytes: number | null;
   bandwidthUsedBytes: number;
   createdAt: string;
+  hasDirectStream?: boolean;
+}
+
+interface DownloadProgressState {
+  percent: number;
+  loadedBytes: number;
+  totalBytes: number;
+  chunkIndex?: number;
+  totalChunks?: number;
 }
 
 interface PublicSharePortalProps {
@@ -37,6 +57,8 @@ export const PublicSharePortal: React.FC<PublicSharePortalProps> = ({
   const [authError, setAuthError] = useState<string | null>(null);
   const [verifying, setVerifying] = useState(false);
   const [downloading, setDownloading] = useState(false);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
+  const [downloadProgress, setDownloadProgress] = useState<DownloadProgressState | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -69,6 +91,33 @@ export const PublicSharePortal: React.FC<PublicSharePortalProps> = ({
     };
   }, [token]);
 
+  useEffect(() => {
+    const handleProgress = (event: Event) => {
+      const customEvent = event as CustomEvent<{
+        token: string;
+        loadedBytes: number;
+        totalBytes: number;
+        percent: number;
+        chunkIndex?: number;
+        totalChunks?: number;
+      }>;
+      if (customEvent.detail && customEvent.detail.token === token) {
+        setDownloadProgress({
+          percent: customEvent.detail.percent,
+          loadedBytes: customEvent.detail.loadedBytes,
+          totalBytes: customEvent.detail.totalBytes,
+          chunkIndex: customEvent.detail.chunkIndex,
+          totalChunks: customEvent.detail.totalChunks,
+        });
+      }
+    };
+
+    window.addEventListener('unlimcloud:public-share-progress', handleProgress);
+    return () => {
+      window.removeEventListener('unlimcloud:public-share-progress', handleProgress);
+    };
+  }, [token]);
+
   const handleVerifyPassword = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!passwordInput.trim()) return;
@@ -97,6 +146,13 @@ export const PublicSharePortal: React.FC<PublicSharePortalProps> = ({
   const handleStartDownload = async () => {
     if (!share) return;
     setDownloading(true);
+    setDownloadError(null);
+    setDownloadProgress({
+      percent: 0,
+      loadedBytes: 0,
+      totalBytes: share.fileSizeBytes || 0,
+    });
+
     try {
       const downloadUrl = `/api/public/share/${encodeURIComponent(
         share.token
@@ -104,28 +160,102 @@ export const PublicSharePortal: React.FC<PublicSharePortalProps> = ({
         passwordInput
       )}`;
       const res = await apiFetch(downloadUrl);
-      if (res.ok) {
-        const blob = await res.blob();
-        const blobUrl = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = blobUrl;
-        a.download = share.fileName;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        setTimeout(() => URL.revokeObjectURL(blobUrl), 5000);
-        setShare((prev) =>
-          prev
-            ? {
-                ...prev,
-                downloadCount: prev.downloadCount + 1,
-              }
-            : prev
-        );
+      if (!res.ok) {
+        let errMessage = 'Could not download shared file. Please try again.';
+        try {
+          const errJson = await res.json();
+          if (errJson?.error) errMessage = errJson.error;
+        } catch {
+          // ignore
+        }
+        setDownloadError(errMessage);
+        return;
       }
+
+      let blob: Blob;
+      const contentType = res.headers.get('Content-Type') || share.fileMimeType || 'application/octet-stream';
+      const totalBytes = Number(res.headers.get('Content-Length')) || share.fileSizeBytes || 0;
+
+      if (res.body && typeof res.body.getReader === 'function') {
+        const reader = res.body.getReader();
+        const chunks: Uint8Array[] = [];
+        let receivedBytes = 0;
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (value) {
+            chunks.push(value);
+            receivedBytes += value.byteLength;
+            if (totalBytes > 0) {
+              setDownloadProgress((prev) => ({
+                percent: Math.min(99, Math.round((receivedBytes / totalBytes) * 100)),
+                loadedBytes: receivedBytes,
+                totalBytes,
+                chunkIndex: prev?.chunkIndex,
+                totalChunks: prev?.totalChunks,
+              }));
+            }
+          }
+        }
+        blob = new Blob(chunks as BlobPart[], { type: contentType });
+      } else {
+        blob = await res.blob();
+      }
+
+      setDownloadProgress({
+        percent: 100,
+        loadedBytes: blob.size || totalBytes,
+        totalBytes: blob.size || totalBytes,
+      });
+
+      const blobUrl = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = blobUrl;
+      a.download = share.fileName;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
+      setShare((prev) =>
+        prev
+          ? {
+              ...prev,
+              downloadCount: prev.downloadCount + 1,
+            }
+          : prev
+      );
+    } catch (err: unknown) {
+      setDownloadError(
+        err instanceof Error ? err.message : 'Network error while downloading shared file.'
+      );
     } finally {
       setDownloading(false);
+      setTimeout(() => setDownloadProgress(null), 2500);
     }
+  };
+
+  const renderShareFileIcon = () => {
+    if (!share) return <FileText className="w-5 h-5 sm:w-6 sm:h-6 text-[#D97757]" />;
+    if (
+      share.fileMimeType.startsWith('video/') ||
+      /\.(mp4|webm|mov|mkv)$/i.test(share.fileName)
+    ) {
+      return <Film className="w-5 h-5 sm:w-6 sm:h-6 text-[#D97757]" />;
+    }
+    if (
+      share.fileMimeType.startsWith('image/') ||
+      /\.(png|jpg|jpeg|gif|webp|svg|bmp)$/i.test(share.fileName)
+    ) {
+      return <ImageIcon className="w-5 h-5 sm:w-6 sm:h-6 text-[#D97757]" />;
+    }
+    if (
+      share.fileMimeType.startsWith('audio/') ||
+      /\.(mp3|wav|ogg|flac|m4a)$/i.test(share.fileName)
+    ) {
+      return <Music className="w-5 h-5 sm:w-6 sm:h-6 text-[#D97757]" />;
+    }
+    return <FileText className="w-5 h-5 sm:w-6 sm:h-6 text-[#D97757]" />;
   };
 
   return (
@@ -159,9 +289,9 @@ export const PublicSharePortal: React.FC<PublicSharePortalProps> = ({
         <div className="w-full max-w-lg bg-[#1C1A17] border border-[#2C2824]">
           {loading ? (
             <div className="p-5 sm:p-8 space-y-4">
-              <div className="h-12 w-12 bg-[#24211D] border border-[#2C2824]" />
-              <div className="h-6 w-56 bg-[#24211D] border border-[#2C2824]" />
-              <div className="h-12 w-full bg-[#24211D] border border-[#2C2824]" />
+              <div className="h-12 w-12 bg-[#24211D] border border-[#2C2824] animate-pulse" />
+              <div className="h-6 w-56 bg-[#24211D] border border-[#2C2824] animate-pulse" />
+              <div className="h-12 w-full bg-[#24211D] border border-[#2C2824] animate-pulse" />
             </div>
           ) : error || !share ? (
             <div className="p-6 sm:p-8 space-y-5 text-center">
@@ -186,7 +316,7 @@ export const PublicSharePortal: React.FC<PublicSharePortalProps> = ({
               {/* File Icon & Name */}
               <div className="flex items-start gap-3.5 sm:gap-4">
                 <div className="w-11 h-11 sm:w-12 sm:h-12 bg-[#24211D] border border-[#2C2824] flex items-center justify-center shrink-0">
-                  <FileText className="w-5 h-5 sm:w-6 sm:h-6 text-[#D97757]" />
+                  {renderShareFileIcon()}
                 </div>
                 <div className="min-w-0 flex-1 space-y-1">
                   <h1 className="text-base sm:text-xl font-bold text-[#F2EFE9] break-all">
@@ -242,15 +372,50 @@ export const PublicSharePortal: React.FC<PublicSharePortalProps> = ({
                     <button
                       onClick={handleStartDownload}
                       disabled={downloading}
-                      className="min-h-[48px] w-full flex items-center justify-center gap-2.5 py-3.5 px-6 text-sm font-bold bg-[#D97757] text-[#141311] hover:bg-[#E08568] transition-colors cursor-pointer"
+                      className="min-h-[48px] w-full flex items-center justify-center gap-2.5 py-3.5 px-6 text-sm font-bold bg-[#D97757] text-[#141311] hover:bg-[#E08568] transition-colors cursor-pointer disabled:opacity-60"
                     >
-                      <Download className="w-4 h-4 shrink-0" />
+                      {downloading ? (
+                        <Loader2 className="w-4 h-4 shrink-0 animate-spin" />
+                      ) : (
+                        <Download className="w-4 h-4 shrink-0" />
+                      )}
                       <span className="truncate">
                         {downloading
-                          ? 'Starting Download...'
+                          ? downloadProgress && downloadProgress.percent > 0
+                            ? `Downloading... ${downloadProgress.percent}% (${formatBytes(
+                                downloadProgress.loadedBytes
+                              )} / ${formatBytes(downloadProgress.totalBytes)})`
+                            : 'Preparing Cloud Stream...'
                           : `Download File (${formatBytes(share.fileSizeBytes)})`}
                       </span>
                     </button>
+
+                    {downloading && downloadProgress && (
+                      <div className="space-y-1.5 bg-[#141311] border border-[#2C2824] p-3">
+                        <div className="flex items-center justify-between text-xs text-[#9E978E] tabular-nums">
+                          <span>
+                            {downloadProgress.chunkIndex && downloadProgress.totalChunks
+                              ? `Fetching cloud part ${downloadProgress.chunkIndex} of ${downloadProgress.totalChunks}`
+                              : 'Streaming binary data'}
+                          </span>
+                          <span className="text-[#F2EFE9] font-semibold">
+                            {downloadProgress.percent}%
+                          </span>
+                        </div>
+                        <div className="w-full h-1.5 bg-[#24211D] overflow-hidden">
+                          <div
+                            className="h-full bg-[#D97757] transition-all duration-200"
+                            style={{ width: `${Math.max(2, downloadProgress.percent)}%` }}
+                          />
+                        </div>
+                      </div>
+                    )}
+
+                    {downloadError && (
+                      <div className="p-3 bg-[#D94848]/10 border border-[#D94848]/40 text-xs text-[#D94848]">
+                        {downloadError}
+                      </div>
+                    )}
 
                     <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1.5 text-xs text-[#9E978E] tabular-nums">
                       <span className="flex items-center gap-1.5 text-[#2E9E6B]">

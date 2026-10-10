@@ -64,6 +64,9 @@ import {
   fetchUserCloudDriveFromFirestore,
   fetchStorageNodeConfigFromFirestore,
   saveStorageNodeConfigToFirestore,
+  syncPublicShareToFirestore,
+  deletePublicShareFromFirestore,
+  syncPublicShareBinaryChunksToFirestore,
   FirebaseUser,
 } from './firebase';
 import { PublicSharePortal } from './components/PublicSharePortal';
@@ -383,7 +386,7 @@ export default function App() {
           fetchStorageNodeConfigFromFirestore(),
         ]);
 
-        const { unsyncedLocalFiles, unsyncedLocalFolders } =
+        const { unsyncedLocalFiles, unsyncedLocalFolders, unsyncedLocalShares } =
           await syncClientDbWithFirestoreDrive({
             uid: firebaseUser.uid,
             email: firebaseUser.email || undefined,
@@ -392,6 +395,7 @@ export default function App() {
             profile: cloudDrive.profile,
             cloudFiles: cloudDrive.files,
             cloudFolders: cloudDrive.folders,
+            cloudShares: cloudDrive.shares,
             storageNodeConfig: nodeConfig,
           });
 
@@ -400,6 +404,9 @@ export default function App() {
         }
         for (const fl of unsyncedLocalFolders) {
           syncCloudFolderToFirestore(fl).catch(() => null);
+        }
+        for (const sh of unsyncedLocalShares) {
+          syncPublicShareToFirestore(sh.share, sh.file, sh.creatorName).catch(() => null);
         }
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : '';
@@ -426,20 +433,45 @@ export default function App() {
           : Promise.resolve(null),
       ]);
 
+      let loadedUser: User | null = null;
+      let loadedFiles: FileRecord[] = [];
+      let loadedShares: ShareLink[] = [];
+
       if (meRes.ok) {
         const meData = await meRes.json();
+        loadedUser = meData.user || null;
         setCurrentUser(meData.user);
       }
       if (filesRes.ok) {
         const fData = await filesRes.json();
+        loadedFiles = fData.files || [];
         setFolders(fData.folders || []);
-        setFiles(fData.files || []);
+        setFiles(loadedFiles);
         setTransfers(fData.transfers || []);
       }
       if (sharesRes.ok) {
         const sData = await sharesRes.json();
-        setShares(sData.shares || []);
+        loadedShares = sData.shares || [];
+        setShares(loadedShares);
       }
+
+      // Ensure all files with Telegram chunks and all shares are synced to Firestore for cross-device public access
+      const creatorName =
+        loadedUser?.name || firebaseUser.displayName || 'UnlimStorage User';
+      for (const f of loadedFiles) {
+        if (f.ownerId === firebaseUser.uid && f.telegramChunks && f.telegramChunks.length > 0) {
+          syncCloudFileToFirestore(f).catch(() => null);
+        }
+      }
+      for (const s of loadedShares) {
+        if (s.creatorId === firebaseUser.uid) {
+          const matchingFile = loadedFiles.find((f) => f.id === s.fileId && !f.trashed);
+          if (matchingFile) {
+            syncPublicShareToFirestore(s, matchingFile, creatorName).catch(() => null);
+          }
+        }
+      }
+
       if (bwRes.ok) {
         const bData = await bwRes.json();
         setBandwidthSettings(bData.settings);
@@ -530,6 +562,28 @@ export default function App() {
               if (notification) {
                 pushNotification(notification);
               }
+            } else if (msg.event === 'file:updated' && msg.payload) {
+              const updatedFile = msg.payload as FileRecord;
+              setFiles((prev) => {
+                const idx = prev.findIndex((f) => f.id === updatedFile.id);
+                if (idx === -1) return prev;
+                const copy = [...prev];
+                copy[idx] = updatedFile;
+                return copy;
+              });
+              syncCloudFileToFirestore(updatedFile).catch(() => null);
+              setShares((prevShares) => {
+                for (const s of prevShares) {
+                  if (s.fileId === updatedFile.id) {
+                    syncPublicShareToFirestore(
+                      s,
+                      updatedFile,
+                      'UnlimStorage User'
+                    ).catch(() => null);
+                  }
+                }
+                return prevShares;
+              });
             }
           } catch {
             // ignore
@@ -970,10 +1024,57 @@ export default function App() {
       if (!res.ok) {
         throw new Error(data.error || 'Failed to create share link');
       }
-      setShares((prev) => [data.share, ...prev]);
-      return data.share;
+      const createdShare = data.share as ShareLink;
+      setShares((prev) => [createdShare, ...prev.filter((s) => s.id !== createdShare.id)]);
+
+      const targetFile =
+        files.find((f) => f.id === payload.fileId) ||
+        (shareModalFile?.id === payload.fileId ? shareModalFile : null);
+      if (targetFile) {
+        await syncPublicShareToFirestore(
+          createdShare,
+          targetFile,
+          currentUser?.name || firebaseUser?.displayName || 'UnlimStorage User'
+        ).catch(() => null);
+
+        if (
+          targetFile.sizeBytes > 0 &&
+          targetFile.sizeBytes <= 25 * 1024 * 1024 &&
+          (!targetFile.telegramChunks || targetFile.telegramChunks.length === 0) &&
+          !targetFile.telegramFileId
+        ) {
+          getClientBinaryBlob(targetFile.id)
+            .then(async (localBlob) => {
+              if (localBlob && localBlob.size > 64) {
+                await syncPublicShareBinaryChunksToFirestore(
+                  createdShare.token,
+                  createdShare.creatorId,
+                  localBlob
+                );
+              } else {
+                const dlRes = await apiFetch(
+                  `/api/files/${encodeURIComponent(targetFile.id)}/download`,
+                  { headers: authHeaders() }
+                );
+                if (dlRes.ok) {
+                  const serverBlob = await dlRes.blob();
+                  if (serverBlob.size > 64) {
+                    await syncPublicShareBinaryChunksToFirestore(
+                      createdShare.token,
+                      createdShare.creatorId,
+                      serverBlob
+                    );
+                  }
+                }
+              }
+            })
+            .catch(() => null);
+        }
+      }
+
+      return createdShare;
     },
-    [authHeaders]
+    [authHeaders, currentUser?.name, files, firebaseUser?.displayName, shareModalFile]
   );
 
   const handleUpdateShare = useCallback(
@@ -992,10 +1093,21 @@ export default function App() {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Failed to update share settings');
-      setShares((prev) => prev.map((s) => (s.id === shareId ? data.share : s)));
-      return data.share;
+      const updatedShare = data.share as ShareLink;
+      setShares((prev) => prev.map((s) => (s.id === shareId ? updatedShare : s)));
+
+      const targetFile = files.find((f) => f.id === updatedShare.fileId);
+      if (targetFile) {
+        await syncPublicShareToFirestore(
+          updatedShare,
+          targetFile,
+          currentUser?.name || firebaseUser?.displayName || 'UnlimStorage User'
+        ).catch(() => null);
+      }
+
+      return updatedShare;
     },
-    [authHeaders]
+    [authHeaders, currentUser?.name, files, firebaseUser?.displayName]
   );
 
   const handleToggleShareActive = async (share: ShareLink) => {
@@ -1010,12 +1122,16 @@ export default function App() {
   };
 
   const handleDeleteShare = async (shareId: string) => {
+    const targetShare = shares.find((s) => s.id === shareId);
     const res = await apiFetch(`/api/shares/${encodeURIComponent(shareId)}`, {
       method: 'DELETE',
       headers: authHeaders(),
     });
     if (res.ok) {
       setShares((prev) => prev.filter((s) => s.id !== shareId));
+      if (targetShare?.token) {
+        await deletePublicShareFromFirestore(targetShare.token).catch(() => null);
+      }
     }
   };
 
