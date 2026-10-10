@@ -69,7 +69,7 @@
     },
     "CloudFileMeta": {
       "title": "CloudFileMeta",
-      "description": "Per-user cloud file metadata isolated by ownerId.",
+      "description": "Per-user cloud file metadata and encrypted Telegram chunk manifest isolated by ownerId.",
       "type": "object",
       "properties": {
         "id": {
@@ -123,6 +123,37 @@
           "type": "number",
           "description": "Total number of downloads."
         },
+        "sha256": {
+          "type": "string",
+          "description": "SHA-256 integrity hash of the file.",
+          "maxLength": 128
+        },
+        "storageDriver": {
+          "type": "string",
+          "description": "Storage driver backing the file.",
+          "enum": ["telegram", "local_vault"],
+          "maxLength": 32
+        },
+        "telegramChatId": {
+          "type": "string",
+          "description": "Channel chat ID for Telegram chunk storage.",
+          "maxLength": 64
+        },
+        "telegramChunksJson": {
+          "type": "string",
+          "description": "Serialized JSON array of TelegramChunk descriptors.",
+          "maxLength": 131072
+        },
+        "previewText": {
+          "type": "string",
+          "description": "Optional text preview snippet.",
+          "maxLength": 30000
+        },
+        "previewDataUrl": {
+          "type": "string",
+          "description": "Optional base64 data URL preview for small images.",
+          "maxLength": 524288
+        },
         "createdAt": {
           "type": "string",
           "format": "date-time",
@@ -147,6 +178,111 @@
         "createdAt",
         "updatedAt"
       ]
+    },
+    "CloudFolderMeta": {
+      "title": "CloudFolderMeta",
+      "description": "Per-user cloud folder metadata synced across devices.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique folder identifier.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerId": {
+          "type": "string",
+          "description": "Firebase Auth UID of the folder owner.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerName": {
+          "type": "string",
+          "description": "Display name of the folder owner.",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "parentId": {
+          "type": "string",
+          "description": "Parent folder ID or 'root'.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "name": {
+          "type": "string",
+          "description": "Folder name.",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when folder was created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when folder was updated."
+        }
+      },
+      "required": [
+        "id",
+        "ownerId",
+        "ownerName",
+        "parentId",
+        "name",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "StorageNodeConfig": {
+      "title": "StorageNodeConfig",
+      "description": "Admin-configured Telegram storage bridge credentials for cross-device binary persistence.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Configuration document identifier ('global').",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "botToken": {
+          "type": "string",
+          "description": "Telegram Bot HTTP API token.",
+          "maxLength": 256
+        },
+        "chatId": {
+          "type": "string",
+          "description": "Private Telegram channel or group chat ID.",
+          "maxLength": 64
+        },
+        "botUsername": {
+          "type": "string",
+          "description": "Bot username returned by Telegram getMe.",
+          "maxLength": 120
+        },
+        "autoSyncUploads": {
+          "type": "boolean",
+          "description": "Whether uploads automatically sync to Telegram."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when storage node config was updated."
+        }
+      },
+      "required": [
+        "id",
+        "botToken",
+        "chatId",
+        "botUsername",
+        "autoSyncUploads",
+        "updatedAt"
+      ]
     }
   },
   "firestore": {
@@ -160,7 +296,19 @@
       "schema": {
         "$ref": "#/entities/CloudFileMeta"
       },
-      "description": "Stores per-user cloud file metadata strictly isolated to the owning user."
+      "description": "Stores per-user cloud file metadata and Telegram chunk manifest strictly isolated to the owning user."
+    },
+    "/cloudFolders/{folderId}": {
+      "schema": {
+        "$ref": "#/entities/CloudFolderMeta"
+      },
+      "description": "Stores per-user cloud folder hierarchy strictly isolated to the owning user."
+    },
+    "/storageNodeConfig/{nodeId}": {
+      "schema": {
+        "$ref": "#/entities/StorageNodeConfig"
+      },
+      "description": "Stores admin-configured Telegram storage node credentials for cross-device persistence."
     }
   }
 }

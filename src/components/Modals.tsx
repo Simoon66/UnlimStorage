@@ -544,7 +544,7 @@ export const FileDetailDrawer: React.FC<FileDetailDrawerProps> = ({
     let cancelled = false;
     setVideoPlaybackError(null);
 
-    getClientBinaryBlob(file.id)
+    getClientBinaryBlob(file.id, file)
       .then((blob) => {
         if (cancelled || !blob) return;
         setRawBlob(blob);

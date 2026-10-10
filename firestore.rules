@@ -96,6 +96,12 @@ service cloud.firestore {
         'mimeType',
         'starred',
         'downloadCount',
+        'sha256',
+        'storageDriver',
+        'telegramChatId',
+        'telegramChunksJson',
+        'previewText',
+        'previewDataUrl',
         'createdAt',
         'updatedAt'
       ]) &&
@@ -109,7 +115,67 @@ service cloud.firestore {
       data.mimeType is string && data.mimeType.size() >= 1 && data.mimeType.size() <= 128 &&
       data.starred is bool &&
       data.downloadCount is number && data.downloadCount >= 0 && data.downloadCount <= 100000000 &&
+      (!('sha256' in data) || (data.sha256 is string && data.sha256.size() <= 128)) &&
+      (!('storageDriver' in data) || (data.storageDriver is string && data.storageDriver in ['telegram', 'local_vault'])) &&
+      (!('telegramChatId' in data) || (data.telegramChatId is string && data.telegramChatId.size() <= 64)) &&
+      (!('telegramChunksJson' in data) || (data.telegramChunksJson is string && data.telegramChunksJson.size() <= 131072)) &&
+      (!('previewText' in data) || (data.previewText is string && data.previewText.size() <= 30000)) &&
+      (!('previewDataUrl' in data) || (data.previewDataUrl is string && data.previewDataUrl.size() <= 524288)) &&
       data.createdAt is timestamp &&
+      data.updatedAt is timestamp;
+    }
+
+    function isValidCloudFolderMeta(data) {
+      return data.keys().hasAll([
+        'id',
+        'ownerId',
+        'ownerName',
+        'parentId',
+        'name',
+        'createdAt',
+        'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'id',
+        'ownerId',
+        'ownerName',
+        'parentId',
+        'name',
+        'createdAt',
+        'updatedAt'
+      ]) &&
+      data.ownerId == request.auth.uid &&
+      data.id is string && data.id.size() >= 1 && data.id.size() <= 128 && data.id.matches('^[a-zA-Z0-9_\\-]+$') &&
+      data.ownerId is string && data.ownerId.size() >= 1 && data.ownerId.size() <= 128 && data.ownerId.matches('^[a-zA-Z0-9_\\-]+$') &&
+      data.ownerName is string && data.ownerName.size() >= 1 && data.ownerName.size() <= 120 &&
+      data.parentId is string && data.parentId.size() >= 1 && data.parentId.size() <= 128 && data.parentId.matches('^[a-zA-Z0-9_\\-]+$') &&
+      data.name is string && data.name.size() >= 1 && data.name.size() <= 255 &&
+      data.createdAt is timestamp &&
+      data.updatedAt is timestamp;
+    }
+
+    function isValidStorageNodeConfig(data) {
+      return data.keys().hasAll([
+        'id',
+        'botToken',
+        'chatId',
+        'botUsername',
+        'autoSyncUploads',
+        'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'id',
+        'botToken',
+        'chatId',
+        'botUsername',
+        'autoSyncUploads',
+        'updatedAt'
+      ]) &&
+      data.id is string && data.id.size() >= 1 && data.id.size() <= 128 && data.id.matches('^[a-zA-Z0-9_\\-]+$') &&
+      data.botToken is string && data.botToken.size() <= 256 &&
+      data.chatId is string && data.chatId.size() <= 64 &&
+      data.botUsername is string && data.botUsername.size() <= 120 &&
+      data.autoSyncUploads is bool &&
       data.updatedAt is timestamp;
     }
 
@@ -138,7 +204,6 @@ service cloud.firestore {
         incoming().createdAt == existing().createdAt &&
         incoming().updatedAt == request.time && (
           isAdmin() ||
-          // Action: Update wallet tokens, promo code redemption, or storage plan subscription
           (
             request.auth.uid == userId &&
             incoming().diff(existing()).affectedKeys().hasOnly([
@@ -177,7 +242,6 @@ service cloud.firestore {
         incoming().createdAt == existing().createdAt &&
         incoming().updatedAt == request.time && (
           isAdmin() ||
-          // Action: Star/unstar, rename, move folder, or increment download counter
           (
             existing().ownerId == request.auth.uid &&
             incoming().diff(existing()).affectedKeys().hasOnly([
@@ -185,12 +249,66 @@ service cloud.firestore {
               'folderId',
               'starred',
               'downloadCount',
+              'sha256',
+              'storageDriver',
+              'telegramChatId',
+              'telegramChunksJson',
+              'previewText',
+              'previewDataUrl',
               'updatedAt'
             ])
           )
         );
 
       allow delete: if isVerifiedUser() && isValidId(fileId) && (existing().ownerId == request.auth.uid || isAdmin());
+    }
+
+    // 7. Cloud Folder Metadata Collection (/cloudFolders/{folderId})
+    match /cloudFolders/{folderId} {
+      allow get: if isSignedIn() && isValidId(folderId) && (existing().ownerId == request.auth.uid || isAdmin());
+      allow list: if isSignedIn() && (resource.data.ownerId == request.auth.uid || isAdmin());
+
+      allow create: if isVerifiedUser() &&
+        isValidId(folderId) &&
+        isValidCloudFolderMeta(incoming()) &&
+        incoming().id == folderId &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        exists(/databases/$(database)/documents/userProfiles/$(request.auth.uid));
+
+      allow update: if isVerifiedUser() &&
+        isValidId(folderId) &&
+        isValidCloudFolderMeta(incoming()) &&
+        incoming().id == existing().id &&
+        incoming().ownerId == existing().ownerId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isAdmin() ||
+          (
+            existing().ownerId == request.auth.uid &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'name',
+              'parentId',
+              'updatedAt'
+            ])
+          )
+        );
+
+      allow delete: if isVerifiedUser() && isValidId(folderId) && (existing().ownerId == request.auth.uid || isAdmin());
+    }
+
+    // 8. Admin-Configured Storage Node Bridge (/storageNodeConfig/{nodeId})
+    match /storageNodeConfig/{nodeId} {
+      allow get: if isSignedIn() && isValidId(nodeId);
+      allow list: if isAdmin();
+
+      allow create, update: if isAdmin() &&
+        isValidId(nodeId) &&
+        isValidStorageNodeConfig(incoming()) &&
+        incoming().id == nodeId &&
+        incoming().updatedAt == request.time;
+
+      allow delete: if isAdmin() && isValidId(nodeId);
     }
   }
 }

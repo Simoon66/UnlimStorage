@@ -480,6 +480,88 @@ async function pushBufferToTelegram(
   }
 }
 
+async function pushDiskFileToTelegram(
+  filePath: string,
+  fileName: string,
+  totalSize: number,
+  botToken: string,
+  chatId: string
+): Promise<{ success: boolean; chunks: TelegramChunk[]; error?: string }> {
+  try {
+    if (!fs.existsSync(filePath) || totalSize <= 0) {
+      return { success: false, chunks: [], error: 'File empty or missing' };
+    }
+    const chunks: TelegramChunk[] = [];
+    const totalParts = Math.max(1, Math.ceil(totalSize / TELEGRAM_CHUNK_SIZE));
+    const fd = fs.openSync(filePath, 'r');
+
+    try {
+      for (let i = 0; i < totalParts; i++) {
+        const offset = i * TELEGRAM_CHUNK_SIZE;
+        const chunkLen = Math.min(TELEGRAM_CHUNK_SIZE, totalSize - offset);
+        const slice = Buffer.alloc(chunkLen);
+        fs.readSync(fd, slice, 0, chunkLen, offset);
+
+        const partName =
+          totalParts > 1 ? `${fileName}.part${String(i + 1).padStart(3, '0')}` : fileName;
+        const partHash = computeSha256(slice);
+
+        const formData = new FormData();
+        formData.append('chat_id', chatId);
+        formData.append(
+          'caption',
+          `[UnlimStorage] ${partName} | Part ${i + 1}/${totalParts} | SHA256: ${partHash.slice(
+            0,
+            16
+          )}`
+        );
+        const blob = new Blob([new Uint8Array(slice)], { type: 'application/octet-stream' });
+        formData.append('document', blob, partName);
+
+        const tgRes = await fetch(`https://api.telegram.org/bot${botToken}/sendDocument`, {
+          method: 'POST',
+          body: formData,
+        });
+
+        const tgJson = (await tgRes.json()) as {
+          ok: boolean;
+          description?: string;
+          result?: {
+            message_id: number;
+            document?: { file_id: string; file_size?: number };
+          };
+        };
+
+        if (!tgJson.ok || !tgJson.result?.document?.file_id) {
+          return {
+            success: false,
+            chunks: [],
+            error: tgJson.description || 'Storage node rejected chunk',
+          };
+        }
+
+        chunks.push({
+          partIndex: i,
+          messageId: tgJson.result.message_id,
+          fileId: tgJson.result.document.file_id,
+          sizeBytes: chunkLen,
+          sha256Part: partHash,
+        });
+      }
+    } finally {
+      fs.closeSync(fd);
+    }
+
+    return { success: true, chunks };
+  } catch (err: unknown) {
+    return {
+      success: false,
+      chunks: [],
+      error: err instanceof Error ? err.message : 'Network error contacting storage node',
+    };
+  }
+}
+
 async function fetchBufferFromTelegramChunks(
   chunks: TelegramChunk[],
   botToken: string
@@ -1041,6 +1123,123 @@ async function startServer() {
     });
   });
 
+  app.post('/api/files/sync-from-cloud', requireAuth, (req, res) => {
+    const user = (req as Request & { user: StoredUser }).user;
+    const { profile, files, folders, storageNodeConfig } = req.body as {
+      profile?: {
+        planId?: StoragePlanId;
+        tokenBalance?: number;
+        planExpiresAt?: string;
+        graceEndsAt?: string;
+        usedPromoCodes?: string;
+      } | null;
+      files?: FileRecord[];
+      folders?: FolderRecord[];
+      storageNodeConfig?: {
+        botToken?: string;
+        chatId?: string;
+        botUsername?: string;
+        autoSyncUploads?: boolean;
+      } | null;
+    };
+
+    if (
+      storageNodeConfig &&
+      storageNodeConfig.botToken &&
+      storageNodeConfig.chatId &&
+      !db.telegramConfig.botToken
+    ) {
+      db.telegramConfig.botToken = String(storageNodeConfig.botToken).trim();
+      db.telegramConfig.chatId = String(storageNodeConfig.chatId).trim();
+      if (storageNodeConfig.botUsername) {
+        db.telegramConfig.botUsername = String(storageNodeConfig.botUsername).trim();
+      }
+      db.telegramConfig.autoSyncUploads = storageNodeConfig.autoSyncUploads !== false;
+    }
+
+    if (profile) {
+      if (profile.planId) user.planId = profile.planId;
+      if (typeof profile.tokenBalance === 'number') {
+        user.tokenBalance = Math.max(user.tokenBalance || 0, profile.tokenBalance);
+      }
+      if (profile.planExpiresAt) user.planExpiresAt = profile.planExpiresAt;
+      if (profile.graceEndsAt) user.graceEndsAt = profile.graceEndsAt;
+      if (profile.usedPromoCodes) {
+        const codes = profile.usedPromoCodes
+          .split(',')
+          .map((c) => c.trim())
+          .filter(Boolean);
+        user.usedPromoCodes = Array.from(new Set([...(user.usedPromoCodes || []), ...codes]));
+      }
+    }
+
+    if (Array.isArray(folders)) {
+      for (const cf of folders) {
+        if (!cf || !cf.id) continue;
+        const existingIdx = db.folders.findIndex((f) => f.id === cf.id && f.ownerId === user.id);
+        if (existingIdx === -1) {
+          db.folders.push({
+            ...cf,
+            ownerId: user.id,
+            ownerName: user.name,
+          });
+        } else {
+          db.folders[existingIdx] = {
+            ...db.folders[existingIdx],
+            name: cf.name || db.folders[existingIdx].name,
+            parentId: cf.parentId ?? null,
+          };
+        }
+      }
+    }
+
+    if (Array.isArray(files)) {
+      for (const cf of files) {
+        if (!cf || !cf.id) continue;
+        const existingIdx = db.files.findIndex((f) => f.id === cf.id && f.ownerId === user.id);
+        if (existingIdx === -1) {
+          db.files.unshift({
+            ...cf,
+            ownerId: user.id,
+            ownerName: user.name,
+            telegramChunks: Array.isArray(cf.telegramChunks) ? cf.telegramChunks : [],
+          });
+        } else {
+          const cur = db.files[existingIdx];
+          db.files[existingIdx] = {
+            ...cur,
+            name: cf.name || cur.name,
+            folderId: cf.folderId ?? cur.folderId,
+            starred: typeof cf.starred === 'boolean' ? cf.starred : cur.starred,
+            downloadCount: Math.max(cur.downloadCount || 0, cf.downloadCount || 0),
+            storageDriver:
+              Array.isArray(cf.telegramChunks) && cf.telegramChunks.length > 0
+                ? 'telegram'
+                : cur.storageDriver,
+            telegramChatId: cf.telegramChatId || cur.telegramChatId,
+            telegramChunks:
+              Array.isArray(cf.telegramChunks) && cf.telegramChunks.length > 0
+                ? cf.telegramChunks
+                : cur.telegramChunks || [],
+            previewText: cur.previewText || cf.previewText,
+            previewDataUrl: cur.previewDataUrl || cf.previewDataUrl,
+          };
+        }
+      }
+      db.files.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    }
+
+    evaluateUserQuotaAndLocks(user);
+    saveDb();
+
+    res.json({
+      ok: true,
+      user: sanitizeUser(user),
+      folders: db.folders.filter((f) => f.ownerId === user.id),
+      files: db.files.filter((f) => f.ownerId === user.id),
+    });
+  });
+
   app.post('/api/folders', requireAuth, (req, res) => {
     const user = (req as Request & { user: StoredUser }).user;
     const { name, parentId } = req.body as { name?: string; parentId?: string | null };
@@ -1237,12 +1436,12 @@ async function startServer() {
         let telegramChunks: TelegramChunk[] = [];
         let telegramChatId: string | undefined;
 
-        // Sync to Telegram Bot API when under 45 MB per-chunk Bot API limit
-        if (hasLiveTelegram && rawFile.size <= 45 * 1024 * 1024) {
-          const fileBuffer = fs.readFileSync(finalChunkPath);
-          const tgResult = await pushBufferToTelegram(
-            fileBuffer,
+        // Sync to Telegram Bot API in 19 MB chunks (supports up to 500 MB+ files)
+        if (hasLiveTelegram && rawFile.size <= 500 * 1024 * 1024) {
+          const tgResult = await pushDiskFileToTelegram(
+            finalChunkPath,
             rawFile.originalname,
+            rawFile.size,
             db.telegramConfig.botToken,
             db.telegramConfig.chatId
           );
@@ -1494,11 +1693,11 @@ async function startServer() {
     let telegramChunks: TelegramChunk[] = [];
     let telegramChatId: string | undefined;
 
-    if (hasLiveTelegram && finalSize <= 45 * 1024 * 1024) {
-      const fileBuffer = fs.readFileSync(finalChunkPath);
-      const tgResult = await pushBufferToTelegram(
-        fileBuffer,
+    if (hasLiveTelegram && finalSize <= 500 * 1024 * 1024) {
+      const tgResult = await pushDiskFileToTelegram(
+        finalChunkPath,
         cleanName,
+        finalSize,
         db.telegramConfig.botToken,
         db.telegramConfig.chatId
       );
@@ -1722,6 +1921,27 @@ async function startServer() {
       isInline && isMkv
         ? 'video/webm'
         : resolveEffectiveMimeType(file.name, file.mimeType);
+
+    // If local disk doesn't have the file yet (e.g. accessed from a new server instance or device),
+    // automatically restore it from Telegram chunks before serving Range or full download!
+    if (
+      !fs.existsSync(chunkPath) &&
+      file.telegramChunks &&
+      file.telegramChunks.length > 0 &&
+      db.telegramConfig.botToken
+    ) {
+      const restoredBuf = await fetchBufferFromTelegramChunks(
+        file.telegramChunks,
+        db.telegramConfig.botToken
+      );
+      if (restoredBuf && restoredBuf.length > 0) {
+        try {
+          fs.writeFileSync(chunkPath, restoredBuf);
+        } catch {
+          // ignore write error
+        }
+      }
+    }
 
     if (fs.existsSync(chunkPath)) {
       const stat = fs.statSync(chunkPath);

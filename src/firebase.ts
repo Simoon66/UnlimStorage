@@ -10,15 +10,20 @@ import {
 import {
   getFirestore,
   doc,
+  collection,
+  query,
+  where,
   getDoc,
+  getDocs,
   getDocFromServer,
   setDoc,
   updateDoc,
   deleteDoc,
   serverTimestamp,
+  Timestamp,
 } from 'firebase/firestore';
 import firebaseConfig from '../firebase-applet-config.json';
-import { FileRecord, StoragePlanId } from './types';
+import { FileRecord, FolderRecord, StorageDriver, StoragePlanId, TelegramChunk } from './types';
 
 const app = initializeApp(firebaseConfig);
 export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
@@ -91,7 +96,7 @@ export function handleFirestoreError(
 
 // Defensive sanitization matching firebase-blueprint.json & firestore.rules
 function sanitizeId(raw: string): string {
-  const cleaned = raw.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 128);
+  const cleaned = (raw || '').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 128);
   return cleaned.length > 0 ? cleaned : 'default_id';
 }
 
@@ -99,6 +104,19 @@ function truncateString(val: string, maxLen: number, fallback = 'Item'): string 
   const trimmed = (val || '').trim();
   if (!trimmed) return fallback.slice(0, maxLen);
   return trimmed.slice(0, maxLen);
+}
+
+function toIsoDateString(val: unknown): string {
+  if (!val) return new Date().toISOString();
+  if (val instanceof Timestamp) {
+    return val.toDate().toISOString();
+  }
+  if (typeof val === 'object' && val !== null && 'seconds' in val) {
+    const sec = Number((val as { seconds: number }).seconds);
+    if (Number.isFinite(sec)) return new Date(sec * 1000).toISOString();
+  }
+  if (typeof val === 'string') return val;
+  return new Date().toISOString();
 }
 
 export async function signInWithGooglePopup(): Promise<FirebaseUser> {
@@ -169,7 +187,6 @@ async function ensureFirestoreUserProfileInternal(
     });
     return initial;
   } catch (error) {
-    // Check if a concurrent session/listener created the profile right before this write
     try {
       const retrySnap = await getDoc(ref);
       if (retrySnap.exists()) {
@@ -185,7 +202,7 @@ async function ensureFirestoreUserProfileInternal(
         };
       }
     } catch {
-      // ignore fallback check error and report original error
+      // ignore fallback check error
     }
     handleFirestoreError(error, OperationType.CREATE, path);
   }
@@ -268,6 +285,15 @@ export async function syncCloudFileToFirestore(
   const path = `cloudFiles/${safeFileId}`;
   const ref = doc(db, 'cloudFiles', safeFileId);
 
+  const chunksJson = JSON.stringify(file.telegramChunks || []).slice(0, 130000);
+  const storageDriver: StorageDriver =
+    file.storageDriver === 'telegram' ? 'telegram' : 'local_vault';
+  const safeSha256 = (file.sha256 || '').slice(0, 128);
+  const safeChatId = (file.telegramChatId || '').slice(0, 64);
+  const safePreviewText = (file.previewText || '').slice(0, 28000);
+  const safePreviewDataUrl =
+    file.previewDataUrl && file.previewDataUrl.length <= 500000 ? file.previewDataUrl : '';
+
   if (isUpdate) {
     try {
       await updateDoc(ref, {
@@ -275,11 +301,15 @@ export async function syncCloudFileToFirestore(
         folderId: sanitizeId(file.folderId || 'root'),
         starred: Boolean(file.starred),
         downloadCount: Math.max(0, Math.min(100000000, Math.floor(file.downloadCount || 0))),
+        sha256: safeSha256,
+        storageDriver,
+        telegramChatId: safeChatId,
+        telegramChunksJson: chunksJson,
         updatedAt: serverTimestamp(),
       });
       return;
-    } catch (error) {
-      handleFirestoreError(error, OperationType.UPDATE, path);
+    } catch {
+      // If the document wasn't created yet on Firestore, fall through to setDoc
     }
   }
 
@@ -294,6 +324,12 @@ export async function syncCloudFileToFirestore(
       mimeType: truncateString(file.mimeType || 'application/octet-stream', 128),
       starred: Boolean(file.starred),
       downloadCount: Math.max(0, Math.min(100000000, Math.floor(file.downloadCount || 0))),
+      sha256: safeSha256,
+      storageDriver,
+      telegramChatId: safeChatId,
+      telegramChunksJson: chunksJson,
+      previewText: safePreviewText,
+      previewDataUrl: safePreviewDataUrl,
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
     });
@@ -317,3 +353,208 @@ export async function deleteCloudFileFromFirestore(fileId: string): Promise<void
     handleFirestoreError(error, OperationType.DELETE, path);
   }
 }
+
+export async function syncCloudFolderToFirestore(folder: FolderRecord): Promise<void> {
+  const fbUser = auth.currentUser;
+  if (!fbUser || !fbUser.emailVerified) return;
+
+  await ensureFirestoreUserProfile(fbUser);
+  const safeUid = sanitizeId(fbUser.uid);
+  const safeFolderId = sanitizeId(folder.id);
+  const path = `cloudFolders/${safeFolderId}`;
+  const ref = doc(db, 'cloudFolders', safeFolderId);
+
+  try {
+    await setDoc(ref, {
+      id: safeFolderId,
+      ownerId: safeUid,
+      ownerName: truncateString(folder.ownerName || fbUser.displayName || 'User', 120),
+      parentId: sanitizeId(folder.parentId || 'root'),
+      name: truncateString(folder.name, 255, 'Folder'),
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.CREATE, path);
+  }
+}
+
+export async function deleteCloudFolderFromFirestore(folderId: string): Promise<void> {
+  const fbUser = auth.currentUser;
+  if (!fbUser || !fbUser.emailVerified) return;
+
+  const safeFolderId = sanitizeId(folderId);
+  const path = `cloudFolders/${safeFolderId}`;
+  const ref = doc(db, 'cloudFolders', safeFolderId);
+
+  try {
+    await deleteDoc(ref);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, path);
+  }
+}
+
+/**
+ * Fetches all cloud files and folders belonging to the authenticated user from Firestore
+ * so that logging in from any browser or device immediately restores the user's drive.
+ */
+export async function fetchUserCloudDriveFromFirestore(
+  fbUser: FirebaseUser
+): Promise<{
+  profile: FirestoreUserProfileData | null;
+  files: FileRecord[];
+  folders: FolderRecord[];
+}> {
+  if (!fbUser || !fbUser.emailVerified) {
+    return { profile: null, files: [], folders: [] };
+  }
+
+  const profile = await ensureFirestoreUserProfile(fbUser).catch(() => null);
+  const safeUid = sanitizeId(fbUser.uid);
+
+  const files: FileRecord[] = [];
+  const folders: FolderRecord[] = [];
+
+  try {
+    const filesQuery = query(collection(db, 'cloudFiles'), where('ownerId', '==', safeUid));
+    const filesSnap = await getDocs(filesQuery);
+    filesSnap.forEach((docSnap) => {
+      const d = docSnap.data();
+      let parsedChunks: TelegramChunk[] = [];
+      if (typeof d.telegramChunksJson === 'string' && d.telegramChunksJson.trim()) {
+        try {
+          const arr = JSON.parse(d.telegramChunksJson);
+          if (Array.isArray(arr)) parsedChunks = arr;
+        } catch {
+          parsedChunks = [];
+        }
+      }
+      const rawFolderId = String(d.folderId || 'root');
+      files.push({
+        id: String(d.id || docSnap.id),
+        name: String(d.name || 'file.bin'),
+        folderId: rawFolderId === 'root' ? null : rawFolderId,
+        ownerId: String(d.ownerId || safeUid),
+        ownerName: String(d.ownerName || fbUser.displayName || 'Cloud User'),
+        sizeBytes: typeof d.sizeBytes === 'number' ? d.sizeBytes : 0,
+        mimeType: String(d.mimeType || 'application/octet-stream'),
+        sha256: String(d.sha256 || 'e3b0c44298fc1c149afbf4c8996fb924'),
+        storageDriver:
+          d.storageDriver === 'telegram' || parsedChunks.length > 0 ? 'telegram' : 'local_vault',
+        telegramChatId: d.telegramChatId ? String(d.telegramChatId) : undefined,
+        telegramChunks: parsedChunks,
+        starred: Boolean(d.starred),
+        downloadCount: typeof d.downloadCount === 'number' ? d.downloadCount : 0,
+        createdAt: toIsoDateString(d.createdAt),
+        updatedAt: toIsoDateString(d.updatedAt),
+        previewText: d.previewText ? String(d.previewText) : undefined,
+        previewDataUrl: d.previewDataUrl ? String(d.previewDataUrl) : undefined,
+        lockedOverQuota: false,
+      });
+    });
+  } catch (err) {
+    console.warn('Could not query cloudFiles from Firestore:', err);
+  }
+
+  try {
+    const foldersQuery = query(collection(db, 'cloudFolders'), where('ownerId', '==', safeUid));
+    const foldersSnap = await getDocs(foldersQuery);
+    foldersSnap.forEach((docSnap) => {
+      const d = docSnap.data();
+      const rawParentId = String(d.parentId || 'root');
+      folders.push({
+        id: String(d.id || docSnap.id),
+        name: String(d.name || 'Folder'),
+        parentId: rawParentId === 'root' ? null : rawParentId,
+        ownerId: String(d.ownerId || safeUid),
+        ownerName: String(d.ownerName || fbUser.displayName || 'Cloud User'),
+        createdAt: toIsoDateString(d.createdAt),
+      });
+    });
+  } catch (err) {
+    console.warn('Could not query cloudFolders from Firestore:', err);
+  }
+
+  // Sort newest files first
+  files.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+
+  return { profile, files, folders };
+}
+
+export interface CloudStorageNodeCredentials {
+  botToken: string;
+  chatId: string;
+  botUsername: string;
+  autoSyncUploads: boolean;
+}
+
+export async function saveStorageNodeConfigToFirestore(config: {
+  botToken?: string;
+  chatId?: string;
+  botUsername?: string;
+  autoSyncUploads?: boolean;
+  clearCredentials?: boolean;
+}): Promise<void> {
+  const fbUser = auth.currentUser;
+  if (!fbUser || fbUser.email?.toLowerCase() !== 'titumamma2425@gmail.com') return;
+
+  const ref = doc(db, 'storageNodeConfig', 'global');
+  try {
+    const existingSnap = await getDoc(ref);
+    const existing = existingSnap.exists() ? existingSnap.data() : {};
+
+    const nextBotToken = config.clearCredentials
+      ? ''
+      : config.botToken !== undefined
+      ? String(config.botToken).trim()
+      : String(existing.botToken || '');
+    const nextChatId = config.clearCredentials
+      ? ''
+      : config.chatId !== undefined
+      ? String(config.chatId).trim()
+      : String(existing.chatId || '');
+    const nextBotUsername = config.clearCredentials
+      ? ''
+      : config.botUsername !== undefined
+      ? String(config.botUsername).trim()
+      : String(existing.botUsername || '');
+    const nextAutoSync =
+      typeof config.autoSyncUploads === 'boolean'
+        ? config.autoSyncUploads
+        : existing.autoSyncUploads !== false;
+
+    await setDoc(ref, {
+      id: 'global',
+      botToken: nextBotToken.slice(0, 256),
+      chatId: nextChatId.slice(0, 64),
+      botUsername: nextBotUsername.slice(0, 120),
+      autoSyncUploads: Boolean(nextAutoSync),
+      updatedAt: serverTimestamp(),
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, 'storageNodeConfig/global');
+  }
+}
+
+export async function fetchStorageNodeConfigFromFirestore(): Promise<CloudStorageNodeCredentials | null> {
+  const fbUser = auth.currentUser;
+  if (!fbUser) return null;
+
+  try {
+    const ref = doc(db, 'storageNodeConfig', 'global');
+    const snap = await getDoc(ref);
+    if (!snap.exists()) return null;
+    const d = snap.data();
+    return {
+      botToken: String(d.botToken || ''),
+      chatId: String(d.chatId || ''),
+      botUsername: String(d.botUsername || ''),
+      autoSyncUploads: d.autoSyncUploads !== false,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export const loadStorageNodeConfigFromFirestore = fetchStorageNodeConfigFromFirestore;
+

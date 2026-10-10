@@ -736,6 +736,12 @@ export const TelegramStorageView: React.FC<TelegramStorageViewProps> = ({
   const [error, setError] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
 
+  React.useEffect(() => {
+    if (config.chatId && !chatId) {
+      setChatId(config.chatId);
+    }
+  }, [config.chatId, chatId]);
+
   const handleConnect = async (e: React.FormEvent) => {
     e.preventDefault();
     setSaving(true);
@@ -748,7 +754,9 @@ export const TelegramStorageView: React.FC<TelegramStorageViewProps> = ({
         autoSyncUploads: true,
       });
       setBotToken('');
-      setSuccessMsg('Backend Storage Node connected! All user uploads will route through this node.');
+      setSuccessMsg(
+        'Permanent Cloud Storage Node connected & synced to Firestore! All uploads will now persist across every device.'
+      );
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Could not connect storage node');
     } finally {
@@ -760,30 +768,35 @@ export const TelegramStorageView: React.FC<TelegramStorageViewProps> = ({
     <div className="max-w-2xl space-y-6">
       <div className="border-b border-[#2C2824] pb-4">
         <div className="text-[11px] font-bold uppercase tracking-wider text-[#D97757]">
-          Administrator Only — Hidden from Public Users
+          Administrator Only — Strictly Hidden from Public Users
         </div>
         <h1 className="text-lg sm:text-xl font-bold text-[#F2EFE9] mt-0.5">
-          Backend Storage Node Configuration
+          Permanent Cross-Device Storage Node Setup
         </h1>
         <p className="text-xs text-[#9E978E] mt-1">
-          This panel is visible only to your administrator account. Regular users never see this
-          tab or know how backend storage is powered.
+          Connect your private Telegram Bot &amp; Channel below to store uploaded binary files
+          permanently across all devices. Regular users never see this panel or any mention of
+          Telegram.
         </p>
       </div>
 
       <div className="p-4 sm:p-5 bg-[#1C1A17] border border-[#2C2824] flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div className="flex items-start sm:items-center gap-3">
-          <ShieldCheck className="w-5 h-5 text-[#2E9E6B] shrink-0 mt-0.5 sm:mt-0" />
+          <ShieldCheck
+            className={`w-5 h-5 shrink-0 mt-0.5 sm:mt-0 ${
+              config.connected ? 'text-[#2E9E6B]' : 'text-[#D99B26]'
+            }`}
+          />
           <div>
             <div className="text-sm font-bold text-[#F2EFE9]">
               {config.connected
-                ? `Connected to Live Storage Bot (@${config.botUsername || 'Active'})`
-                : 'Built-In Encrypted Vault Active'}
+                ? `Permanent Storage Active (@${config.botUsername || 'Connected'})`
+                : 'Local Vault Active — Connect Bot for Cross-Device Binary Sync'}
             </div>
             <div className="text-xs text-[#9E978E]">
               {config.connected
-                ? `Routing chunks to Channel ${config.chatId}`
-                : 'Ready to accept and serve user uploads immediately'}
+                ? `Auto-splitting & syncing files in 19 MB chunks to Channel ${config.chatId}`
+                : 'File list syncs via Firestore; connect Bot Token + Channel ID below so file payloads download on any device'}
             </div>
           </div>
         </div>
@@ -799,6 +812,20 @@ export const TelegramStorageView: React.FC<TelegramStorageViewProps> = ({
         )}
       </div>
 
+      <div className="p-4 bg-[#141311] border border-[#2C2824] space-y-2 text-xs text-[#9E978E]">
+        <div className="font-bold text-[#F2EFE9]">Quick 2-Step Setup for Permanent Files:</div>
+        <div>
+          1. Open <strong className="text-[#F2EFE9]">@BotFather</strong> on Telegram, send{' '}
+          <code className="text-[#D97757]">/newbot</code>, and copy the HTTP API Token.
+        </div>
+        <div>
+          2. Create a <strong className="text-[#F2EFE9]">Private Channel</strong>, add your Bot as
+          an <strong className="text-[#F2EFE9]">Administrator</strong> (with Post Messages
+          enabled), and paste the Channel Chat ID (starts with{' '}
+          <code className="text-[#D97757]">-100...</code>).
+        </div>
+      </div>
+
       <form
         onSubmit={handleConnect}
         className="p-5 sm:p-6 bg-[#1C1A17] border border-[#2C2824] space-y-4"
@@ -811,14 +838,18 @@ export const TelegramStorageView: React.FC<TelegramStorageViewProps> = ({
             type="password"
             value={botToken}
             onChange={(e) => setBotToken(e.target.value)}
-            placeholder="Paste your Bot Token here..."
+            placeholder={
+              config.connected
+                ? `Saved (${config.maskedToken || '••••••••'}) — paste new token to update`
+                : 'e.g. 7123456789:AAHxyz...'
+            }
             className="w-full min-h-[44px] bg-[#141311] border border-[#2C2824] px-3.5 py-2.5 text-sm text-[#F2EFE9] focus:outline-none focus:border-[#D97757]"
           />
         </div>
 
         <div className="space-y-1.5">
           <label className="block text-xs font-semibold text-[#F2EFE9]">
-            2. Private Storage Channel ID
+            2. Private Storage Channel Chat ID
           </label>
           <input
             type="text"
@@ -843,7 +874,7 @@ export const TelegramStorageView: React.FC<TelegramStorageViewProps> = ({
             ) : (
               <Send className="w-4 h-4" />
             )}
-            {saving ? 'Connecting...' : 'Save Storage Node'}
+            {saving ? 'Verifying & Syncing...' : 'Save & Sync Storage Node'}
           </button>
         </div>
       </form>

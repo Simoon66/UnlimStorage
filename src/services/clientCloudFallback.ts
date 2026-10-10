@@ -134,32 +134,147 @@ export async function storeClientBinaryBlob(fileId: string, blob: Blob): Promise
   });
 }
 
-export async function getClientBinaryBlob(fileId: string): Promise<Blob | null> {
+const TELEGRAM_CLIENT_CHUNK_SIZE = 19 * 1024 * 1024; // 19 MB per chunk (under Telegram 20 MB getFile limit)
+
+async function pushBlobToTelegramClient(
+  blob: Blob,
+  fileName: string,
+  botToken: string,
+  chatId: string
+): Promise<{ success: boolean; chunks: TelegramChunk[] }> {
+  if (!botToken || !chatId) return { success: false, chunks: [] };
+  const chunks: TelegramChunk[] = [];
+  const totalParts = Math.max(1, Math.ceil(blob.size / TELEGRAM_CLIENT_CHUNK_SIZE));
+
+  for (let partIdx = 0; partIdx < totalParts; partIdx++) {
+    const start = partIdx * TELEGRAM_CLIENT_CHUNK_SIZE;
+    const end = Math.min(blob.size, start + TELEGRAM_CLIENT_CHUNK_SIZE);
+    const slice = blob.slice(start, end);
+    const partName =
+      totalParts === 1 ? fileName : `${fileName}.part${String(partIdx + 1).padStart(3, '0')}`;
+
+    try {
+      const tgForm = new FormData();
+      tgForm.append('chat_id', chatId);
+      tgForm.append('document', slice, partName);
+      tgForm.append(
+        'caption',
+        `[UnlimStorage Encrypted Vault] ${fileName} (Part ${partIdx + 1}/${totalParts})`
+      );
+
+      const tgRes = await window.fetch(
+        `https://api.telegram.org/bot${botToken}/sendDocument`,
+        { method: 'POST', body: tgForm }
+      );
+      const tgJson = await tgRes.json();
+      if (!tgJson.ok || !tgJson.result?.document?.file_id) {
+        return { success: false, chunks: [] };
+      }
+      chunks.push({
+        partIndex: partIdx,
+        messageId: tgJson.result.message_id || 0,
+        fileId: tgJson.result.document.file_id,
+        sizeBytes: slice.size,
+        sha256Part: simpleHash(`${fileName}_${partIdx}_${slice.size}`),
+      });
+    } catch {
+      return { success: false, chunks: [] };
+    }
+  }
+
+  return { success: chunks.length > 0, chunks };
+}
+
+async function fetchBlobFromTelegramChunksClient(
+  chunks: TelegramChunk[],
+  botToken: string,
+  mimeType: string
+): Promise<Blob | null> {
+  if (!botToken || !chunks || chunks.length === 0) return null;
+  const sorted = [...chunks].sort((a, b) => a.partIndex - b.partIndex);
+  const partBlobs: Blob[] = [];
+
+  for (const chunk of sorted) {
+    try {
+      const metaRes = await window.fetch(
+        `https://api.telegram.org/bot${botToken}/getFile?file_id=${encodeURIComponent(
+          chunk.fileId
+        )}`
+      );
+      const metaJson = await metaRes.json();
+      if (!metaJson.ok || !metaJson.result?.file_path) {
+        return null;
+      }
+      const fileUrl = `https://api.telegram.org/file/bot${botToken}/${metaJson.result.file_path}`;
+      const fileRes = await window.fetch(fileUrl);
+      if (!fileRes.ok) return null;
+      const partBlob = await fileRes.blob();
+      partBlobs.push(partBlob);
+    } catch {
+      return null;
+    }
+  }
+
+  if (partBlobs.length === 0) return null;
+  return new Blob(partBlobs, { type: mimeType || 'application/octet-stream' });
+}
+
+export async function getClientBinaryBlob(
+  fileId: string,
+  fileMeta?: FileRecord
+): Promise<Blob | null> {
   const inMem = memoryBlobCache.get(fileId);
   if (inMem) return inMem;
 
   const idb = await openBinaryVaultDb();
-  if (!idb) return null;
+  if (idb) {
+    const fromIdb = await new Promise<Blob | null>((resolve) => {
+      try {
+        const tx = idb.transaction(IDB_STORE, 'readonly');
+        const store = tx.objectStore(IDB_STORE);
+        const req = store.get(fileId);
+        req.onsuccess = () => {
+          const res = req.result;
+          if (res instanceof Blob && res.size > 0) {
+            memoryBlobCache.set(fileId, res);
+            resolve(res);
+          } else {
+            resolve(null);
+          }
+        };
+        req.onerror = () => resolve(null);
+      } catch {
+        resolve(null);
+      }
+    });
+    if (fromIdb) return fromIdb;
+  }
 
-  return new Promise<Blob | null>((resolve) => {
-    try {
-      const tx = idb.transaction(IDB_STORE, 'readonly');
-      const store = tx.objectStore(IDB_STORE);
-      const req = store.get(fileId);
-      req.onsuccess = () => {
-        const res = req.result;
-        if (res instanceof Blob) {
-          memoryBlobCache.set(fileId, res);
-          resolve(res);
-        } else {
-          resolve(null);
-        }
-      };
-      req.onerror = () => resolve(null);
-    } catch {
-      resolve(null);
+  // Cross-Device Recovery: If local IndexedDB does not have the binary yet (e.g. signed in on a new device),
+  // check if the file has Telegram chunks and fetch/reassemble them transparently!
+  const db = loadClientDb();
+  const targetFile = fileMeta || db.files.find((f) => f.id === fileId);
+  const envToken = (import.meta as any).env?.VITE_TELEGRAM_BOT_TOKEN || '';
+  const botToken = db.telegramConfig.botToken || envToken;
+
+  if (
+    targetFile &&
+    targetFile.telegramChunks &&
+    targetFile.telegramChunks.length > 0 &&
+    botToken
+  ) {
+    const tgBlob = await fetchBlobFromTelegramChunksClient(
+      targetFile.telegramChunks,
+      botToken,
+      resolveClientMimeType(targetFile.name, targetFile.mimeType)
+    );
+    if (tgBlob && tgBlob.size > 0) {
+      await storeClientBinaryBlob(fileId, tgBlob);
+      return tgBlob;
     }
-  });
+  }
+
+  return null;
 }
 
 export async function deleteClientBinaryBlob(fileId: string): Promise<void> {
@@ -361,8 +476,8 @@ function createInitialClientDb(): ClientDatabase {
       autoThrottlePeakHours: false,
     },
     telegramConfig: {
-      botToken: '',
-      chatId: '',
+      botToken: (import.meta as any).env?.VITE_TELEGRAM_BOT_TOKEN || '',
+      chatId: (import.meta as any).env?.VITE_TELEGRAM_CHAT_ID || '',
       autoSyncUploads: true,
     },
   };
@@ -920,30 +1035,25 @@ async function handleClientApi(urlStr: string, init?: RequestInit): Promise<Resp
       }
 
       let storageDriver: 'telegram' | 'local_vault' = 'local_vault';
-      const telegramChunks: TelegramChunk[] = [];
+      let telegramChunks: TelegramChunk[] = [];
+      let telegramChatId: string | undefined;
 
-      if (db.telegramConfig.botToken && db.telegramConfig.chatId && f.size <= 45 * 1024 * 1024) {
-        try {
-          const tgForm = new FormData();
-          tgForm.append('chat_id', db.telegramConfig.chatId);
-          tgForm.append('document', f, f.name);
-          const tgRes = await originalFetch(
-            `https://api.telegram.org/bot${db.telegramConfig.botToken}/sendDocument`,
-            { method: 'POST', body: tgForm }
-          );
-          const tgJson = await tgRes.json();
-          if (tgJson.ok && tgJson.result?.document?.file_id) {
-            storageDriver = 'telegram';
-            telegramChunks.push({
-              partIndex: 0,
-              messageId: tgJson.result.message_id,
-              fileId: tgJson.result.document.file_id,
-              sizeBytes: f.size,
-              sha256Part: simpleHash(f.name),
-            });
-          }
-        } catch {
-          // fallback to local vault
+      const envToken = (import.meta as any).env?.VITE_TELEGRAM_BOT_TOKEN || '';
+      const envChat = (import.meta as any).env?.VITE_TELEGRAM_CHAT_ID || '';
+      const activeBotToken = db.telegramConfig.botToken || envToken;
+      const activeChatId = db.telegramConfig.chatId || envChat;
+
+      if (activeBotToken && activeChatId && f.size <= 500 * 1024 * 1024) {
+        const tgResult = await pushBlobToTelegramClient(
+          f,
+          f.name,
+          activeBotToken,
+          activeChatId
+        );
+        if (tgResult.success) {
+          storageDriver = 'telegram';
+          telegramChunks = tgResult.chunks;
+          telegramChatId = activeChatId;
         }
       }
 
@@ -957,6 +1067,7 @@ async function handleClientApi(urlStr: string, init?: RequestInit): Promise<Resp
         mimeType: mime,
         sha256: simpleHash(f.name + f.size),
         storageDriver,
+        telegramChatId,
         telegramChunks,
         starred: false,
         downloadCount: 0,
@@ -1013,8 +1124,8 @@ async function handleClientApi(urlStr: string, init?: RequestInit): Promise<Resp
       saveClientDb(db);
     }
 
-    // 1. Check IndexedDB / in-memory binary vault first (full 285 MB+ binary fidelity)
-    const binaryBlob = await getClientBinaryBlob(file.id);
+    // 1. Check IndexedDB / in-memory binary vault or Telegram chunk reassembly first
+    const binaryBlob = await getClientBinaryBlob(file.id, file);
     if (binaryBlob) {
       const isMkv =
         file.name.toLowerCase().endsWith('.mkv') || file.mimeType === 'video/x-matroska';
@@ -1806,3 +1917,190 @@ export async function uploadFilesWithProgress(params: {
   const data = await res.json();
   return { ok: res.ok, status: res.status, data };
 }
+
+/**
+ * Synchronizes the user's cross-device Firestore drive (files, folders, profile, and
+ * hidden Telegram storage node credentials) with both the client database and the
+ * Express backend server so files appear on every logged-in device.
+ */
+export async function syncClientDbWithFirestoreDrive(params: {
+  uid: string;
+  email?: string;
+  name?: string;
+  headers: Record<string, string>;
+  profile?: {
+    planId: StoragePlanId;
+    tokenBalance: number;
+    planExpiresAt: string;
+    graceEndsAt: string;
+    usedPromoCodes: string;
+  } | null;
+  cloudFiles: FileRecord[];
+  cloudFolders: FolderRecord[];
+  storageNodeConfig?: {
+    botToken: string;
+    chatId: string;
+    botUsername: string;
+    autoSyncUploads: boolean;
+  } | null;
+}): Promise<{
+  unsyncedLocalFiles: FileRecord[];
+  unsyncedLocalFolders: FolderRecord[];
+}> {
+  const db = loadClientDb();
+  const isAdminEmail = (params.email || '').toLowerCase() === 'titumamma2425@gmail.com';
+
+  // 1. Sync global Telegram Storage Node credentials if present in Firestore
+  if (
+    params.storageNodeConfig &&
+    params.storageNodeConfig.botToken &&
+    params.storageNodeConfig.chatId
+  ) {
+    db.telegramConfig.botToken = params.storageNodeConfig.botToken;
+    db.telegramConfig.chatId = params.storageNodeConfig.chatId;
+    db.telegramConfig.botUsername = params.storageNodeConfig.botUsername;
+    db.telegramConfig.autoSyncUploads = params.storageNodeConfig.autoSyncUploads;
+  }
+
+  // 2. Ensure user exists in client DB & sync profile plan / token balance from Firestore
+  let user = db.users.find((u) => u.id === params.uid);
+  if (!user) {
+    user = {
+      id: params.uid,
+      name: params.name || params.email?.split('@')[0] || 'Cloud User',
+      email: params.email || `${params.uid}@user.unlimcloud`,
+      passwordHash: '',
+      role: isAdminEmail ? 'admin' : 'member',
+      bandwidthLimitBytes: FREE_25GB_BYTES,
+      bandwidthUsedBytes: 0,
+      storageUsedBytes: 0,
+      createdAt: new Date().toISOString(),
+      planId: 'free_25gb',
+      tokenBalance: 0,
+      planExpiresAt: null,
+      graceEndsAt: null,
+      usedPromoCodes: [],
+    };
+    db.users.push(user);
+    seedStarterClientFilesForNewUser(db, user);
+  }
+
+  if (params.profile) {
+    user.planId = params.profile.planId || user.planId || 'free_25gb';
+    user.tokenBalance = Math.max(user.tokenBalance || 0, params.profile.tokenBalance || 0);
+    if (params.profile.planExpiresAt) {
+      user.planExpiresAt = params.profile.planExpiresAt;
+    }
+    if (params.profile.graceEndsAt) {
+      user.graceEndsAt = params.profile.graceEndsAt;
+    }
+    if (params.profile.usedPromoCodes) {
+      const codes = params.profile.usedPromoCodes
+        .split(',')
+        .map((c) => c.trim())
+        .filter(Boolean);
+      user.usedPromoCodes = Array.from(new Set([...(user.usedPromoCodes || []), ...codes]));
+    }
+  }
+
+  // 3. Merge cloudFolders from Firestore into local db.folders
+  const cloudFolderIds = new Set(params.cloudFolders.map((f) => f.id));
+  for (const cf of params.cloudFolders) {
+    const existingIdx = db.folders.findIndex((f) => f.id === cf.id && f.ownerId === params.uid);
+    if (existingIdx === -1) {
+      db.folders.push(cf);
+    } else {
+      db.folders[existingIdx] = {
+        ...db.folders[existingIdx],
+        name: cf.name,
+        parentId: cf.parentId,
+      };
+    }
+  }
+
+  const unsyncedLocalFolders = db.folders.filter(
+    (f) => f.ownerId === params.uid && !cloudFolderIds.has(f.id)
+  );
+
+  // 4. Merge cloudFiles from Firestore into local db.files
+  const cloudFileMap = new Map<string, FileRecord>();
+  params.cloudFiles.forEach((cf) => cloudFileMap.set(cf.id, cf));
+
+  for (const cf of params.cloudFiles) {
+    const existingIdx = db.files.findIndex((f) => f.id === cf.id && f.ownerId === params.uid);
+    if (existingIdx === -1) {
+      db.files.unshift(cf);
+    } else {
+      const local = db.files[existingIdx];
+      db.files[existingIdx] = {
+        ...local,
+        name: cf.name || local.name,
+        folderId: cf.folderId,
+        starred: cf.starred,
+        downloadCount: Math.max(local.downloadCount || 0, cf.downloadCount || 0),
+        storageDriver:
+          cf.telegramChunks && cf.telegramChunks.length > 0
+            ? 'telegram'
+            : local.storageDriver || cf.storageDriver,
+        telegramChatId: cf.telegramChatId || local.telegramChatId,
+        telegramChunks:
+          cf.telegramChunks && cf.telegramChunks.length > 0
+            ? cf.telegramChunks
+            : local.telegramChunks || [],
+        previewText: local.previewText || cf.previewText,
+        previewDataUrl: local.previewDataUrl || cf.previewDataUrl,
+      };
+    }
+  }
+
+  // Sort user files newest first
+  db.files.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+
+  const isStarter = (id: string) =>
+    id.startsWith('file_welcome_') || id === 'file_spec_01' || id === 'file_diagram_02';
+
+  const unsyncedLocalFiles = db.files.filter((f) => {
+    if (f.ownerId !== params.uid || isStarter(f.id)) return false;
+    const inCloud = cloudFileMap.get(f.id);
+    if (!inCloud) return true;
+    // Also re-sync if local has Telegram chunks that Firestore doesn't have yet
+    if (
+      f.telegramChunks &&
+      f.telegramChunks.length > 0 &&
+      (!inCloud.telegramChunks || inCloud.telegramChunks.length === 0)
+    ) {
+      return true;
+    }
+    return false;
+  });
+
+  evaluateClientQuotaAndLocks(db, user);
+  saveClientDb(db);
+
+  // 5. If Express backend is active, push the merged Firestore state to the server so /api/files and /api/files/:id/download know all files & Telegram chunks
+  if (staticFallbackMode !== true) {
+    try {
+      await originalFetch('/api/files/sync-from-cloud', {
+        method: 'POST',
+        headers: {
+          ...params.headers,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          profile: params.profile,
+          files: db.files.filter((f) => f.ownerId === params.uid),
+          folders: db.folders.filter((f) => f.ownerId === params.uid),
+          storageNodeConfig: params.storageNodeConfig,
+        }),
+      });
+    } catch {
+      // ignore if on static host
+    }
+  }
+
+  return {
+    unsyncedLocalFiles,
+    unsyncedLocalFolders,
+  };
+}
+

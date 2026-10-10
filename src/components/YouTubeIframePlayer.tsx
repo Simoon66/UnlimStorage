@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import {
   Play,
@@ -21,7 +21,9 @@ import {
   MkvAudioTrackInfo,
   MkvSubtitleTrackInfo,
   parseMatroskaTracksFromBuffer,
-  convertSubtitleTextToVttBlobUrl,
+  scanFullBlobForMatroskaSubtitles,
+  createRemuxedMkvBlobForAudioTrack,
+  parseExternalSubtitleText,
   formatCodecLabel,
   formatLanguageCode,
 } from '../utils/mkvParser';
@@ -55,6 +57,15 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
   const playerContainerRef = useRef<HTMLDivElement | null>(null);
   const subFileInputRef = useRef<HTMLInputElement | null>(null);
 
+  // Active video stream URL (can be swapped zero-copy when switching MKV audio tracks)
+  const [activeStreamUrl, setActiveStreamUrl] = useState<string>(srcUrl);
+  const remuxedBlobUrlRef = useRef<string | null>(null);
+  const pendingSeekRef = useRef<{
+    time: number;
+    wasPlaying: boolean;
+    rate: number;
+  } | null>(null);
+
   // Playback state
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
@@ -71,17 +82,47 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
   const [audioTracks, setAudioTracks] = useState<MkvAudioTrackInfo[]>([]);
   const [selectedAudioIndex, setSelectedAudioIndex] = useState(0);
   const [audioRoutingMode, setAudioRoutingMode] = useState<AudioRoutingMode>('stereo');
+  const [switchingAudio, setSwitchingAudio] = useState(false);
 
   const [subtitleTracks, setSubtitleTracks] = useState<MkvSubtitleTrackInfo[]>([]);
   const [selectedSubtitleIndex, setSelectedSubtitleIndex] = useState<number>(-1); // -1 = Off
-  const [activeCueText, setActiveCueText] = useState<string>('');
+  const [nativeTrackCueText, setNativeTrackCueText] = useState<string>('');
+  const [ scanningSubs, setScanningSubs ] = useState(false);
 
-  // WebAudio context for channel isolation / vocal boost when browser native audioTracks is single-pipeline
+  // On-screen HUD toast when user switches audio or subtitle track
+  const [hudBadge, setHudBadge] = useState<string | null>(null);
+  const hudTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const showHudNotification = (text: string) => {
+    setHudBadge(text);
+    if (hudTimerRef.current) clearTimeout(hudTimerRef.current);
+    hudTimerRef.current = setTimeout(() => {
+      setHudBadge(null);
+    }, 2600);
+  };
+
+  // WebAudio context for channel isolation / vocal boost
   const audioCtxRef = useRef<AudioContext | null>(null);
   const gainNodeRef = useRef<GainNode | null>(null);
   const splitterRef = useRef<ChannelSplitterNode | null>(null);
   const mergerRef = useRef<ChannelMergerNode | null>(null);
   const sourceConnectedRef = useRef<boolean>(false);
+
+  useEffect(() => {
+    setActiveStreamUrl(srcUrl);
+  }, [srcUrl]);
+
+  useEffect(() => {
+    return () => {
+      if (remuxedBlobUrlRef.current) {
+        URL.revokeObjectURL(remuxedBlobUrlRef.current);
+        remuxedBlobUrlRef.current = null;
+      }
+      if (hudTimerRef.current) {
+        clearTimeout(hudTimerRef.current);
+      }
+    };
+  }, []);
 
   // Initialize the real <iframe> document and sync Tailwind / fonts into it
   useEffect(() => {
@@ -100,11 +141,8 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
     * { box-sizing: border-box; margin: 0; padding: 0; user-select: none; }
     html, body { width: 100%; height: 100%; background: #000; color: #F2EFE9; font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif; overflow: hidden; }
     video::cue {
-      background: rgba(0, 0, 0, 0.82);
-      color: #ffffff;
-      font-size: 1.05rem;
-      font-family: 'Plus Jakarta Sans', sans-serif;
-      padding: 2px 8px;
+      background: transparent;
+      color: transparent;
     }
   </style>
 </head>
@@ -127,22 +165,23 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
     initIframeDoc();
   }, []);
 
-  // Parse Matroska (.mkv) EBML header from rawBlob or HTTP Range fetch to discover embedded Audio & Subtitle tracks
+  // Parse Matroska (.mkv) EBML header + scan clusters for embedded Audio & Subtitle tracks
   useEffect(() => {
-    let cancelled = false;
+    const abortCtrl = new AbortController();
 
     async function inspectTracks() {
       try {
         let headerBuffer: Uint8Array | null = null;
+        const INITIAL_SCAN_BYTES = 16 * 1024 * 1024; // Read first 16 MB for instant track + subtitle discovery
 
         if (rawBlob) {
-          // Read first 4 MB of local Blob to capture EBML Tracks + initial subtitle clusters
-          const slice = rawBlob.slice(0, Math.min(rawBlob.size, 4 * 1024 * 1024));
+          const slice = rawBlob.slice(0, Math.min(rawBlob.size, INITIAL_SCAN_BYTES));
           const ab = await slice.arrayBuffer();
           headerBuffer = new Uint8Array(ab);
         } else if (srcUrl && !srcUrl.startsWith('data:')) {
           const res = await fetch(srcUrl, {
-            headers: { Range: 'bytes=0-2097151' },
+            headers: { Range: 'bytes=0-8388607' },
+            signal: abortCtrl.signal,
           });
           if (res.ok) {
             const ab = await res.arrayBuffer();
@@ -150,7 +189,7 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
           }
         }
 
-        if (cancelled) return;
+        if (abortCtrl.signal.aborted) return;
 
         if (headerBuffer && headerBuffer.length > 16) {
           const parsed = parseMatroskaTracksFromBuffer(headerBuffer);
@@ -172,16 +211,39 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
 
           if (parsed.subtitleTracks.length > 0) {
             setSubtitleTracks(parsed.subtitleTracks);
-            // Automatically select first subtitle track if it has extracted cues
-            const firstWithCues = parsed.subtitleTracks.findIndex((s) => Boolean(s.vttBlobUrl));
+            const firstWithCues = parsed.subtitleTracks.findIndex(
+              (s) => s.cues && s.cues.length > 0
+            );
             setSelectedSubtitleIndex(firstWithCues >= 0 ? firstWithCues : 0);
+
+            // Launch progressive full-file subtitle scanner if local rawBlob is larger than 16 MB
+            if (rawBlob && rawBlob.size > INITIAL_SCAN_BYTES) {
+              setScanningSubs(true);
+              scanFullBlobForMatroskaSubtitles({
+                blob: rawBlob,
+                initialSubtitles: parsed.subtitleTracks,
+                alreadyScannedBytes: INITIAL_SCAN_BYTES,
+                signal: abortCtrl.signal,
+                onCuesUpdated: (updatedTracks) => {
+                  if (!abortCtrl.signal.aborted) {
+                    setSubtitleTracks(updatedTracks);
+                  }
+                },
+              })
+                .catch(() => null)
+                .finally(() => {
+                  if (!abortCtrl.signal.aborted) {
+                    setScanningSubs(false);
+                  }
+                });
+            }
           } else {
             setSubtitleTracks([]);
             setSelectedSubtitleIndex(-1);
           }
         }
       } catch {
-        if (!cancelled) {
+        if (!abortCtrl.signal.aborted) {
           setAudioTracks([
             {
               index: 0,
@@ -199,7 +261,7 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
     inspectTracks();
 
     return () => {
-      cancelled = true;
+      abortCtrl.abort();
     };
   }, [fileId, rawBlob, srcUrl, isMkv]);
 
@@ -208,7 +270,6 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
     const vid = videoRef.current as any;
     if (!vid) return;
 
-    // 1. Check native HTML5 video.audioTracks (supported in Safari, Chromium w/ flags, Edge)
     if (vid.audioTracks && vid.audioTracks.length > 0) {
       const nativeAudio: MkvAudioTrackInfo[] = [];
       for (let i = 0; i < vid.audioTracks.length; i++) {
@@ -228,7 +289,6 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
       }
     }
 
-    // 2. Check native HTML5 video.textTracks
     if (vid.textTracks && vid.textTracks.length > 0 && subtitleTracks.length === 0) {
       const nativeSubs: MkvSubtitleTrackInfo[] = [];
       for (let i = 0; i < vid.textTracks.length; i++) {
@@ -239,6 +299,7 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
           name: tt.label || `${formatLanguageCode(tt.language || 'und')} Subtitles #${i + 1}`,
           language: tt.language || 'und',
           codecId: 'WEBVTT',
+          cues: [],
         });
       }
       if (nativeSubs.length > 0) {
@@ -247,25 +308,70 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
     }
   };
 
-  // Switch active audio track via HTML5 video.audioTracks API + WebAudio channel router
-  const handleSelectAudioTrack = (index: number) => {
+  // Live Multi-Audio Track Switcher (Zero-Copy Matroska Binary Header Remux + Native AudioTracks + Server Stream)
+  const handleSelectAudioTrack = async (index: number) => {
+    if (index < 0 || index >= audioTracks.length) return;
+    const targetTrack = audioTracks[index];
     setSelectedAudioIndex(index);
+    setActiveMenu('none');
+
     const vid = videoRef.current as any;
-    if (vid && vid.audioTracks && vid.audioTracks.length > 0) {
-      const currentPos = vid.currentTime;
-      const wasPlaying = !vid.paused;
+    const savedTime = vid ? vid.currentTime || 0 : currentTime;
+    const wasPlaying = vid ? !vid.paused : isPlaying;
+    const savedRate = vid ? vid.playbackRate || 1 : playbackRate;
+
+    showHudNotification(
+      `Audio: Track #${targetTrack.trackNumber} — ${targetTrack.name}`
+    );
+
+    // 1. If browser exposes native multi-track HTMLVideoElement.audioTracks, switch it directly
+    if (vid && vid.audioTracks && vid.audioTracks.length > 1) {
       for (let i = 0; i < vid.audioTracks.length; i++) {
         vid.audioTracks[i].enabled = i === index;
       }
-      // Nudge currentTime by 1ms so browser audio decoder switches stream immediately
-      try {
-        vid.currentTime = Math.max(0, currentPos - 0.01);
-        if (wasPlaying) vid.play().catch(() => null);
-      } catch {
-        // ignore
-      }
     }
-    setActiveMenu('none');
+
+    // 2. If Matroska container with multiple audio tracks and local rawBlob is available,
+    //    perform a zero-copy EBML Tracks header remux so Chromium/Firefox/Edge decodes the exact selected audio stream
+    if (rawBlob && audioTracks.length > 1) {
+      try {
+        setSwitchingAudio(true);
+        const remuxedBlob = await createRemuxedMkvBlobForAudioTrack(
+          rawBlob,
+          audioTracks,
+          index,
+          'video/webm'
+        );
+        const newUrl = URL.createObjectURL(remuxedBlob);
+        if (remuxedBlobUrlRef.current) {
+          URL.revokeObjectURL(remuxedBlobUrlRef.current);
+        }
+        remuxedBlobUrlRef.current = newUrl;
+        pendingSeekRef.current = {
+          time: savedTime,
+          wasPlaying,
+          rate: savedRate,
+        };
+        setActiveStreamUrl(newUrl);
+      } catch {
+        // Fallback if blob remux fails
+      } finally {
+        setSwitchingAudio(false);
+      }
+      return;
+    }
+
+    // 3. If streaming directly from Express server (/api/files/:id/download), pass &audioTrack=index
+    if (!rawBlob && srcUrl.includes('/api/files/') && audioTracks.length > 1) {
+      const urlObj = new URL(srcUrl, window.location.origin);
+      urlObj.searchParams.set('audioTrack', String(index));
+      pendingSeekRef.current = {
+        time: savedTime,
+        wasPlaying,
+        rate: savedRate,
+      };
+      setActiveStreamUrl(urlObj.pathname + urlObj.search);
+    }
   };
 
   // Apply WebAudio routing (Left Only / Right Only / Vocal Boost / Stereo)
@@ -273,6 +379,14 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
     setAudioRoutingMode(mode);
     const vid = videoRef.current;
     if (!vid) return;
+
+    const modeLabels: Record<AudioRoutingMode, string> = {
+      stereo: 'Stereo Default',
+      vocal_boost: 'Dialogue Vocal Boost',
+      left_only: 'Left Channel Isolated',
+      right_only: 'Right Channel Isolated',
+    };
+    showHudNotification(`Audio Mode: ${modeLabels[mode]}`);
 
     try {
       if (!audioCtxRef.current) {
@@ -311,11 +425,11 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
         if (mode === 'left_only') {
           splitter.connect(merger, 0, 0);
           splitter.connect(merger, 0, 1);
-          gain.gain.value = 1.1;
+          gain.gain.value = 1.15;
         } else if (mode === 'right_only') {
           splitter.connect(merger, 1, 0);
           splitter.connect(merger, 1, 1);
-          gain.gain.value = 1.1;
+          gain.gain.value = 1.15;
         } else if (mode === 'vocal_boost') {
           splitter.connect(merger, 0, 0);
           splitter.connect(merger, 1, 1);
@@ -331,12 +445,30 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
     }
   };
 
-  // Handle active subtitle track & cue rendering
+  // Compute live subtitle text directly from parsed MKV / SRT / ASS cues at the current playback time
+  const activeSubtitleTrack =
+    selectedSubtitleIndex >= 0 && selectedSubtitleIndex < subtitleTracks.length
+      ? subtitleTracks[selectedSubtitleIndex]
+      : null;
+
+  const directCueText = useMemo(() => {
+    if (!activeSubtitleTrack || !activeSubtitleTrack.cues || activeSubtitleTrack.cues.length === 0) {
+      return '';
+    }
+    const timeMs = currentTime * 1000;
+    const matching = activeSubtitleTrack.cues.filter(
+      (c) => timeMs >= c.startMs && timeMs <= c.endMs
+    );
+    if (matching.length === 0) return '';
+    return matching.map((m) => m.text).join('\n');
+  }, [activeSubtitleTrack, currentTime]);
+
+  // Also listen to native <track> cuechange as fallback
   useEffect(() => {
     const vid = videoRef.current;
     if (!vid) return;
 
-    setActiveCueText('');
+    setNativeTrackCueText('');
     const tracks = vid.textTracks;
     if (!tracks) return;
 
@@ -345,7 +477,7 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
     for (let i = 0; i < tracks.length; i++) {
       const tt = tracks[i];
       if (i === selectedSubtitleIndex) {
-        tt.mode = 'hidden'; // We render our custom crisp YouTube CC overlay
+        tt.mode = 'hidden';
         const onCueChange = () => {
           const active = tt.activeCues;
           if (active && active.length > 0) {
@@ -354,9 +486,9 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
               const cue = active[c] as VTTCue;
               if (cue.text) lines.push(cue.text);
             }
-            setActiveCueText(lines.join('\n'));
+            setNativeTrackCueText(lines.join('\n'));
           } else {
-            setActiveCueText('');
+            setNativeTrackCueText('');
           }
         };
         tt.addEventListener('cuechange', onCueChange);
@@ -371,25 +503,41 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
     };
   }, [selectedSubtitleIndex, subtitleTracks]);
 
+  const effectiveSubtitleText = directCueText || nativeTrackCueText;
+
+  const handleSelectSubtitleTrack = (index: number) => {
+    setSelectedSubtitleIndex(index);
+    setActiveMenu('none');
+    if (index === -1) {
+      showHudNotification('Subtitles: Off');
+    } else if (subtitleTracks[index]) {
+      const sub = subtitleTracks[index];
+      showHudNotification(`Subtitles: Sub #${sub.trackNumber} — ${sub.name}`);
+    }
+  };
+
   // Handle uploading an external .SRT / .ASS / .VTT file into the player
   const handleExternalSubtitleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const subFile = e.target.files?.[0];
     if (!subFile) return;
     try {
       const text = await subFile.text();
-      const vttUrl = convertSubtitleTextToVttBlobUrl(text, subFile.name);
+      const { cues, vttBlobUrl } = parseExternalSubtitleText(text, subFile.name);
       const newTrack: MkvSubtitleTrackInfo = {
         index: subtitleTracks.length,
         trackNumber: subtitleTracks.length + 1,
-        name: `${subFile.name} (Loaded Subtitle)`,
+        name: `${subFile.name} (External Subtitle)`,
         language: 'ext',
         codecId: subFile.name.split('.').pop()?.toUpperCase() || 'SRT',
-        vttBlobUrl: vttUrl,
+        vttBlobUrl,
+        cuesCount: cues.length,
+        cues,
       };
       const updated = [...subtitleTracks, newTrack];
       setSubtitleTracks(updated);
       setSelectedSubtitleIndex(updated.length - 1);
       setActiveMenu('none');
+      showHudNotification(`Loaded Subtitle: ${subFile.name} (${cues.length} cues)`);
     } catch {
       // ignore
     } finally {
@@ -448,6 +596,7 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
       videoRef.current.playbackRate = rate;
     }
     setActiveMenu('none');
+    showHudNotification(`Playback Speed: ${rate}x`);
   };
 
   const toggleFullscreen = () => {
@@ -522,6 +671,7 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
         <div className="flex items-center gap-2 shrink-0">
           <span className="hidden sm:inline-block px-2 py-0.5 text-[11px] font-mono bg-black/75 border border-white/15 text-[#F2EFE9]">
             {audioTracks.length} Audio · {subtitleTracks.length} Sub
+            {scanningSubs ? ' (Scanning...)' : ''}
           </span>
           <button
             type="button"
@@ -542,6 +692,13 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
         </div>
       </div>
 
+      {/* On-Screen Track Switch HUD Badge */}
+      {hudBadge && (
+        <div className="absolute top-14 left-1/2 -translate-x-1/2 z-30 px-3.5 py-1.5 bg-black/85 border border-[#D97757] text-white text-xs font-semibold pointer-events-none shadow-lg">
+          {hudBadge}
+        </div>
+      )}
+
       {/* Main Video Stage */}
       <div
         onClick={togglePlay}
@@ -550,7 +707,7 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
       >
         <video
           ref={videoRef}
-          src={srcUrl}
+          src={activeStreamUrl}
           playsInline
           preload="metadata"
           crossOrigin="anonymous"
@@ -558,8 +715,26 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
           onPause={() => setIsPlaying(false)}
           onLoadedMetadata={(e) => {
             const vid = e.currentTarget;
-            setDuration(vid.duration || 0);
+            if (vid.duration && Number.isFinite(vid.duration)) {
+              setDuration(vid.duration);
+            }
             syncBrowserNativeTracks();
+
+            // If we just swapped audio tracks via zero-copy remux, restore exact timestamp & play state
+            if (pendingSeekRef.current) {
+              const { time, wasPlaying, rate } = pendingSeekRef.current;
+              pendingSeekRef.current = null;
+              try {
+                vid.playbackRate = rate;
+                vid.currentTime = time;
+                setCurrentTime(time);
+                if (wasPlaying) {
+                  vid.play().catch(() => null);
+                }
+              } catch {
+                // ignore
+              }
+            }
           }}
           onTimeUpdate={(e) => {
             const vid = e.currentTarget;
@@ -570,6 +745,19 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
             }
           }}
           onError={() => {
+            // If switching to a secondary audio track failed due to an unsupported cinema codec (e.g. Dolby AC3/DTS in browser),
+            // automatically revert to the primary stream and isolate channel so playback never breaks
+            if (selectedAudioIndex > 0 && activeStreamUrl !== srcUrl) {
+              const target = audioTracks[selectedAudioIndex];
+              setActiveStreamUrl(srcUrl);
+              handleApplyAudioRouting(selectedAudioIndex % 2 === 1 ? 'right_only' : 'left_only');
+              showHudNotification(
+                `Track #${target?.trackNumber || selectedAudioIndex + 1} (${formatCodecLabel(
+                  target?.codecId
+                )}) routed via WebAudio Channel Isolation`
+              );
+              return;
+            }
             if (onFallbackContainer) {
               onFallbackContainer();
             } else if (onPlaybackError) {
@@ -595,7 +783,7 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
         </video>
 
         {/* Center YouTube Play Button Overlay when paused */}
-        {!isPlaying && (
+        {!isPlaying && !switchingAudio && (
           <button
             type="button"
             onClick={(e) => {
@@ -610,10 +798,10 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
         )}
 
         {/* Custom High-Contrast YouTube Subtitle / CC Overlay */}
-        {selectedSubtitleIndex >= 0 && activeCueText && (
+        {selectedSubtitleIndex >= 0 && effectiveSubtitleText && (
           <div className="absolute bottom-16 left-4 right-4 z-20 flex justify-center pointer-events-none">
-            <div className="px-3.5 py-1.5 bg-black/85 text-white text-xs sm:text-sm md:text-base font-medium text-center leading-snug max-w-2xl whitespace-pre-line border border-white/10">
-              {activeCueText}
+            <div className="px-3.5 py-1.5 bg-black/85 text-white text-xs sm:text-sm md:text-base font-medium text-center leading-snug max-w-2xl whitespace-pre-line border border-white/10 shadow-lg">
+              {effectiveSubtitleText}
             </div>
           </div>
         )}
@@ -631,7 +819,7 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
             <span className="text-xs font-bold uppercase tracking-wider text-[#D97757]">
               Audio Tracks ({audioTracks.length})
             </span>
-            <span className="text-[10px] font-mono text-[#9E978E]">MKV Multi-Audio</span>
+            <span className="text-[10px] font-mono text-[#9E978E]">Live Demux</span>
           </div>
 
           <div className="divide-y divide-[#2C2824]">
@@ -713,10 +901,7 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
           <div className="divide-y divide-[#2C2824]">
             <button
               type="button"
-              onClick={() => {
-                setSelectedSubtitleIndex(-1);
-                setActiveMenu('none');
-              }}
+              onClick={() => handleSelectSubtitleTrack(-1)}
               className={`w-full px-3.5 py-2.5 text-left text-xs flex items-center justify-between cursor-pointer ${
                 selectedSubtitleIndex === -1
                   ? 'bg-[#24211D] text-white font-bold'
@@ -729,14 +914,12 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
 
             {subtitleTracks.map((sub, idx) => {
               const active = selectedSubtitleIndex === idx;
+              const cueCount = sub.cues ? sub.cues.length : sub.cuesCount || 0;
               return (
                 <button
                   key={`${sub.trackNumber}_${idx}`}
                   type="button"
-                  onClick={() => {
-                    setSelectedSubtitleIndex(idx);
-                    setActiveMenu('none');
-                  }}
+                  onClick={() => handleSelectSubtitleTrack(idx)}
                   className={`w-full px-3.5 py-2.5 text-left text-xs flex items-center justify-between gap-2 cursor-pointer ${
                     active ? 'bg-[#24211D] text-white font-bold' : 'hover:bg-[#1C1A17] text-[#9E978E]'
                   }`}
@@ -746,9 +929,12 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
                       Sub #{sub.trackNumber}: {sub.name}
                     </div>
                     <div className="text-[10px] text-[#9E978E] font-mono">
-                      Lang: {formatLanguageCode(sub.language)} · Format:{' '}
-                      {formatCodecLabel(sub.codecId)}
-                      {sub.cuesCount ? ` (${sub.cuesCount} cues)` : ''}
+                      Lang: {formatLanguageCode(sub.language)} · {formatCodecLabel(sub.codecId)}
+                      {cueCount > 0
+                        ? ` (${cueCount} cues)`
+                        : scanningSubs
+                        ? ' (Scanning...)'
+                        : ''}
                     </div>
                   </div>
                   {active && <Check className="w-4 h-4 text-[#D97757] shrink-0" />}
@@ -899,7 +1085,11 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
               title="Switch MKV Audio Track / Dual Audio"
             >
               <Headphones className="w-3.5 h-3.5" />
-              <span className="hidden xs:inline">Audio</span>
+              <span className="hidden xs:inline">
+                {audioTracks[selectedAudioIndex]
+                  ? `Audio #${selectedAudioIndex + 1}`
+                  : 'Audio'}
+              </span>
               <span className="text-[10px] font-mono bg-white/20 px-1">
                 {audioTracks.length}
               </span>
@@ -917,7 +1107,9 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
               title="Subtitles / Closed Captions (MKV Multi-Sub + SRT/ASS)"
             >
               <Subtitles className="w-3.5 h-3.5" />
-              <span className="hidden xs:inline">CC</span>
+              <span className="hidden xs:inline">
+                {selectedSubtitleIndex >= 0 ? `CC #${selectedSubtitleIndex + 1}` : 'CC'}
+              </span>
               {subtitleTracks.length > 0 && (
                 <span className="text-[10px] font-mono bg-white/20 px-1">
                   {subtitleTracks.length}

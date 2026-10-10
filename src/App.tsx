@@ -47,6 +47,7 @@ import {
   apiFetch,
   uploadFilesWithProgress,
   getClientBinaryBlob,
+  syncClientDbWithFirestoreDrive,
 } from './services/clientCloudFallback';
 import {
   auth,
@@ -57,6 +58,11 @@ import {
   updateFirestoreUserProfile,
   syncCloudFileToFirestore,
   deleteCloudFileFromFirestore,
+  syncCloudFolderToFirestore,
+  deleteCloudFolderFromFirestore,
+  fetchUserCloudDriveFromFirestore,
+  fetchStorageNodeConfigFromFirestore,
+  saveStorageNodeConfigToFirestore,
   FirebaseUser,
 } from './firebase';
 import { PublicSharePortal } from './components/PublicSharePortal';
@@ -103,6 +109,135 @@ function renderFileIcon(file: FileRecord) {
   }
   return <FileText className="w-6 h-6 text-[#D97757]" />;
 }
+
+interface ToastNotificationCardProps {
+  notification: RealtimeNotification;
+  onDismiss: (id: string) => void;
+}
+
+const ToastNotificationCard: React.FC<ToastNotificationCardProps> = ({
+  notification,
+  onDismiss,
+}) => {
+  const DURATION_MS = 4000;
+  const [remainingMs, setRemainingMs] = useState(DURATION_MS);
+  const [isPaused, setIsPaused] = useState(false);
+  const [dragOffsetX, setDragOffsetX] = useState(0);
+  const [isDragging, setIsDragging] = useState(false);
+  const [isExiting, setIsExiting] = useState(false);
+  const dragStartXRef = useRef<number | null>(null);
+
+  const triggerDismiss = useCallback(() => {
+    setIsExiting(true);
+    setTimeout(() => {
+      onDismiss(notification.id);
+    }, 180);
+  }, [notification.id, onDismiss]);
+
+  useEffect(() => {
+    if (isPaused || isDragging || isExiting) return;
+    const interval = setInterval(() => {
+      setRemainingMs((prev) => {
+        if (prev <= 50) {
+          clearInterval(interval);
+          triggerDismiss();
+          return 0;
+        }
+        return prev - 50;
+      });
+    }, 50);
+    return () => clearInterval(interval);
+  }, [isPaused, isDragging, isExiting, triggerDismiss]);
+
+  const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if ((e.target as HTMLElement).closest('button')) return;
+    dragStartXRef.current = e.clientX;
+    setIsDragging(true);
+    e.currentTarget.setPointerCapture(e.pointerId);
+  };
+
+  const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!isDragging || dragStartXRef.current === null) return;
+    const deltaX = e.clientX - dragStartXRef.current;
+    setDragOffsetX(deltaX);
+  };
+
+  const handlePointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!isDragging) return;
+    setIsDragging(false);
+    dragStartXRef.current = null;
+    try {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    } catch {
+      // ignore
+    }
+    if (Math.abs(dragOffsetX) > 70) {
+      triggerDismiss();
+    } else {
+      setDragOffsetX(0);
+    }
+  };
+
+  const progressPercent = Math.max(0, Math.min(100, (remainingMs / DURATION_MS) * 100));
+  const opacity = isExiting
+    ? 0
+    : Math.max(0.25, 1 - Math.abs(dragOffsetX) / 220);
+
+  return (
+    <div
+      onMouseEnter={() => setIsPaused(true)}
+      onMouseLeave={() => setIsPaused(false)}
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      onPointerUp={handlePointerUp}
+      onPointerCancel={handlePointerUp}
+      style={{
+        transform: isExiting
+          ? `translateX(${dragOffsetX >= 0 ? 120 : -120}%)`
+          : `translateX(${dragOffsetX}px)`,
+        opacity,
+        transition: isDragging
+          ? 'none'
+          : 'transform 180ms cubic-bezier(0.16, 1, 0.3, 1), opacity 180ms ease-out',
+        touchAction: 'pan-y',
+      }}
+      title="Swipe left/right or click X to dismiss"
+      className="pointer-events-auto relative overflow-hidden bg-[#1C1A17] border border-[#D97757] p-4 flex items-start justify-between gap-3 select-none cursor-grab active:cursor-grabbing shadow-xl"
+    >
+      <div className="flex items-start gap-2.5 min-w-0">
+        {notification.type === 'error' ? (
+          <AlertCircle className="w-4 h-4 text-[#D94848] shrink-0 mt-0.5" />
+        ) : (
+          <CheckCircle2 className="w-4 h-4 text-[#2E9E6B] shrink-0 mt-0.5" />
+        )}
+        <div className="space-y-0.5 min-w-0">
+          <div className="text-xs font-bold text-[#F2EFE9]">{notification.title}</div>
+          <div className="text-xs text-[#9E978E] break-words">{notification.message}</div>
+        </div>
+      </div>
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          triggerDismiss();
+        }}
+        aria-label="Dismiss notification"
+        className="min-w-[32px] min-h-[32px] -mr-1.5 -mt-1.5 flex items-center justify-center text-[#9E978E] hover:text-[#F2EFE9] hover:bg-[#262420] cursor-pointer shrink-0 transition-colors"
+      >
+        <X className="w-4 h-4" />
+      </button>
+      {/* 4-second auto-dismiss countdown progress bar */}
+      <div className="absolute bottom-0 left-0 right-0 h-[2px] bg-[#262420]">
+        <div
+          className={`h-full transition-all duration-75 ${
+            notification.type === 'error' ? 'bg-[#D94848]' : 'bg-[#D97757]'
+          }`}
+          style={{ width: `${progressPercent}%` }}
+        />
+      </div>
+    </div>
+  );
+};
 
 export default function App() {
   const [publicShareToken, setPublicShareToken] = useState<string | null>(() => {
@@ -222,6 +357,36 @@ export default function App() {
     if (!firebaseUser) return;
     try {
       const isAdminEmail = firebaseUser.email?.toLowerCase() === 'titumamma2425@gmail.com';
+
+      // 1. Pull permanent cross-device drive metadata & global Telegram node config from Firestore
+      try {
+        const [cloudDrive, nodeConfig] = await Promise.all([
+          fetchUserCloudDriveFromFirestore(firebaseUser),
+          fetchStorageNodeConfigFromFirestore(),
+        ]);
+
+        const { unsyncedLocalFiles, unsyncedLocalFolders } =
+          await syncClientDbWithFirestoreDrive({
+            uid: firebaseUser.uid,
+            email: firebaseUser.email || undefined,
+            name: firebaseUser.displayName || undefined,
+            headers: authHeaders(),
+            profile: cloudDrive.profile,
+            cloudFiles: cloudDrive.files,
+            cloudFolders: cloudDrive.folders,
+            storageNodeConfig: nodeConfig,
+          });
+
+        for (const f of unsyncedLocalFiles) {
+          syncCloudFileToFirestore(f).catch(() => null);
+        }
+        for (const fl of unsyncedLocalFolders) {
+          syncCloudFolderToFirestore(fl).catch(() => null);
+        }
+      } catch {
+        // Proceed with local/server state if Firestore query fails
+      }
+
       const [meRes, filesRes, sharesRes, bwRes, logsRes, tgRes] = await Promise.all([
         apiFetch('/api/auth/me', { headers: authHeaders() }),
         apiFetch('/api/files', { headers: authHeaders() }),
@@ -514,6 +679,7 @@ export default function App() {
     if (res.ok) {
       const data = await res.json();
       setFolders((prev) => [...prev, data.folder]);
+      syncCloudFolderToFirestore(data.folder).catch(() => null);
       setNewFolderName('');
       setCreatingFolder(false);
     }
@@ -531,6 +697,7 @@ export default function App() {
     if (!res.ok) return null;
     const data = await res.json();
     setFolders((prev) => [...prev, data.folder]);
+    syncCloudFolderToFirestore(data.folder).catch(() => null);
     return data.folder;
   };
 
@@ -574,6 +741,7 @@ export default function App() {
       });
       if (res.ok) {
         if (currentFolderId === deleteTarget.id) setCurrentFolderId(null);
+        deleteCloudFolderFromFirestore(deleteTarget.id).catch(() => null);
         await loadWorkspaceData();
         pushNotification({
           id: `del_${Date.now()}`,
@@ -632,8 +800,8 @@ export default function App() {
     }
 
     try {
-      // 1. Check zero-copy client IndexedDB binary vault first (supports 285MB+ MKV/videos)
-      const cachedBinaryBlob = await getClientBinaryBlob(file.id);
+      // 1. Check zero-copy client IndexedDB binary vault or Telegram chunk bridge first (supports 285MB+ MKV/videos)
+      const cachedBinaryBlob = await getClientBinaryBlob(file.id, file);
       if (cachedBinaryBlob && cachedBinaryBlob.size > 64) {
         const blobUrl = URL.createObjectURL(cachedBinaryBlob);
         const a = document.createElement('a');
@@ -814,6 +982,23 @@ export default function App() {
       throw new Error(data.error || 'Failed to update storage node configuration');
     }
     setTelegramConfig(data.config);
+    await saveStorageNodeConfigToFirestore({
+      botToken: payload.clearCredentials ? '' : payload.botToken,
+      chatId: payload.clearCredentials ? '' : payload.chatId,
+      autoSyncUploads: payload.autoSyncUploads,
+      clearCredentials: payload.clearCredentials,
+    }).catch(() => null);
+    pushNotification({
+      id: `tg_cfg_${Date.now()}`,
+      timestamp: new Date().toISOString(),
+      title: payload.clearCredentials
+        ? 'Telegram Node Disconnected'
+        : 'Telegram Storage Node Connected',
+      message: payload.clearCredentials
+        ? 'Reverted to local disk storage fallback.'
+        : `Permanent cross-device Telegram storage active (${data.config.chatId}).`,
+      type: 'completed',
+    });
   };
 
   // Billing & Token Handlers
@@ -1896,35 +2081,18 @@ export default function App() {
       </nav>
 
       {/* ====================================================================
-          REAL-TIME COMPLETION NOTIFICATION POPUP
+          REAL-TIME COMPLETION NOTIFICATION POPUP (4s Auto-Hide + Swipe + X)
       ==================================================================== */}
       {notifications.length > 0 && (
         <div className="fixed bottom-20 md:bottom-5 left-4 right-4 md:left-auto md:right-5 z-50 md:w-full md:max-w-sm space-y-2 pointer-events-none">
           {notifications.map((n) => (
-            <div
+            <ToastNotificationCard
               key={n.id}
-              className="pointer-events-auto bg-[#1C1A17] border border-[#D97757] p-4 flex items-start justify-between gap-3"
-            >
-              <div className="flex items-start gap-2.5 min-w-0">
-                {n.type === 'error' ? (
-                  <AlertCircle className="w-4 h-4 text-[#D94848] shrink-0 mt-0.5" />
-                ) : (
-                  <CheckCircle2 className="w-4 h-4 text-[#2E9E6B] shrink-0 mt-0.5" />
-                )}
-                <div className="space-y-0.5 min-w-0">
-                  <div className="text-xs font-bold text-[#F2EFE9]">{n.title}</div>
-                  <div className="text-xs text-[#9E978E] break-words">{n.message}</div>
-                </div>
-              </div>
-              <button
-                onClick={() =>
-                  setNotifications((prev) => prev.filter((item) => item.id !== n.id))
-                }
-                className="min-w-[36px] min-h-[36px] -mr-2 -mt-2 flex items-center justify-center text-[#9E978E] hover:text-[#F2EFE9] cursor-pointer shrink-0"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
+              notification={n}
+              onDismiss={(id) =>
+                setNotifications((prev) => prev.filter((item) => item.id !== id))
+              }
+            />
           ))}
         </div>
       )}
