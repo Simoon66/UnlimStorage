@@ -131,6 +131,19 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
     };
   }, []);
 
+  useEffect(() => {
+    const vid = videoRef.current;
+    if (!vid) return;
+    const handleEnterPip = () => setIsPip(true);
+    const handleLeavePip = () => setIsPip(false);
+    vid.addEventListener('enterpictureinpicture', handleEnterPip);
+    vid.addEventListener('leavepictureinpicture', handleLeavePip);
+    return () => {
+      vid.removeEventListener('enterpictureinpicture', handleEnterPip);
+      vid.removeEventListener('leavepictureinpicture', handleLeavePip);
+    };
+  }, [srcUrl]);
+
   const togglePlay = useCallback(() => {
     const vid = videoRef.current;
     if (!vid) return;
@@ -467,8 +480,6 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
             onWaiting={() => setIsBuffering(true)}
             onPlaying={() => setIsBuffering(false)}
             onCanPlay={() => setIsBuffering(false)}
-            onEnterPictureInPicture={() => setIsPip(true)}
-            onLeavePictureInPicture={() => setIsPip(false)}
             onLoadedMetadata={(e) => {
               const vid = e.currentTarget;
               if (vid.duration && Number.isFinite(vid.duration)) {
