@@ -249,6 +249,10 @@ export const StoragePricingView: React.FC<StoragePricingViewProps> = ({
   const expMs = user.planExpiresAt ? new Date(user.planExpiresAt).getTime() : null;
   const graceMs = user.graceEndsAt ? new Date(user.graceEndsAt).getTime() : null;
   const isExpiredInGrace = Boolean(expMs && expMs < nowMs && (!graceMs || nowMs <= graceMs));
+  const isPaidPlanActiveAndUnexpired =
+    activePlan !== 'free_25gb' && Boolean(expMs && expMs > nowMs);
+  const activeDaysLeft =
+    expMs && expMs > nowMs ? Math.max(1, Math.ceil((expMs - nowMs) / 86400_000)) : 0;
   const graceDaysLeft = graceMs
     ? Math.max(1, Math.ceil((graceMs - nowMs) / 86400_000))
     : 90;
@@ -415,6 +419,13 @@ export const StoragePricingView: React.FC<StoragePricingViewProps> = ({
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         {PLANS.map((plan) => {
           const isCurrent = activePlan === plan.id && !isExpiredInGrace;
+          const isLockedByHigherActivePlan =
+            isPaidPlanActiveAndUnexpired &&
+            (plan.id === 'free_25gb' ||
+              (plan.id === 'pro_50gb' && activePlan === 'ultra_1tb'));
+          const isClaimDisabled =
+            isCurrent || isLockedByHigherActivePlan || busyPlan === plan.id;
+
           return (
             <div
               key={plan.id}
@@ -429,7 +440,9 @@ export const StoragePricingView: React.FC<StoragePricingViewProps> = ({
                   </span>
                   {isCurrent && (
                     <span className="px-2.5 py-0.5 text-[11px] font-bold bg-[#24211D] border border-[#D97757] text-[#D97757]">
-                      Active Plan
+                      {plan.id === 'free_25gb'
+                        ? 'Active Plan'
+                        : `Claimed (${activeDaysLeft}d Left)`}
                     </span>
                   )}
                 </div>
@@ -451,6 +464,13 @@ export const StoragePricingView: React.FC<StoragePricingViewProps> = ({
                   </span>
                 </div>
 
+                {isCurrent && plan.id !== 'free_25gb' && user.planExpiresAt && (
+                  <div className="p-3 bg-[#141311] border border-[#2E9E6B]/60 text-xs text-[#2E9E6B] flex items-center justify-between">
+                    <span>Active until {formatShortDate(user.planExpiresAt)}</span>
+                    <span className="font-mono font-bold">{activeDaysLeft}d remaining</span>
+                  </div>
+                )}
+
                 <ul className="space-y-2 text-xs text-[#F2EFE9]">
                   {plan.features.map((feat) => (
                     <li key={feat} className="flex items-start gap-2">
@@ -465,24 +485,36 @@ export const StoragePricingView: React.FC<StoragePricingViewProps> = ({
                 {plan.id === 'free_25gb' ? (
                   <button
                     type="button"
-                    disabled={isCurrent}
+                    disabled={isClaimDisabled}
                     onClick={() => handlePlanSelect('free_25gb')}
-                    className="w-full min-h-[44px] px-4 py-2.5 text-xs font-semibold bg-[#24211D] border border-[#2C2824] text-[#F2EFE9] disabled:opacity-50 cursor-pointer"
+                    className="w-full min-h-[44px] px-4 py-2.5 text-xs font-semibold bg-[#24211D] border border-[#2C2824] text-[#9E978E] disabled:opacity-60 disabled:cursor-not-allowed"
                   >
-                    {isCurrent ? 'Included Free Plan (Active)' : 'Switch to 25 GB Free'}
+                    {isCurrent
+                      ? 'Included Free Plan (Active)'
+                      : isPaidPlanActiveAndUnexpired
+                      ? `Current Plan Active (${activeDaysLeft}d Left)`
+                      : 'Switch to 25 GB Free'}
                   </button>
                 ) : (
                   <button
                     type="button"
-                    disabled={busyPlan === plan.id}
+                    disabled={isClaimDisabled}
                     onClick={() => handlePlanSelect(plan.id)}
-                    className="w-full min-h-[44px] px-4 py-2.5 text-xs font-bold bg-[#D97757] text-[#141311] hover:bg-[#E08568] cursor-pointer"
+                    className={`w-full min-h-[44px] px-4 py-2.5 text-xs font-bold transition-colors ${
+                      isCurrent || isLockedByHigherActivePlan
+                        ? 'bg-[#24211D] border border-[#2C2824] text-[#9E978E] opacity-70 cursor-not-allowed'
+                        : 'bg-[#D97757] text-[#141311] hover:bg-[#E08568] cursor-pointer'
+                    }`}
                   >
                     {busyPlan === plan.id
                       ? 'Activating...'
                       : isCurrent
-                      ? `Extend +30 Days (${plan.tokensPerMonth.toLocaleString()} Tokens)`
-                      : `Activate ${plan.storageLabel} (${plan.tokensPerMonth.toLocaleString()} Tokens/mo)`}
+                      ? `Plan Active — Unlocks After Expiry (${activeDaysLeft}d Left)`
+                      : isLockedByHigherActivePlan
+                      ? `1 TB Plan Active (${activeDaysLeft}d Left)`
+                      : isExpiredInGrace && activePlan === plan.id
+                      ? `Renew ${plan.storageLabel} (${plan.tokensPerMonth.toLocaleString()} Tokens/mo)`
+                      : `Claim ${plan.storageLabel} (${plan.tokensPerMonth.toLocaleString()} Tokens/mo)`}
                   </button>
                 )}
               </div>
@@ -640,7 +672,7 @@ export const ActivityAndSpeedView: React.FC<ActivityAndSpeedViewProps> = ({
               const blobUrl = URL.createObjectURL(blob);
               const a = document.createElement('a');
               a.href = blobUrl;
-              a.download = 'unlimcloud-activity.csv';
+              a.download = 'unlimstorage-activity.csv';
               document.body.appendChild(a);
               a.click();
               document.body.removeChild(a);

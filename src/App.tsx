@@ -411,7 +411,7 @@ export default function App() {
     setUploadingFiles(true);
     setUploadProgress({
       fileName: label,
-      percent: 1,
+      percent: 0,
       loadedBytes: 0,
       totalBytes: totalBatchBytes,
       speedBps: 0,
@@ -960,7 +960,7 @@ export default function App() {
     return (
       <div className="min-h-screen bg-[#141311] text-[#F2EFE9] flex items-center justify-center p-6">
         <div className="p-6 bg-[#1C1A17] border border-[#2C2824] text-center space-y-2 max-w-sm w-full">
-          <div className="text-sm font-bold text-[#F2EFE9]">UnlimCloud Encrypted Vault</div>
+          <div className="text-sm font-bold text-[#F2EFE9]">UnlimStorage Encrypted Vault</div>
           <div className="text-xs text-[#9E978E]">Verifying your secure cloud session...</div>
         </div>
       </div>
@@ -975,7 +975,7 @@ export default function App() {
             <div className="w-8 h-8 bg-[#1C1A17] border border-[#2C2824] flex items-center justify-center">
               <Cloud className="w-4 h-4 text-[#D97757]" />
             </div>
-            <span className="text-lg font-bold tracking-tight text-[#F2EFE9]">UnlimCloud</span>
+            <span className="text-lg font-bold tracking-tight text-[#F2EFE9]">UnlimStorage</span>
           </div>
           <div className="text-xs text-[#9E978E]">25 GB Free Encrypted Cloud Storage</div>
         </header>
@@ -988,7 +988,7 @@ export default function App() {
 
             <div className="space-y-2">
               <h1 className="text-xl sm:text-2xl font-bold text-[#F2EFE9]">
-                Sign in to UnlimCloud
+                Sign in to UnlimStorage
               </h1>
               <p className="text-xs sm:text-sm text-[#9E978E] leading-relaxed">
                 Sign in with your Google account to unlock your private{' '}
@@ -1034,7 +1034,7 @@ export default function App() {
         </main>
 
         <footer className="text-center text-xs text-[#9E978E] py-2">
-          UnlimCloud — Private Encrypted Cloud Storage · Login Required
+          UnlimStorage — Private Encrypted Cloud Storage · Login Required
         </footer>
       </div>
     );
@@ -1111,7 +1111,7 @@ export default function App() {
           }}
           className="text-lg font-bold tracking-tight text-[#F2EFE9] whitespace-nowrap shrink-0"
         >
-          UnlimCloud
+          UnlimStorage
         </a>
 
         {/* Zone 2: Desktop Navigation Links (Admin Storage Node tab hidden from regular users) */}
@@ -1216,7 +1216,7 @@ export default function App() {
             <div className="min-w-0 flex-1 space-y-1.5">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div className="text-sm font-bold text-[#F2EFE9] truncate">
-                  UnlimCloud Encrypted Vault ({planBadge})
+                  UnlimStorage Encrypted Vault ({planBadge})
                 </div>
                 <div className="text-xs text-[#9E978E] tabular-nums">
                   <strong className="text-[#F2EFE9]">{formatBytes(totalStorageBytes)}</strong> used

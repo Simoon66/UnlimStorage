@@ -34,6 +34,7 @@ import {
   getClientBinaryBlob,
   resolveClientMimeType,
 } from '../services/clientCloudFallback';
+import { YouTubeIframePlayer } from './YouTubeIframePlayer';
 
 // ============================================================================
 // 1. SIMPLE REMOTE URL UPLOAD MODAL
@@ -521,10 +522,9 @@ export const FileDetailDrawer: React.FC<FileDetailDrawerProps> = ({
 }) => {
   const [copiedText, setCopiedText] = useState(false);
   const [localBlobUrl, setLocalBlobUrl] = useState<string | null>(null);
-  const [playbackRate, setPlaybackRate] = useState<number>(1);
+  const [rawBlob, setRawBlob] = useState<Blob | null>(null);
   const [videoContainerFallback, setVideoContainerFallback] = useState<'webm' | 'mp4'>('webm');
   const [videoPlaybackError, setVideoPlaybackError] = useState<string | null>(null);
-  const videoRef = useRef<HTMLVideoElement | null>(null);
 
   const isMkv =
     /\.mkv$/i.test(file.name) || file.mimeType.toLowerCase().includes('matroska');
@@ -547,6 +547,7 @@ export const FileDetailDrawer: React.FC<FileDetailDrawerProps> = ({
     getClientBinaryBlob(file.id)
       .then((blob) => {
         if (cancelled || !blob) return;
+        setRawBlob(blob);
         let targetBlob = blob;
         if (isMkv) {
           // Wrap Matroska (.mkv) blob in a zero-copy WebM/MP4 MIME view so HTML5 <video> demuxes it natively
@@ -587,34 +588,13 @@ export const FileDetailDrawer: React.FC<FileDetailDrawerProps> = ({
     setTimeout(() => setCopiedText(false), 1800);
   };
 
-  const handleSkipSeconds = (delta: number) => {
-    if (!videoRef.current) return;
-    videoRef.current.currentTime = Math.max(
-      0,
-      Math.min(
-        videoRef.current.duration || Number.MAX_SAFE_INTEGER,
-        videoRef.current.currentTime + delta
-      )
-    );
-  };
-
-  const handleChangeSpeed = (rate: number) => {
-    setPlaybackRate(rate);
-    if (videoRef.current) {
-      videoRef.current.playbackRate = rate;
-    }
-  };
-
-  const handleFullscreen = () => {
-    if (!videoRef.current) return;
-    if (videoRef.current.requestFullscreen) {
-      videoRef.current.requestFullscreen().catch(() => null);
-    }
-  };
-
   return (
     <div className="fixed inset-0 z-50 bg-black/80 flex items-end sm:items-center justify-center p-0 sm:p-4">
-      <div className="w-full sm:max-w-2xl bg-[#1C1A17] border-t sm:border border-[#2C2824] max-h-[92vh] overflow-y-auto">
+      <div
+        className={`w-full ${
+          isVideo ? 'sm:max-w-3xl' : 'sm:max-w-2xl'
+        } bg-[#1C1A17] border-t sm:border border-[#2C2824] max-h-[92vh] overflow-y-auto`}
+      >
         <div className="flex items-center justify-between px-5 py-4 border-b border-[#2C2824] sticky top-0 bg-[#1C1A17] z-10">
           <div className="flex items-center gap-2.5 min-w-0">
             <Eye className="w-4 h-4 text-[#D97757] shrink-0" />
@@ -680,86 +660,40 @@ export const FileDetailDrawer: React.FC<FileDetailDrawerProps> = ({
             </div>
           ) : isVideo ? (
             <div className="space-y-2.5">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div className="flex items-center gap-2 text-xs font-medium text-[#9E978E]">
+              <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-[#9E978E]">
+                <div className="flex items-center gap-2 font-medium">
                   <Film className="w-3.5 h-3.5 text-[#D97757]" />
-                  <span>{isMkv ? 'MKV Matroska Video Player' : 'HD Video Player'}</span>
+                  <span>
+                    {isMkv
+                      ? 'YouTube-Style MKV Iframe Player (Multi-Audio & Multi-Subtitle CC)'
+                      : 'YouTube-Style HD Video Iframe Player'}
+                  </span>
                 </div>
-                <div className="flex items-center gap-1">
-                  {[0.5, 1, 1.25, 1.5, 2].map((rate) => (
-                    <button
-                      key={rate}
-                      type="button"
-                      onClick={() => handleChangeSpeed(rate)}
-                      className={`px-2 py-1 text-[11px] font-mono border cursor-pointer ${
-                        playbackRate === rate
-                          ? 'bg-[#D97757] text-[#141311] border-[#D97757] font-bold'
-                          : 'bg-[#141311] text-[#9E978E] border-[#2C2824] hover:text-[#F2EFE9]'
-                      }`}
-                    >
-                      {rate}x
-                    </button>
-                  ))}
-                </div>
+                <span className="text-[11px] font-mono text-[#D97757]">
+                  Use Audio / CC buttons in player to switch tracks
+                </span>
               </div>
 
-              <div className="p-2.5 bg-[#141311] border border-[#2C2824] space-y-2.5">
-                <video
-                  key={`${file.id}_${videoContainerFallback}_${Boolean(localBlobUrl)}`}
-                  ref={videoRef}
-                  src={inlineUrl}
-                  controls
-                  playsInline
-                  preload="metadata"
-                  onError={() => {
-                    if (isMkv && videoContainerFallback === 'webm') {
-                      setVideoContainerFallback('mp4');
-                    } else {
-                      setVideoPlaybackError(
-                        'Unable to decode this video stream in browser. If this file was uploaded before the large-file binary update (44B), please re-upload it once, or click Download below to play in VLC / Media Player.'
-                      );
-                    }
-                  }}
-                  className="w-full max-h-[360px] bg-black"
-                />
+              <YouTubeIframePlayer
+                key={`${file.id}_${videoContainerFallback}_${Boolean(localBlobUrl)}`}
+                fileId={file.id}
+                fileName={file.name}
+                srcUrl={inlineUrl}
+                rawBlob={rawBlob}
+                isMkv={isMkv}
+                onFallbackContainer={
+                  isMkv && videoContainerFallback === 'webm'
+                    ? () => setVideoContainerFallback('mp4')
+                    : undefined
+                }
+                onPlaybackError={(msg) => setVideoPlaybackError(msg)}
+              />
 
-                {/* MKV / Video Transport Controls Bar */}
-                <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
-                  <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={() => handleSkipSeconds(-10)}
-                      className="min-h-[34px] px-3 py-1 text-xs font-medium bg-[#1C1A17] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center gap-1.5 cursor-pointer"
-                    >
-                      <RotateCcw className="w-3.5 h-3.5 text-[#D97757]" />
-                      -10s
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => handleSkipSeconds(10)}
-                      className="min-h-[34px] px-3 py-1 text-xs font-medium bg-[#1C1A17] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center gap-1.5 cursor-pointer"
-                    >
-                      <RotateCw className="w-3.5 h-3.5 text-[#D97757]" />
-                      +10s
-                    </button>
-                  </div>
-
-                  <button
-                    type="button"
-                    onClick={handleFullscreen}
-                    className="min-h-[34px] px-3 py-1 text-xs font-medium bg-[#1C1A17] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center gap-1.5 cursor-pointer"
-                  >
-                    <Maximize2 className="w-3.5 h-3.5 text-[#D97757]" />
-                    Fullscreen
-                  </button>
+              {videoPlaybackError && (
+                <div className="p-3 bg-[#141311] border border-[#D99B26] text-xs text-[#D99B26]">
+                  {videoPlaybackError}
                 </div>
-
-                {videoPlaybackError && (
-                  <div className="p-3 bg-[#1C1A17] border border-[#D99B26] text-xs text-[#D99B26]">
-                    {videoPlaybackError}
-                  </div>
-                )}
-              </div>
+              )}
             </div>
           ) : isAudio ? (
             <div className="space-y-2">

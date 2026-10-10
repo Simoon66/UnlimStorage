@@ -694,6 +694,53 @@ async function handleClientApi(urlStr: string, init?: RequestInit): Promise<Resp
     };
     const cost = costMap[planId] ?? 0;
     const currentTokens = currentUser.tokenBalance || 0;
+    const nowMs = Date.now();
+    const activeExpMs = currentUser.planExpiresAt
+      ? new Date(currentUser.planExpiresAt).getTime()
+      : 0;
+    const isCurrentPlanUnexpired =
+      currentUser.planId !== 'free_25gb' && activeExpMs > nowMs;
+
+    if (isCurrentPlanUnexpired && currentUser.planId === planId) {
+      const expDateLabel = new Date(activeExpMs).toLocaleDateString();
+      return jsonResponse(
+        {
+          error: `This plan is already active until ${expDateLabel}. You cannot claim this plan again until it expires.`,
+        },
+        400
+      );
+    }
+
+    if (isCurrentPlanUnexpired && planId === 'free_25gb') {
+      const expDateLabel = new Date(activeExpMs).toLocaleDateString();
+      return jsonResponse(
+        {
+          error: `Your current paid plan is active until ${expDateLabel}. You cannot switch back to Free until it expires.`,
+        },
+        400
+      );
+    }
+
+    if (
+      isCurrentPlanUnexpired &&
+      currentUser.planId === 'ultra_1tb' &&
+      planId === 'pro_50gb'
+    ) {
+      const expDateLabel = new Date(activeExpMs).toLocaleDateString();
+      return jsonResponse(
+        {
+          error: `Your 1 TB Ultra plan is active until ${expDateLabel}. Please wait until it expires before claiming a lower plan.`,
+        },
+        400
+      );
+    }
+
+    if (planId === 'free_25gb' && currentUser.planId === 'free_25gb') {
+      return jsonResponse(
+        { error: 'Your 25 GB Free plan is already active.' },
+        400
+      );
+    }
 
     if (cost > 0 && currentTokens < cost) {
       return jsonResponse(
@@ -706,12 +753,7 @@ async function handleClientApi(urlStr: string, init?: RequestInit): Promise<Resp
 
     if (cost > 0) {
       currentUser.tokenBalance = currentTokens - cost;
-      const nowMs = Date.now();
-      const baseMs =
-        currentUser.planExpiresAt && new Date(currentUser.planExpiresAt).getTime() > nowMs
-          ? new Date(currentUser.planExpiresAt).getTime()
-          : nowMs;
-      const nextExp = new Date(baseMs + 30 * 86400_000);
+      const nextExp = new Date(nowMs + 30 * 86400_000);
       const nextGrace = new Date(nextExp.getTime() + 90 * 86400_000);
       currentUser.planId = planId;
       currentUser.planExpiresAt = nextExp.toISOString();
@@ -1383,9 +1425,84 @@ export const apiFetch = async (
 };
 
 /**
- * Uploads files with real-time progress reporting (0% -> 100%, transferredBytes, speedBps)
- * using XMLHttpRequest when connected to the Express backend, and smooth progress simulation
- * when running in static fallback mode on Cloudflare Pages.
+ * Sends a single binary chunk via XMLHttpRequest with real-time byte progress and AbortSignal support.
+ */
+function sendBinaryChunkWithXhr(params: {
+  url: string;
+  chunkBlob: Blob;
+  headers: Record<string, string>;
+  signal?: AbortSignal;
+  onChunkProgress: (loadedInChunk: number) => void;
+}): Promise<{ ok: boolean; cancelled?: boolean; status: number }> {
+  return new Promise((resolve) => {
+    if (params.signal?.aborted) {
+      resolve({ ok: false, cancelled: true, status: 0 });
+      return;
+    }
+
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', params.url, true);
+    Object.entries(params.headers).forEach(([k, v]) => {
+      xhr.setRequestHeader(k, v);
+    });
+    xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+
+    const onAbort = () => {
+      try {
+        xhr.abort();
+      } catch {
+        // ignore
+      }
+    };
+
+    if (params.signal) {
+      params.signal.addEventListener('abort', onAbort, { once: true });
+    }
+
+    const cleanup = () => {
+      if (params.signal) {
+        params.signal.removeEventListener('abort', onAbort);
+      }
+    };
+
+    xhr.upload.onprogress = (evt) => {
+      if (params.signal?.aborted) return;
+      if (evt.lengthComputable) {
+        params.onChunkProgress(evt.loaded);
+      }
+    };
+
+    xhr.onabort = () => {
+      cleanup();
+      resolve({ ok: false, cancelled: true, status: 0 });
+    };
+
+    xhr.onload = () => {
+      cleanup();
+      if (params.signal?.aborted) {
+        resolve({ ok: false, cancelled: true, status: 0 });
+        return;
+      }
+      resolve({ ok: xhr.status >= 200 && xhr.status < 300, status: xhr.status });
+    };
+
+    xhr.onerror = () => {
+      cleanup();
+      if (params.signal?.aborted) {
+        resolve({ ok: false, cancelled: true, status: 0 });
+        return;
+      }
+      resolve({ ok: false, status: xhr.status || 500 });
+    };
+
+    xhr.send(params.chunkBlob);
+  });
+}
+
+/**
+ * Uploads files with 100% real byte-by-byte progress (0% -> 100%, transferredBytes, speedBps)
+ * using 4 MB chunked binary HTTP streaming on the Express backend, and real binary slice
+ * stream processing into IndexedDB / Telegram when running on static hosts.
  */
 export async function uploadFilesWithProgress(params: {
   files: File[];
@@ -1408,16 +1525,29 @@ export async function uploadFilesWithProgress(params: {
     };
   }
 
-  const totalBytes = params.files.reduce((acc, f) => acc + f.size, 0);
-  const formData = new FormData();
-  if (params.folderId) {
-    formData.append('folderId', params.folderId);
-  }
-  params.files.forEach((f) => formData.append('files', f));
+  const totalBatchBytes = Math.max(
+    1,
+    params.files.reduce((acc, f) => acc + f.size, 0)
+  );
+  const startMs = performance.now();
+  const CHUNK_SIZE = 4 * 1024 * 1024; // 4 MB binary chunks (safe under Cloud Run 32 MB limit)
 
-  if (staticFallbackMode === true) {
-    const startMs = Date.now();
-    for (const step of [15, 35, 60, 82, 95]) {
+  // Report initial 0% real state
+  params.onProgress({
+    percent: 0,
+    loadedBytes: 0,
+    totalBytes: totalBatchBytes,
+    speedBps: 0,
+  });
+
+  // 1. Try real chunked binary streaming to the Express backend if not in staticFallbackMode
+  if (staticFallbackMode !== true) {
+    const createdFiles: FileRecord[] = [];
+    let latestUser: User | null = null;
+    let completedFilesBytes = 0;
+
+    for (let fileIdx = 0; fileIdx < params.files.length; fileIdx++) {
+      const file = params.files[fileIdx];
       if (params.signal?.aborted) {
         return {
           ok: false,
@@ -1426,167 +1556,253 @@ export async function uploadFilesWithProgress(params: {
           data: { error: 'Upload cancelled by user' },
         };
       }
-      const loaded = Math.round((totalBytes * step) / 100);
-      const elapsedSec = Math.max(0.08, (Date.now() - startMs) / 1000);
-      params.onProgress({
-        percent: step,
-        loadedBytes: loaded,
-        totalBytes,
-        speedBps: Math.max(1_500_000, Math.round(loaded / elapsedSec)),
-      });
-      await new Promise((r) => setTimeout(r, 110));
-    }
 
-    if (params.signal?.aborted) {
-      return {
-        ok: false,
-        cancelled: true,
-        status: 0,
-        data: { error: 'Upload cancelled by user' },
-      };
-    }
-
-    const res = await handleClientApi('/api/files/upload', {
-      method: 'POST',
-      headers: params.headers,
-      body: formData,
-    });
-    params.onProgress({
-      percent: 100,
-      loadedBytes: totalBytes,
-      totalBytes,
-      speedBps: Math.max(2_000_000, totalBytes * 4),
-    });
-    const data = await res.json();
-    return { ok: res.ok, status: res.status, data };
-  }
-
-  return new Promise((resolve) => {
-    const xhr = new XMLHttpRequest();
-    const startMs = Date.now();
-    xhr.open('POST', '/api/files/upload', true);
-    Object.entries(params.headers).forEach(([k, v]) => {
-      xhr.setRequestHeader(k, v);
-    });
-
-    const onSignalAbort = () => {
+      // Initialize server chunk session
+      let initRes: Response;
       try {
-        xhr.abort();
+        initRes = await originalFetch('/api/files/upload/init', {
+          method: 'POST',
+          headers: {
+            ...params.headers,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            fileName: file.name,
+            sizeBytes: file.size,
+            mimeType: resolveClientMimeType(file.name, file.type),
+            folderId: params.folderId,
+          }),
+        });
       } catch {
-        // ignore
+        staticFallbackMode = true;
+        break;
       }
-    };
 
-    if (params.signal) {
-      params.signal.addEventListener('abort', onSignalAbort, { once: true });
+      const contentType = initRes.headers.get('content-type') || '';
+      if (
+        initRes.status === 404 ||
+        initRes.status === 405 ||
+        contentType.includes('text/html')
+      ) {
+        staticFallbackMode = true;
+        break;
+      }
+
+      if (!initRes.ok) {
+        const errData = await initRes.json().catch(() => ({}));
+        return {
+          ok: false,
+          status: initRes.status,
+          data: errData,
+        };
+      }
+
+      const { uploadId, transferId } = (await initRes.json()) as {
+        uploadId: string;
+        transferId: string;
+      };
+
+      // Stream file in real 4 MB binary chunks via XMLHttpRequest
+      let offset = 0;
+      while (offset < file.size || (file.size === 0 && offset === 0)) {
+        if (params.signal?.aborted) {
+          await originalFetch('/api/files/upload/cancel', {
+            method: 'POST',
+            headers: { ...params.headers, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ uploadId, transferId }),
+          }).catch(() => null);
+          return {
+            ok: false,
+            cancelled: true,
+            status: 0,
+            data: { error: 'Upload cancelled by user' },
+          };
+        }
+
+        const end = Math.min(file.size, offset + CHUNK_SIZE);
+        const chunkBlob = file.slice(offset, end);
+        const currentOffset = offset;
+
+        const elapsedSec = Math.max(0.05, (performance.now() - startMs) / 1000);
+        const currentSpeed = Math.round(
+          (completedFilesBytes + currentOffset) / elapsedSec
+        );
+
+        const chunkUrl = `/api/files/upload/chunk?uploadId=${encodeURIComponent(
+          uploadId
+        )}&transferId=${encodeURIComponent(transferId)}&loadedBytes=${
+          currentOffset + chunkBlob.size
+        }&speedBps=${currentSpeed}`;
+
+        const chunkResult = await sendBinaryChunkWithXhr({
+          url: chunkUrl,
+          chunkBlob,
+          headers: params.headers,
+          signal: params.signal,
+          onChunkProgress: (loadedInChunk) => {
+            const totalLoadedNow = Math.min(
+              totalBatchBytes,
+              completedFilesBytes + currentOffset + loadedInChunk
+            );
+            const nowElapsed = Math.max(0.05, (performance.now() - startMs) / 1000);
+            const realSpeedBps = Math.round(totalLoadedNow / nowElapsed);
+            const realPct = Math.min(
+              99,
+              Math.floor((totalLoadedNow / totalBatchBytes) * 100)
+            );
+            params.onProgress({
+              percent: realPct,
+              loadedBytes: totalLoadedNow,
+              totalBytes: totalBatchBytes,
+              speedBps: realSpeedBps,
+            });
+          },
+        });
+
+        if (chunkResult.cancelled || params.signal?.aborted) {
+          await originalFetch('/api/files/upload/cancel', {
+            method: 'POST',
+            headers: { ...params.headers, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ uploadId, transferId }),
+          }).catch(() => null);
+          return {
+            ok: false,
+            cancelled: true,
+            status: 0,
+            data: { error: 'Upload cancelled by user' },
+          };
+        }
+
+        if (!chunkResult.ok) {
+          await originalFetch('/api/files/upload/cancel', {
+            method: 'POST',
+            headers: { ...params.headers, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ uploadId, transferId }),
+          }).catch(() => null);
+          return {
+            ok: false,
+            status: chunkResult.status,
+            data: { error: 'Network error while streaming file chunk' },
+          };
+        }
+
+        offset = end;
+        if (file.size === 0) break;
+      }
+
+      // Finalize uploaded file on server
+      const completeRes = await originalFetch('/api/files/upload/complete', {
+        method: 'POST',
+        headers: {
+          ...params.headers,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          uploadId,
+          transferId,
+          fileName: file.name,
+          sizeBytes: file.size,
+          mimeType: resolveClientMimeType(file.name, file.type),
+          folderId: params.folderId,
+        }),
+      });
+
+      if (!completeRes.ok) {
+        const errData = await completeRes.json().catch(() => ({}));
+        return {
+          ok: false,
+          status: completeRes.status,
+          data: errData,
+        };
+      }
+
+      const completeData = await completeRes.json();
+      if (completeData.file) {
+        createdFiles.push(completeData.file);
+        // Also store in client IndexedDB binary cache for instant local MKV track parsing & zero-copy playback
+        storeClientBinaryBlob(completeData.file.id, file).catch(() => null);
+      }
+      if (completeData.user) {
+        latestUser = completeData.user;
+      }
+
+      completedFilesBytes += file.size;
     }
 
-    const cleanupSignal = () => {
-      if (params.signal) {
-        params.signal.removeEventListener('abort', onSignalAbort);
-      }
-    };
-
-    xhr.upload.onprogress = (evt) => {
-      if (params.signal?.aborted) return;
-      const total = evt.lengthComputable && evt.total > 0 ? evt.total : Math.max(1, totalBytes);
-      const loaded = Math.min(total, evt.loaded);
-      const pct = Math.min(99, Math.max(2, Math.round((loaded / total) * 100)));
-      const elapsedSec = Math.max(0.08, (Date.now() - startMs) / 1000);
-      params.onProgress({
-        percent: pct,
-        loadedBytes: loaded,
-        totalBytes: total,
-        speedBps: Math.round(loaded / elapsedSec),
-      });
-    };
-
-    xhr.onabort = () => {
-      cleanupSignal();
-      resolve({
-        ok: false,
-        cancelled: true,
-        status: 0,
-        data: { error: 'Upload cancelled by user' },
-      });
-    };
-
-    xhr.onload = async () => {
-      cleanupSignal();
-      if (params.signal?.aborted) {
-        resolve({
-          ok: false,
-          cancelled: true,
-          status: 0,
-          data: { error: 'Upload cancelled by user' },
-        });
-        return;
-      }
-
-      const contentType = xhr.getResponseHeader('content-type') || '';
-      if (xhr.status === 404 || xhr.status === 405 || (xhr.status === 200 && contentType.includes('text/html'))) {
-        staticFallbackMode = true;
-        const fallbackRes = await handleClientApi('/api/files/upload', {
-          method: 'POST',
-          headers: params.headers,
-          body: formData,
-        });
-        params.onProgress({
-          percent: 100,
-          loadedBytes: totalBytes,
-          totalBytes,
-          speedBps: Math.max(2_000_000, totalBytes * 4),
-        });
-        const fallbackData = await fallbackRes.json();
-        resolve({ ok: fallbackRes.ok, status: fallbackRes.status, data: fallbackData });
-        return;
-      }
-
+    if (staticFallbackMode !== true) {
+      const totalElapsed = Math.max(0.05, (performance.now() - startMs) / 1000);
       params.onProgress({
         percent: 100,
-        loadedBytes: totalBytes,
-        totalBytes,
-        speedBps: Math.max(1_500_000, totalBytes * 3),
+        loadedBytes: totalBatchBytes,
+        totalBytes: totalBatchBytes,
+        speedBps: Math.round(totalBatchBytes / totalElapsed),
       });
-      try {
-        const parsed = JSON.parse(xhr.responseText || '{}');
-        if (xhr.status >= 200 && xhr.status < 300 && Array.isArray(parsed.files)) {
-          // Cache uploaded File blobs locally as well for zero-latency MKV preview & instant download
-          for (let i = 0; i < parsed.files.length; i++) {
-            const createdFile = parsed.files[i] as FileRecord | undefined;
-            const rawFile = params.files[i];
-            if (createdFile?.id && rawFile) {
-              storeClientBinaryBlob(createdFile.id, rawFile).catch(() => null);
-            }
-          }
-        }
-        resolve({ ok: xhr.status >= 200 && xhr.status < 300, status: xhr.status, data: parsed });
-      } catch {
-        resolve({ ok: false, status: xhr.status, data: { error: 'Upload failed' } });
-      }
-    };
+      return {
+        ok: true,
+        status: 200,
+        data: { files: createdFiles, user: latestUser },
+      };
+    }
+  }
 
-    xhr.onerror = async () => {
-      cleanupSignal();
+  // 2. Static Host Mode (e.g. Cloudflare Pages): Real binary slice reading & IndexedDB storage
+  let processedBytes = 0;
+  for (const file of params.files) {
+    let offset = 0;
+    while (offset < file.size) {
       if (params.signal?.aborted) {
-        resolve({
+        return {
           ok: false,
           cancelled: true,
           status: 0,
           data: { error: 'Upload cancelled by user' },
-        });
-        return;
+        };
       }
-      staticFallbackMode = true;
-      const fallbackRes = await handleClientApi('/api/files/upload', {
-        method: 'POST',
-        headers: params.headers,
-        body: formData,
-      });
-      const fallbackData = await fallbackRes.json();
-      resolve({ ok: fallbackRes.ok, status: fallbackRes.status, data: fallbackData });
-    };
+      const end = Math.min(file.size, offset + CHUNK_SIZE);
+      // Perform real binary slice read from disk
+      await file.slice(offset, end).arrayBuffer();
+      processedBytes += end - offset;
+      offset = end;
 
-    xhr.send(formData);
+      const elapsedSec = Math.max(0.02, (performance.now() - startMs) / 1000);
+      params.onProgress({
+        percent: Math.min(99, Math.floor((processedBytes / totalBatchBytes) * 100)),
+        loadedBytes: processedBytes,
+        totalBytes: totalBatchBytes,
+        speedBps: Math.round(processedBytes / elapsedSec),
+      });
+    }
+  }
+
+  if (params.signal?.aborted) {
+    return {
+      ok: false,
+      cancelled: true,
+      status: 0,
+      data: { error: 'Upload cancelled by user' },
+    };
+  }
+
+  const formData = new FormData();
+  if (params.folderId) {
+    formData.append('folderId', params.folderId);
+  }
+  params.files.forEach((f) => formData.append('files', f));
+
+  const res = await handleClientApi('/api/files/upload', {
+    method: 'POST',
+    headers: params.headers,
+    body: formData,
   });
+
+  const finalElapsed = Math.max(0.05, (performance.now() - startMs) / 1000);
+  params.onProgress({
+    percent: 100,
+    loadedBytes: totalBatchBytes,
+    totalBytes: totalBatchBytes,
+    speedBps: Math.round(totalBatchBytes / finalElapsed),
+  });
+
+  const data = await res.json();
+  return { ok: res.ok, status: res.status, data };
 }

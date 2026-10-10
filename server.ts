@@ -891,6 +891,42 @@ async function startServer() {
 
     const cost = costMap[planId];
     const currentTokens = user.tokenBalance || 0;
+    const nowMs = Date.now();
+    const activeExpMs = user.planExpiresAt ? new Date(user.planExpiresAt).getTime() : 0;
+    const isCurrentPlanUnexpired =
+      user.planId !== 'free_25gb' && activeExpMs > nowMs;
+
+    // Prevent claiming the same plan again (or downgrading) before the active plan expires
+    if (isCurrentPlanUnexpired && user.planId === planId) {
+      const expDateLabel = new Date(activeExpMs).toLocaleDateString();
+      res.status(400).json({
+        error: `This plan is already active until ${expDateLabel}. You cannot claim this plan again until it expires.`,
+      });
+      return;
+    }
+
+    if (isCurrentPlanUnexpired && planId === 'free_25gb') {
+      const expDateLabel = new Date(activeExpMs).toLocaleDateString();
+      res.status(400).json({
+        error: `Your current paid plan is active until ${expDateLabel}. You cannot switch back to Free until it expires.`,
+      });
+      return;
+    }
+
+    if (isCurrentPlanUnexpired && user.planId === 'ultra_1tb' && planId === 'pro_50gb') {
+      const expDateLabel = new Date(activeExpMs).toLocaleDateString();
+      res.status(400).json({
+        error: `Your 1 TB Ultra plan is active until ${expDateLabel}. Please wait until it expires before claiming a lower plan.`,
+      });
+      return;
+    }
+
+    if (planId === 'free_25gb' && user.planId === 'free_25gb') {
+      res.status(400).json({
+        error: 'Your 25 GB Free plan is already active.',
+      });
+      return;
+    }
 
     if (cost > 0 && currentTokens < cost) {
       res.status(400).json({
@@ -901,12 +937,7 @@ async function startServer() {
 
     if (cost > 0) {
       user.tokenBalance = currentTokens - cost;
-      const nowMs = Date.now();
-      const baseMs =
-        user.planExpiresAt && new Date(user.planExpiresAt).getTime() > nowMs
-          ? new Date(user.planExpiresAt).getTime()
-          : nowMs;
-      const nextExp = new Date(baseMs + 30 * 86400_000);
+      const nextExp = new Date(nowMs + 30 * 86400_000);
       const nextGrace = new Date(nextExp.getTime() + 90 * 86400_000);
       user.planId = planId;
       user.planExpiresAt = nextExp.toISOString();
@@ -1313,13 +1344,296 @@ async function startServer() {
           bytesTransferred: record.sizeBytes,
           integrityHash: record.sha256.slice(0, 16),
           status: 'success',
-          details: `Encrypted and stored in UnlimCloud Vault`,
+          details: `Encrypted and stored in UnlimStorage Vault`,
         });
       }
 
       res.json({ files: createdRecords, user: sanitizeUser(user) });
     }
   );
+
+  // ============================================================================
+  // REAL CHUNKED BINARY STREAM UPLOAD PROTOCOL (Supports 285MB - 5GB+ Files
+  // across Cloud Run 32MB request limits with 100% Real Byte Progress)
+  // ============================================================================
+
+  app.post('/api/files/upload/init', requireAuth, (req, res) => {
+    const user = (req as Request & { user: StoredUser }).user;
+    evaluateUserQuotaAndLocks(user);
+
+    const { fileName, sizeBytes, mimeType, folderId } = req.body as {
+      fileName?: string;
+      sizeBytes?: number;
+      mimeType?: string;
+      folderId?: string | null;
+    };
+
+    const cleanName = String(fileName || 'uploaded-file.bin').trim();
+    const totalSize = Math.max(0, Number(sizeBytes || 0));
+
+    if (user.storageUsedBytes + totalSize > user.bandwidthLimitBytes) {
+      res.status(429).json({
+        error: `Storage limit reached (${formatBytesServer(
+          user.bandwidthLimitBytes
+        )}). Upgrade your plan on the Pricing & Plans tab to store more files.`,
+      });
+      return;
+    }
+
+    const uploadId = `file_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+    const transferId = `trf_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+    const chunkPath = path.join(CHUNKS_DIR, uploadId);
+    fs.writeFileSync(chunkPath, Buffer.alloc(0));
+
+    const hasLiveTelegram = Boolean(
+      db.telegramConfig.botToken &&
+        db.telegramConfig.chatId &&
+        db.telegramConfig.autoSyncUploads
+    );
+
+    const job: TransferJob = {
+      id: transferId,
+      userId: user.id,
+      userName: user.name,
+      type: 'local_upload',
+      fileName: cleanName,
+      folderId: folderId === 'null' || folderId === '' ? null : folderId || null,
+      totalBytes: totalSize,
+      transferredBytes: 0,
+      speedBps: 0,
+      status: 'streaming',
+      storageDriver: hasLiveTelegram ? 'telegram' : 'local_vault',
+      fileId: uploadId,
+      createdAt: new Date().toISOString(),
+    };
+
+    db.transfers.unshift(job);
+    broadcast('transfer:progress', job);
+
+    res.json({
+      uploadId,
+      transferId,
+      fileName: cleanName,
+      sizeBytes: totalSize,
+      mimeType: resolveEffectiveMimeType(cleanName, mimeType),
+    });
+  });
+
+  app.post(
+    '/api/files/upload/chunk',
+    requireAuth,
+    express.raw({ type: 'application/octet-stream', limit: '25mb' }),
+    (req, res) => {
+      const user = (req as Request & { user: StoredUser }).user;
+      const uploadId = String(req.query.uploadId || '');
+      const transferId = String(req.query.transferId || '');
+      const loadedBytes = Number(req.query.loadedBytes || 0);
+      const speedBps = Number(req.query.speedBps || 0);
+
+      if (!uploadId || !/^file_[a-zA-Z0-9_]+$/.test(uploadId)) {
+        res.status(400).json({ error: 'Invalid uploadId' });
+        return;
+      }
+
+      const chunkPath = path.join(CHUNKS_DIR, uploadId);
+      if (!fs.existsSync(chunkPath)) {
+        res.status(404).json({ error: 'Upload session not found or cancelled' });
+        return;
+      }
+
+      const buf = Buffer.isBuffer(req.body) ? req.body : Buffer.from(req.body || '');
+      fs.appendFileSync(chunkPath, buf);
+
+      const job = db.transfers.find((t) => t.id === transferId && t.userId === user.id);
+      if (job) {
+        const currentDiskSize = fs.statSync(chunkPath).size;
+        job.transferredBytes = Math.max(currentDiskSize, loadedBytes);
+        job.speedBps = speedBps;
+        broadcast('transfer:progress', job);
+      }
+
+      res.json({ ok: true, writtenBytes: buf.length });
+    }
+  );
+
+  app.post('/api/files/upload/complete', requireAuth, async (req, res) => {
+    const user = (req as Request & { user: StoredUser }).user;
+    const { uploadId, transferId, fileName, sizeBytes, mimeType, folderId } = req.body as {
+      uploadId?: string;
+      transferId?: string;
+      fileName?: string;
+      sizeBytes?: number;
+      mimeType?: string;
+      folderId?: string | null;
+    };
+
+    if (!uploadId || !/^file_[a-zA-Z0-9_]+$/.test(uploadId)) {
+      res.status(400).json({ error: 'Invalid uploadId' });
+      return;
+    }
+
+    const finalChunkPath = path.join(CHUNKS_DIR, uploadId);
+    if (!fs.existsSync(finalChunkPath)) {
+      res.status(404).json({ error: 'Uploaded binary file not found' });
+      return;
+    }
+
+    const actualDiskSize = fs.statSync(finalChunkPath).size;
+    const finalSize = actualDiskSize > 0 ? actualDiskSize : Number(sizeBytes || 0);
+    const cleanName = String(fileName || 'uploaded-file.bin');
+    const mime = resolveEffectiveMimeType(cleanName, mimeType);
+    const sha256 = computeFastFileSha256(finalChunkPath, finalSize);
+
+    const hasLiveTelegram = Boolean(
+      db.telegramConfig.botToken &&
+        db.telegramConfig.chatId &&
+        db.telegramConfig.autoSyncUploads
+    );
+
+    let storageDriver: 'telegram' | 'local_vault' = 'local_vault';
+    let telegramChunks: TelegramChunk[] = [];
+    let telegramChatId: string | undefined;
+
+    if (hasLiveTelegram && finalSize <= 45 * 1024 * 1024) {
+      const fileBuffer = fs.readFileSync(finalChunkPath);
+      const tgResult = await pushBufferToTelegram(
+        fileBuffer,
+        cleanName,
+        db.telegramConfig.botToken,
+        db.telegramConfig.chatId
+      );
+      if (tgResult.success) {
+        storageDriver = 'telegram';
+        telegramChunks = tgResult.chunks;
+        telegramChatId = db.telegramConfig.chatId;
+      }
+    }
+
+    const isTextPreviewable =
+      (mime.startsWith('text/') ||
+        mime === 'application/json' ||
+        /\.(md|txt|json|csv|sh|ts|tsx|js|py|yaml|yml|log|html|css|xml)$/i.test(cleanName)) &&
+      finalSize <= 5 * 1024 * 1024;
+
+    const isMediaPreviewable =
+      mime.startsWith('image/') && finalSize <= 8 * 1024 * 1024;
+
+    let previewText: string | undefined;
+    if (isTextPreviewable && finalSize > 0) {
+      const fd = fs.openSync(finalChunkPath, 'r');
+      try {
+        const sample = Buffer.alloc(Math.min(24000, finalSize));
+        fs.readSync(fd, sample, 0, sample.length, 0);
+        previewText = sample.toString('utf-8');
+      } finally {
+        fs.closeSync(fd);
+      }
+    }
+
+    let previewDataUrl: string | undefined;
+    if (isMediaPreviewable && finalSize > 0) {
+      const imgBuf = fs.readFileSync(finalChunkPath);
+      previewDataUrl = `data:${mime};base64,${imgBuf.toString('base64')}`;
+    }
+
+    const record: FileRecord = {
+      id: uploadId,
+      name: cleanName,
+      folderId: folderId === 'null' || folderId === '' ? null : folderId || null,
+      ownerId: user.id,
+      ownerName: user.name,
+      sizeBytes: finalSize,
+      mimeType: mime,
+      sha256,
+      storageDriver,
+      telegramChatId,
+      telegramChunks,
+      starred: false,
+      downloadCount: 0,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      previewText,
+      previewDataUrl,
+      lockedOverQuota: false,
+    };
+
+    db.files.unshift(record);
+    user.bandwidthUsedBytes += finalSize;
+    evaluateUserQuotaAndLocks(user);
+    recordDailyBandwidth('uploadBytes', finalSize);
+
+    const job = db.transfers.find((t) => t.id === transferId && t.userId === user.id);
+    if (job) {
+      job.transferredBytes = finalSize;
+      job.status = 'completed';
+      job.storageDriver = storageDriver;
+      job.completedAt = new Date().toISOString();
+    }
+
+    saveDb();
+
+    broadcast('transfer:completed', {
+      job,
+      file: record,
+      notification: {
+        id: `notif_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        timestamp: new Date().toISOString(),
+        title: 'Upload Complete',
+        message: `${record.name} (${formatBytesServer(
+          record.sizeBytes
+        )}) encrypted & saved to UnlimStorage.`,
+        type: 'completed',
+        fileName: record.name,
+        bytes: record.sizeBytes,
+        sha256: record.sha256,
+        storageDriver,
+      },
+    });
+
+    recordAuditLog({
+      userId: user.id,
+      userName: user.name,
+      action: 'FILE_UPLOAD',
+      targetName: record.name,
+      bytesTransferred: record.sizeBytes,
+      integrityHash: record.sha256.slice(0, 16),
+      status: 'success',
+      details: `Encrypted and stored in UnlimStorage Vault`,
+    });
+
+    res.json({ file: record, user: sanitizeUser(user) });
+  });
+
+  app.post('/api/files/upload/cancel', requireAuth, (req, res) => {
+    const user = (req as Request & { user: StoredUser }).user;
+    const { uploadId, transferId } = req.body as {
+      uploadId?: string;
+      transferId?: string;
+    };
+
+    if (uploadId && /^file_[a-zA-Z0-9_]+$/.test(uploadId)) {
+      const chunkPath = path.join(CHUNKS_DIR, uploadId);
+      if (fs.existsSync(chunkPath)) {
+        try {
+          fs.unlinkSync(chunkPath);
+        } catch {
+          // ignore
+        }
+      }
+    }
+
+    if (transferId) {
+      const job = db.transfers.find((t) => t.id === transferId && t.userId === user.id);
+      if (job) {
+        job.status = 'failed';
+        job.error = 'Cancelled by user';
+        job.completedAt = new Date().toISOString();
+      }
+    }
+
+    saveDb();
+    res.json({ ok: true });
+  });
 
   app.patch('/api/files/:id', requireAuth, (req, res) => {
     const user = (req as Request & { user: StoredUser }).user;

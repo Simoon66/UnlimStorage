@@ -136,7 +136,7 @@ export const PublicSharePortal: React.FC<PublicSharePortalProps> = ({
           onClick={onExitPublicPortal}
           className="text-lg font-bold tracking-tight text-[#F2EFE9] whitespace-nowrap shrink-0 cursor-pointer"
         >
-          UnlimCloud
+          UnlimStorage
         </button>
 
         <nav className="hidden md:flex items-center gap-4 text-sm text-[#9E978E]">
@@ -272,7 +272,7 @@ export const PublicSharePortal: React.FC<PublicSharePortalProps> = ({
       </main>
 
       <footer className="px-6 py-4 border-t border-[#2C2824] bg-[#1C1A17] text-center text-xs text-[#9E978E]">
-        Powered by UnlimCloud — Zero-Knowledge Encrypted Cloud Storage
+        Powered by UnlimStorage — Zero-Knowledge Encrypted Cloud Storage
       </footer>
     </div>
   );
