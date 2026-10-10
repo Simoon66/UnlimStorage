@@ -633,7 +633,7 @@ export const FileDetailDrawer: React.FC<FileDetailDrawerProps> = ({
     file.id
   )}/download?inline=1&uid=${encodeURIComponent(
     firebaseUid || ''
-  )}&email=${encodeURIComponent(firebaseEmail || '')}`;
+  )}&email=${encodeURIComponent(firebaseEmail || '')}&name=${encodeURIComponent(file.name)}`;
 
   const inlineUrl = isVideo
     ? localBlobUrl || serverInlineUrl
@@ -676,8 +676,8 @@ export const FileDetailDrawer: React.FC<FileDetailDrawerProps> = ({
     <div className="fixed inset-0 z-50 bg-black/80 flex items-end sm:items-center justify-center p-0 sm:p-4">
       <div
         className={`w-full ${
-          isVideo ? 'sm:max-w-3xl' : 'sm:max-w-2xl'
-        } bg-[#1C1A17] border-t sm:border border-[#2C2824] max-h-[92vh] overflow-y-auto`}
+          isVideo ? 'sm:max-w-4xl' : 'sm:max-w-2xl'
+        } bg-[#1C1A17] border-t sm:border border-[#2C2824] max-h-[94vh] overflow-y-auto`}
       >
         <div className="flex items-center justify-between px-5 py-4 border-b border-[#2C2824] sticky top-0 bg-[#1C1A17] z-10">
           <div className="flex items-center gap-2.5 min-w-0">
@@ -751,6 +751,9 @@ export const FileDetailDrawer: React.FC<FileDetailDrawerProps> = ({
                 srcUrl={inlineUrl}
                 rawBlob={rawBlob}
                 isMkv={isMkv}
+                fileSizeBytes={file.sizeBytes}
+                fileMimeType={file.mimeType}
+                telegramChunks={file.telegramChunks}
                 onFallbackContainer={handleVideoFallback}
                 onPlaybackError={(msg) => setVideoPlaybackError(msg)}
               />

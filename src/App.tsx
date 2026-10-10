@@ -3426,8 +3426,8 @@ export default function App() {
             folders.find((fl) => fl.id === inspectedFile.folderId)?.name ||
             'My Cloud Drive (Root)'
           }
-          firebaseUid={firebaseUser?.uid}
-          firebaseEmail={firebaseUser?.email || ''}
+          firebaseUid={firebaseUser?.uid || currentUser?.id || ''}
+          firebaseEmail={firebaseUser?.email || currentUser?.email || ''}
           onClose={() => setInspectedFile(null)}
           onDownload={handleDownloadFile}
           onOpenShareModal={(f) => setShareModalFile(f)}
