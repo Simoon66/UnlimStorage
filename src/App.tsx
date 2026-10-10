@@ -5,6 +5,9 @@ import {
   FileText,
   FileCode,
   FileSpreadsheet,
+  Image as ImageIcon,
+  Film,
+  Music,
   Upload,
   Globe,
   Link2,
@@ -20,6 +23,11 @@ import {
   Cloud,
   Gauge,
   Settings,
+  Coins,
+  Lock,
+  Eye,
+  ShieldCheck,
+  LogIn,
 } from 'lucide-react';
 import {
   User,
@@ -31,29 +39,60 @@ import {
   BandwidthSettings,
   TelegramConfigState,
   RealtimeNotification,
+  StoragePlanId,
 } from './types';
 import { formatBytes, formatShortDate, formatSpeed } from './utils/format';
-import { apiFetch } from './services/clientCloudFallback';
+import { apiFetch, uploadFilesWithProgress } from './services/clientCloudFallback';
+import {
+  auth,
+  onAuthStateChanged,
+  signInWithGooglePopup,
+  signOutFirebaseUser,
+  ensureFirestoreUserProfile,
+  updateFirestoreUserProfile,
+  syncCloudFileToFirestore,
+  deleteCloudFileFromFirestore,
+  FirebaseUser,
+} from './firebase';
 import { PublicSharePortal } from './components/PublicSharePortal';
 import {
   RemoteUploadModal,
   CreateShareModal,
   FileDetailDrawer,
+  DeleteConfirmModal,
+  DeleteTarget,
+  BuyTokensModal,
   AuthModal,
 } from './components/Modals';
 import {
   SharedLinksView,
+  StoragePricingView,
   ActivityAndSpeedView,
   TelegramStorageView,
 } from './components/Views';
 
-type ActiveView = 'explorer' | 'shares' | 'activity' | 'telegram_settings';
+type ActiveView = 'explorer' | 'shares' | 'pricing' | 'activity' | 'telegram_settings';
 
-function renderFileIcon(fileName: string) {
-  if (/\.(json|sh|ts|tsx|js|py|html|css)$/i.test(fileName)) {
+function renderFileIcon(file: FileRecord) {
+  if (file.lockedOverQuota) {
+    return <Lock className="w-6 h-6 text-[#D99B26]" />;
+  }
+  if (
+    file.mimeType.startsWith('image/') ||
+    /\.(png|jpg|jpeg|gif|webp|svg|bmp)$/i.test(file.name)
+  ) {
+    return <ImageIcon className="w-6 h-6 text-[#D97757]" />;
+  }
+  if (file.mimeType.startsWith('video/') || /\.(mp4|webm|mov|mkv)$/i.test(file.name)) {
+    return <Film className="w-6 h-6 text-[#D97757]" />;
+  }
+  if (file.mimeType.startsWith('audio/') || /\.(mp3|wav|ogg|m4a)$/i.test(file.name)) {
+    return <Music className="w-6 h-6 text-[#D97757]" />;
+  }
+  if (/\.(json|sh|ts|tsx|js|py|html|css)$/i.test(file.name)) {
     return <FileCode className="w-6 h-6 text-[#D97757]" />;
   }
-  if (/\.(csv|xls|xlsx)$/i.test(fileName)) {
+  if (/\.(csv|xls|xlsx)$/i.test(file.name)) {
     return <FileSpreadsheet className="w-6 h-6 text-[#2E9E6B]" />;
   }
   return <FileText className="w-6 h-6 text-[#D97757]" />;
@@ -64,6 +103,11 @@ export default function App() {
     const params = new URLSearchParams(window.location.search);
     return params.get('share');
   });
+
+  const [firebaseUser, setFirebaseUser] = useState<FirebaseUser | null>(null);
+  const [signedOutGate, setSignedOutGate] = useState<boolean>(false);
+  const [signingInGoogle, setSigningInGoogle] = useState<boolean>(false);
+  const [authGateError, setAuthGateError] = useState<string | null>(null);
 
   const [sessionToken, setSessionToken] = useState<string>(
     () => localStorage.getItem('unlim_session_token') || 'demo_admin_session_token'
@@ -100,12 +144,23 @@ export default function App() {
   const [creatingFolder, setCreatingFolder] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
   const [isDraggingOver, setIsDraggingOver] = useState(false);
+
+  // Live File Upload Progress Bar State
   const [uploadingFiles, setUploadingFiles] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState<{
+    fileName: string;
+    percent: number;
+    loadedBytes: number;
+    totalBytes: number;
+    speedBps: number;
+  } | null>(null);
 
   // Modals
   const [showRemoteModal, setShowRemoteModal] = useState(false);
   const [shareModalFile, setShareModalFile] = useState<FileRecord | null>(null);
   const [inspectedFile, setInspectedFile] = useState<FileRecord | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
+  const [showBuyTokensModal, setShowBuyTokensModal] = useState(false);
   const [showAuthModal, setShowAuthModal] = useState(false);
 
   // Real-time notifications
@@ -113,11 +168,19 @@ export default function App() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const authHeaders = useCallback(
-    (extra: Record<string, string> = {}) => ({
-      Authorization: `Bearer ${sessionToken}`,
-      ...extra,
-    }),
-    [sessionToken]
+    (extra: Record<string, string> = {}) => {
+      const headers: Record<string, string> = {
+        Authorization: `Bearer ${sessionToken}`,
+        ...extra,
+      };
+      if (firebaseUser) {
+        headers['X-Firebase-Uid'] = firebaseUser.uid;
+        if (firebaseUser.email) headers['X-Firebase-Email'] = firebaseUser.email;
+        if (firebaseUser.displayName) headers['X-Firebase-Name'] = firebaseUser.displayName;
+      }
+      return headers;
+    },
+    [sessionToken, firebaseUser]
   );
 
   const pushNotification = useCallback((notif: RealtimeNotification) => {
@@ -125,6 +188,22 @@ export default function App() {
       if (prev.some((n) => n.id === notif.id)) return prev;
       return [notif, ...prev].slice(0, 3);
     });
+  }, []);
+
+  // Listen to Firebase Auth state changes
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, async (fbUser) => {
+      setFirebaseUser(fbUser);
+      if (fbUser) {
+        setSignedOutGate(false);
+        try {
+          await ensureFirestoreUserProfile(fbUser);
+        } catch {
+          // ignore if offline or unverified
+        }
+      }
+    });
+    return () => unsubscribe();
   }, []);
 
   const loadWorkspaceData = useCallback(async () => {
@@ -241,12 +320,6 @@ export default function App() {
               if (notification) {
                 pushNotification(notification);
               }
-            } else if (msg.event === 'log:created' && msg.payload) {
-              const entry = msg.payload as AuditLog;
-              setLogs((prev) => {
-                if (prev.some((l) => l.id === entry.id)) return prev;
-                return [entry, ...prev].slice(0, 300);
-              });
             }
           } catch {
             // ignore
@@ -257,7 +330,7 @@ export default function App() {
           reconnectTimer = setTimeout(connect, 5000);
         };
       } catch {
-        // ignore ws init error on static hosts
+        // ignore on static hosts
       }
     };
 
@@ -273,42 +346,92 @@ export default function App() {
   // HANDLERS
   // ============================================================================
 
+  const handleGoogleSignIn = async () => {
+    setSigningInGoogle(true);
+    setAuthGateError(null);
+    try {
+      const fbUser = await signInWithGooglePopup();
+      setFirebaseUser(fbUser);
+      setSignedOutGate(false);
+      await ensureFirestoreUserProfile(fbUser).catch(() => null);
+      pushNotification({
+        id: `auth_${Date.now()}`,
+        timestamp: new Date().toISOString(),
+        title: 'Signed In with Google',
+        message: `Welcome, ${fbUser.displayName || fbUser.email}! Your private 25 GB cloud drive is ready.`,
+        type: 'completed',
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Google Sign-In failed';
+      setAuthGateError(msg);
+      throw err;
+    } finally {
+      setSigningInGoogle(false);
+    }
+  };
+
+  const handleSignOut = async () => {
+    await signOutFirebaseUser().catch(() => null);
+    setFirebaseUser(null);
+    setSignedOutGate(true);
+  };
+
   const handleUploadFiles = async (fileList: FileList | File[]) => {
     const arr = Array.from(fileList);
     if (arr.length === 0) return;
+
+    const totalBatchBytes = arr.reduce((acc, f) => acc + f.size, 0);
+    const label =
+      arr.length === 1 ? arr[0].name : `${arr.length} files (${arr[0].name}...)`;
+
     setUploadingFiles(true);
+    setUploadProgress({
+      fileName: label,
+      percent: 5,
+      loadedBytes: 0,
+      totalBytes: totalBatchBytes,
+      speedBps: 0,
+    });
 
     try {
-      const formData = new FormData();
-      if (currentFolderId) {
-        formData.append('folderId', currentFolderId);
-      }
-      arr.forEach((f) => formData.append('files', f));
-
-      const res = await apiFetch('/api/files/upload', {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${sessionToken}`,
+      const result = await uploadFilesWithProgress({
+        files: arr,
+        folderId: currentFolderId,
+        headers: authHeaders(),
+        onProgress: (info) => {
+          setUploadProgress({
+            fileName: label,
+            percent: info.percent,
+            loadedBytes: info.loadedBytes,
+            totalBytes: info.totalBytes,
+            speedBps: info.speedBps,
+          });
         },
-        body: formData,
       });
 
-      const data = await res.json();
-      if (!res.ok) {
+      if (!result.ok) {
         pushNotification({
           id: `err_${Date.now()}`,
           timestamp: new Date().toISOString(),
-          title: 'Could Not Upload',
-          message: data.error || 'Failed to upload files',
+          title: 'Upload Blocked',
+          message: result.data?.error || 'Failed to upload files',
           type: 'error',
         });
         return;
       }
 
-      if (data.user) setCurrentUser(data.user);
+      if (result.data?.user) setCurrentUser(result.data.user);
+      if (Array.isArray(result.data?.files)) {
+        for (const uploaded of result.data.files as FileRecord[]) {
+          syncCloudFileToFirestore(uploaded).catch(() => null);
+        }
+      }
       await loadWorkspaceData();
     } finally {
-      setUploadingFiles(false);
+      setTimeout(() => {
+        setUploadingFiles(false);
+        setUploadProgress(null);
+      }, 350);
     }
   };
 
@@ -331,14 +454,43 @@ export default function App() {
     }
   };
 
-  const handleDeleteFolder = async (folderId: string) => {
-    const res = await apiFetch(`/api/folders/${encodeURIComponent(folderId)}`, {
-      method: 'DELETE',
-      headers: authHeaders(),
-    });
-    if (res.ok) {
-      if (currentFolderId === folderId) setCurrentFolderId(null);
-      await loadWorkspaceData();
+  const executeDeleteTarget = async () => {
+    if (!deleteTarget) return;
+    if (deleteTarget.type === 'folder') {
+      const res = await apiFetch(`/api/folders/${encodeURIComponent(deleteTarget.id)}`, {
+        method: 'DELETE',
+        headers: authHeaders(),
+      });
+      if (res.ok) {
+        if (currentFolderId === deleteTarget.id) setCurrentFolderId(null);
+        await loadWorkspaceData();
+        pushNotification({
+          id: `del_${Date.now()}`,
+          timestamp: new Date().toISOString(),
+          title: 'Folder Deleted',
+          message: `"${deleteTarget.name}" was removed.`,
+          type: 'info',
+        });
+      }
+    } else {
+      const res = await apiFetch(`/api/files/${encodeURIComponent(deleteTarget.id)}`, {
+        method: 'DELETE',
+        headers: authHeaders(),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.user) setCurrentUser(data.user);
+        setFiles((prev) => prev.filter((f) => f.id !== deleteTarget.id));
+        setShares((prev) => prev.filter((s) => s.fileId !== deleteTarget.id));
+        deleteCloudFileFromFirestore(deleteTarget.id).catch(() => null);
+        pushNotification({
+          id: `del_${Date.now()}`,
+          timestamp: new Date().toISOString(),
+          title: 'File Deleted',
+          message: `"${deleteTarget.name}" was permanently deleted from your cloud drive.`,
+          type: 'info',
+        });
+      }
     }
   };
 
@@ -351,27 +503,39 @@ export default function App() {
     if (res.ok) {
       const data = await res.json();
       setFiles((prev) => prev.map((f) => (f.id === file.id ? data.file : f)));
-    }
-  };
-
-  const handleDeleteFile = async (file: FileRecord) => {
-    const res = await apiFetch(`/api/files/${encodeURIComponent(file.id)}`, {
-      method: 'DELETE',
-      headers: authHeaders(),
-    });
-    if (res.ok) {
-      setFiles((prev) => prev.filter((f) => f.id !== file.id));
-      setShares((prev) => prev.filter((s) => s.fileId !== file.id));
+      syncCloudFileToFirestore(data.file).catch(() => null);
     }
   };
 
   const handleDownloadFile = async (file: FileRecord) => {
+    if (file.lockedOverQuota) {
+      pushNotification({
+        id: `lock_${Date.now()}`,
+        timestamp: new Date().toISOString(),
+        title: 'File Locked (Over 25 GB Free Limit)',
+        message: 'Renew your 50 GB or 1 TB plan with Tokens to unlock this file.',
+        type: 'warning',
+      });
+      setActiveView('pricing');
+      return;
+    }
+
     try {
       const url = `/api/files/${encodeURIComponent(file.id)}/download?token=${encodeURIComponent(
         sessionToken
       )}`;
       const res = await apiFetch(url, { headers: authHeaders() });
-      if (!res.ok) return;
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        pushNotification({
+          id: `dl_err_${Date.now()}`,
+          timestamp: new Date().toISOString(),
+          title: 'Download Blocked',
+          message: errData.error || 'Could not download file',
+          type: 'error',
+        });
+        return;
+      }
       const blob = await res.blob();
       const blobUrl = URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -501,45 +665,129 @@ export default function App() {
     });
     const data = await res.json();
     if (!res.ok) {
-      throw new Error(data.error || 'Failed to update Telegram configuration');
+      throw new Error(data.error || 'Failed to update storage node configuration');
     }
     setTelegramConfig(data.config);
   };
 
-  const handleLogin = async (email: string, password: string) => {
-    const res = await apiFetch('/api/auth/login', {
+  // Billing & Token Handlers
+  const handleRedeemPromo = async (code: string): Promise<string> => {
+    const res = await apiFetch('/api/billing/promo', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, password }),
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ code }),
     });
     const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Invalid credentials');
-    localStorage.setItem('unlim_session_token', data.token);
-    setSessionToken(data.token);
-    setCurrentUser(data.user);
-    setUsers(data.users || []);
+    if (!res.ok) {
+      throw new Error(data.error || 'Failed to apply promo code');
+    }
+    if (data.user) {
+      setCurrentUser(data.user);
+      updateFirestoreUserProfile({
+        tokenBalance: data.user.tokenBalance,
+        usedPromoCodes: (data.user.usedPromoCodes || []).join(','),
+      }).catch(() => null);
+    }
+    pushNotification({
+      id: `promo_${Date.now()}`,
+      timestamp: new Date().toISOString(),
+      title: '+9,999 Tokens Credited!',
+      message: data.message,
+      type: 'completed',
+    });
+    await loadWorkspaceData();
+    return data.message;
   };
 
-  const handleRegister = async (
-    name: string,
-    email: string,
-    password: string,
-    role: 'admin' | 'member'
-  ) => {
-    const res = await apiFetch('/api/auth/register', {
+  const handlePurchaseTokens = async (payload: {
+    tokens: number;
+    paymentMethod: string;
+    amountLabel: string;
+  }): Promise<string> => {
+    const res = await apiFetch('/api/billing/buy-tokens', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, email, password, role }),
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify(payload),
     });
     const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Registration failed');
-    localStorage.setItem('unlim_session_token', data.token);
-    setSessionToken(data.token);
-    setCurrentUser(data.user);
-    setUsers(data.users || []);
+    if (!res.ok) {
+      throw new Error(data.error || 'Token purchase failed');
+    }
+    if (data.user) {
+      setCurrentUser(data.user);
+      updateFirestoreUserProfile({
+        tokenBalance: data.user.tokenBalance,
+      }).catch(() => null);
+    }
+    pushNotification({
+      id: `buy_${Date.now()}`,
+      timestamp: new Date().toISOString(),
+      title: 'Tokens Added to Wallet',
+      message: data.message,
+      type: 'completed',
+    });
+    await loadWorkspaceData();
+    return data.message;
+  };
+
+  const handleSubscribePlan = async (planId: StoragePlanId): Promise<string> => {
+    const res = await apiFetch('/api/billing/subscribe', {
+      method: 'POST',
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ planId }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data.error || 'Could not update storage plan');
+    }
+    if (data.user) {
+      setCurrentUser(data.user);
+      updateFirestoreUserProfile({
+        planId: data.user.planId,
+        tokenBalance: data.user.tokenBalance,
+        planExpiresAt: data.user.planExpiresAt || '',
+        graceEndsAt: data.user.graceEndsAt || '',
+      }).catch(() => null);
+    }
+    if (data.files) {
+      setFiles(data.files);
+    }
+    pushNotification({
+      id: `sub_${Date.now()}`,
+      timestamp: new Date().toISOString(),
+      title: 'Storage Plan Updated',
+      message: data.message,
+      type: 'completed',
+    });
+    await loadWorkspaceData();
+    return data.message;
+  };
+
+  const handleSimulateExpiry = async (): Promise<string> => {
+    const res = await apiFetch('/api/billing/simulate-expiry', {
+      method: 'POST',
+      headers: authHeaders(),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data.error || 'Simulation failed');
+    }
+    if (data.user) setCurrentUser(data.user);
+    if (data.files) setFiles(data.files);
+    pushNotification({
+      id: `sim_${Date.now()}`,
+      timestamp: new Date().toISOString(),
+      title: '3-Month Expiry Grace Lock Active',
+      message: 'Files above 25 GB are now locked. Renew your plan with Tokens to unlock.',
+      type: 'warning',
+    });
+    return data.message;
   };
 
   const handleSwitchUser = async (userId: string) => {
+    await signOutFirebaseUser().catch(() => null);
+    setFirebaseUser(null);
+    setSignedOutGate(false);
     const res = await apiFetch('/api/auth/switch-user', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -554,7 +802,7 @@ export default function App() {
   };
 
   // ============================================================================
-  // PUBLIC SHARE PORTAL RENDERING
+  // 1. PUBLIC SHARE PORTAL RENDERING
   // ============================================================================
 
   if (publicShareToken) {
@@ -573,8 +821,70 @@ export default function App() {
   }
 
   // ============================================================================
-  // COMPUTED ITEMS
+  // 2. FIREBASE GOOGLE SIGN-IN SCREEN (WHEN USER SIGNS OUT)
   // ============================================================================
+
+  if (signedOutGate) {
+    return (
+      <div className="min-h-screen bg-[#141311] text-[#F2EFE9] flex flex-col justify-between p-4 sm:p-6">
+        <header className="max-w-7xl w-full mx-auto flex items-center justify-between py-2">
+          <div className="text-lg font-bold tracking-tight text-[#F2EFE9]">UnlimCloud</div>
+          <div className="text-xs text-[#9E978E]">25 GB Free Encrypted Cloud Storage</div>
+        </header>
+
+        <main className="flex-1 flex items-center justify-center py-8">
+          <div className="w-full max-w-md bg-[#1C1A17] border border-[#2C2824] p-6 sm:p-8 space-y-6">
+            <div className="w-12 h-12 bg-[#24211D] border border-[#2C2824] flex items-center justify-center">
+              <ShieldCheck className="w-6 h-6 text-[#D97757]" />
+            </div>
+
+            <div className="space-y-2">
+              <h1 className="text-xl sm:text-2xl font-bold text-[#F2EFE9]">
+                Sign in to UnlimCloud
+              </h1>
+              <p className="text-xs sm:text-sm text-[#9E978E] leading-relaxed">
+                Access your private encrypted cloud vault with{' '}
+                <strong className="text-[#F2EFE9]">25 GB Free storage</strong>, rich file
+                previews, and password-protected direct download links.
+              </p>
+            </div>
+
+            <div className="space-y-3 pt-2">
+              <button
+                onClick={handleGoogleSignIn}
+                disabled={signingInGoogle}
+                className="w-full min-h-[48px] px-5 py-3 text-xs sm:text-sm font-bold bg-[#D97757] text-[#141311] hover:bg-[#E08568] flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+              >
+                <LogIn className="w-4 h-4" />
+                {signingInGoogle ? 'Signing in with Google...' : 'Continue with Google'}
+              </button>
+
+              <button
+                onClick={() => setSignedOutGate(false)}
+                className="w-full min-h-[44px] px-4 py-2.5 text-xs font-semibold bg-[#24211D] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] cursor-pointer"
+              >
+                Continue with Demo Vault
+              </button>
+            </div>
+
+            {authGateError && <p className="text-xs text-[#D94848]">{authGateError}</p>}
+          </div>
+        </main>
+
+        <footer className="text-center text-xs text-[#9E978E] py-2">
+          UnlimCloud — Private Multi-Tenant Encrypted Cloud Storage
+        </footer>
+      </div>
+    );
+  }
+
+  // ============================================================================
+  // 3. COMPUTED WORKSPACE DATA
+  // ============================================================================
+
+  const isAdminUser =
+    currentUser?.email?.toLowerCase() === 'titumamma2425@gmail.com' ||
+    firebaseUser?.email?.toLowerCase() === 'titumamma2425@gmail.com';
 
   const activeFolder = folders.find((f) => f.id === currentFolderId) || null;
   const visibleSubfolders = folders.filter((f) => f.parentId === currentFolderId);
@@ -594,6 +904,17 @@ export default function App() {
   });
 
   const totalStorageBytes = files.reduce((acc, f) => acc + f.sizeBytes, 0);
+  const quotaLimitBytes = currentUser?.bandwidthLimitBytes || 25 * 1024 * 1024 * 1024;
+  const quotaPct = Math.min(100, Math.round((totalStorageBytes / quotaLimitBytes) * 100));
+  const lockedFilesCount = files.filter((f) => f.lockedOverQuota).length;
+  const tokenBalance = currentUser?.tokenBalance || 0;
+  const planBadge =
+    currentUser?.planId === 'ultra_1tb'
+      ? '1 TB Ultra'
+      : currentUser?.planId === 'pro_50gb'
+      ? '50 GB Pro'
+      : '25 GB Free';
+
   const activeStreamingJobs = transfers.filter(
     (t) => t.status === 'queued' || t.status === 'streaming' || t.status === 'syncing_telegram'
   );
@@ -631,7 +952,7 @@ export default function App() {
           UnlimCloud
         </a>
 
-        {/* Zone 2: Desktop Navigation Links (hidden on phone; phone uses thumb-friendly Bottom Tab Bar) */}
+        {/* Zone 2: Desktop Navigation Links (Admin Storage Node tab hidden from regular users) */}
         <nav className="hidden md:flex items-center gap-6 text-sm font-medium text-[#9E978E]">
           <a
             href="#my-files"
@@ -663,6 +984,20 @@ export default function App() {
             Shared Links ({shares.length})
           </a>
           <a
+            href="#pricing"
+            onClick={(e) => {
+              e.preventDefault();
+              setActiveView('pricing');
+            }}
+            className={`transition-colors whitespace-nowrap shrink-0 py-1 ${
+              activeView === 'pricing'
+                ? 'text-[#F2EFE9] border-b-2 border-[#D97757] font-semibold'
+                : 'hover:text-[#F2EFE9]'
+            }`}
+          >
+            Plans & Tokens ({tokenBalance.toLocaleString()} T)
+          </a>
+          <a
             href="#activity"
             onClick={(e) => {
               e.preventDefault();
@@ -676,23 +1011,25 @@ export default function App() {
           >
             Activity & Speed
           </a>
-          <a
-            href="#telegram-setup"
-            onClick={(e) => {
-              e.preventDefault();
-              setActiveView('telegram_settings');
-            }}
-            className={`transition-colors whitespace-nowrap shrink-0 py-1 ${
-              activeView === 'telegram_settings'
-                ? 'text-[#F2EFE9] border-b-2 border-[#D97757] font-semibold'
-                : 'hover:text-[#F2EFE9]'
-            }`}
-          >
-            Telegram Setup
-          </a>
+          {isAdminUser && (
+            <a
+              href="#storage-node"
+              onClick={(e) => {
+                e.preventDefault();
+                setActiveView('telegram_settings');
+              }}
+              className={`transition-colors whitespace-nowrap shrink-0 py-1 ${
+                activeView === 'telegram_settings'
+                  ? 'text-[#F2EFE9] border-b-2 border-[#D97757] font-semibold'
+                  : 'hover:text-[#F2EFE9]'
+              }`}
+            >
+              Storage Node (Admin)
+            </a>
+          )}
         </nav>
 
-        {/* Zone 3: 1 Primary Action (44px min touch height on mobile) */}
+        {/* Zone 3: 1 Primary Action */}
         <div className="flex items-center shrink-0">
           <button
             onClick={() => fileInputRef.current?.click()}
@@ -705,50 +1042,93 @@ export default function App() {
       </header>
 
       {/* ====================================================================
-          MAIN USER-FRIENDLY CONTAINER (with pb-24 on mobile for Bottom Tab Bar)
+          MAIN CONTAINER
       ==================================================================== */}
       <main className="flex-1 w-full max-w-7xl mx-auto px-4 sm:px-6 py-4 sm:py-6 pb-24 md:pb-8 space-y-5 sm:space-y-6">
-        {/* Friendly Welcome & Storage Summary Bar */}
-        <div className="p-3.5 sm:p-4 bg-[#1C1A17] border border-[#2C2824] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-          <div className="flex items-center gap-3">
+        {/* Storage Quota & Account Bar (Zero Telegram mention) */}
+        <div className="p-3.5 sm:p-4 bg-[#1C1A17] border border-[#2C2824] flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+          <div className="flex items-center gap-3 flex-1 min-w-0">
             <div className="w-10 h-10 bg-[#24211D] border border-[#2C2824] flex items-center justify-center shrink-0">
               <Cloud className="w-5 h-5 text-[#D97757]" />
             </div>
-            <div className="min-w-0">
-              <div className="text-sm font-bold text-[#F2EFE9] truncate">
-                Unlimited Telegram Cloud Drive
+            <div className="min-w-0 flex-1 space-y-1.5">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="text-sm font-bold text-[#F2EFE9] truncate">
+                  UnlimCloud Encrypted Vault ({planBadge})
+                </div>
+                <div className="text-xs text-[#9E978E] tabular-nums">
+                  <strong className="text-[#F2EFE9]">{formatBytes(totalStorageBytes)}</strong> used
+                  of <strong className="text-[#F2EFE9]">{formatBytes(quotaLimitBytes)}</strong>
+                </div>
               </div>
-              <div className="text-xs text-[#9E978E] tabular-nums">
-                {formatBytes(totalStorageBytes)} · {files.length} files ·{' '}
-                {bandwidthSettings.globalThrottleKbps
-                  ? `${bandwidthSettings.globalThrottleKbps} KB/s limit`
-                  : 'Full speed'}
+              <div className="h-2 w-full bg-[#141311] border border-[#2C2824]">
+                <div
+                  style={{ width: `${quotaPct}%` }}
+                  className={`h-full transition-all duration-300 ${
+                    lockedFilesCount > 0 ? 'bg-[#D99B26]' : 'bg-[#D97757]'
+                  }`}
+                />
               </div>
             </div>
           </div>
 
-          {currentUser && (
-            <div className="flex items-center justify-between sm:justify-end gap-3 pt-2.5 sm:pt-0 border-t sm:border-t-0 border-[#2C2824]">
-              <span className="text-xs text-[#9E978E] truncate">
-                Account: <strong className="text-[#F2EFE9]">{currentUser.name}</strong>
-              </span>
+          <div className="flex flex-wrap items-center justify-between sm:justify-end gap-2.5 pt-2.5 lg:pt-0 border-t lg:border-t-0 border-[#2C2824]">
+            <button
+              onClick={() => setShowBuyTokensModal(true)}
+              className="min-h-[40px] px-3.5 py-2 text-xs font-semibold bg-[#24211D] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center gap-1.5 cursor-pointer"
+            >
+              <Coins className="w-3.5 h-3.5 text-[#D97757]" />
+              <span className="tabular-nums">{tokenBalance.toLocaleString()} Tokens</span>
+              <span className="text-[#D97757] font-bold ml-1">+ Buy</span>
+            </button>
+
+            {!firebaseUser ? (
+              <button
+                onClick={handleGoogleSignIn}
+                disabled={signingInGoogle}
+                className="min-h-[40px] px-3.5 py-2 text-xs font-bold bg-[#D97757] text-[#141311] hover:bg-[#E08568] flex items-center gap-1.5 cursor-pointer"
+              >
+                <LogIn className="w-3.5 h-3.5" />
+                {signingInGoogle ? 'Signing in...' : 'Google Sign In'}
+              </button>
+            ) : null}
+
+            {currentUser && (
               <button
                 onClick={() => setShowAuthModal(true)}
                 className="min-h-[40px] px-3.5 py-2 text-xs font-medium bg-[#24211D] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center gap-1.5 shrink-0 cursor-pointer"
               >
                 <UserIcon className="w-3.5 h-3.5 text-[#D97757]" />
-                Switch Account
+                <span className="max-w-[130px] truncate">{currentUser.name}</span>
               </button>
-            </div>
-          )}
+            )}
+          </div>
         </div>
 
-        {/* Active Transfer Progress Bar */}
-        {activeStreamingJobs.length > 0 && (
+        {/* LIVE FILE UPLOAD PROGRESS BAR (Determinate 0% -> 100%) */}
+        {(uploadProgress || activeStreamingJobs.length > 0) && (
           <div className="p-4 bg-[#1C1A17] border border-[#D97757] space-y-3">
-            <div className="text-xs font-bold text-[#D97757]">
-              Transfer in Progress ({activeStreamingJobs.length})
-            </div>
+            {uploadProgress && (
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between text-xs tabular-nums">
+                  <span className="font-bold text-[#F2EFE9] truncate">
+                    Uploading: {uploadProgress.fileName}
+                  </span>
+                  <span className="text-[#D97757] font-bold shrink-0">
+                    {uploadProgress.percent}% · {formatBytes(uploadProgress.loadedBytes)} /{' '}
+                    {formatBytes(uploadProgress.totalBytes)} ·{' '}
+                    {formatSpeed(uploadProgress.speedBps)}
+                  </span>
+                </div>
+                <div className="h-2.5 w-full bg-[#141311] border border-[#2C2824]">
+                  <div
+                    style={{ width: `${uploadProgress.percent}%` }}
+                    className="h-full bg-[#D97757] transition-all duration-100"
+                  />
+                </div>
+              </div>
+            )}
+
             {activeStreamingJobs.map((job) => {
               const pct =
                 job.totalBytes > 0
@@ -759,7 +1139,7 @@ export default function App() {
                   <div className="flex items-center justify-between text-xs tabular-nums">
                     <span className="font-semibold text-[#F2EFE9] truncate">{job.fileName}</span>
                     <span className="text-[#9E978E] shrink-0">
-                      {formatBytes(job.transferredBytes)} · {formatSpeed(job.speedBps)}
+                      {pct}% · {formatBytes(job.transferredBytes)} · {formatSpeed(job.speedBps)}
                     </span>
                   </div>
                   <div className="h-2 w-full bg-[#141311] border border-[#2C2824]">
@@ -775,7 +1155,7 @@ export default function App() {
         )}
 
         {/* ==================================================================
-            VIEW 1: MY FILES (Google Drive Style Visual Cards)
+            VIEW 1: MY FILES
         ================================================================== */}
         {activeView === 'explorer' && (
           <div
@@ -793,7 +1173,30 @@ export default function App() {
             }}
             className="space-y-5 sm:space-y-6"
           >
-            {/* Mobile-Friendly Action Grid (2x2 on phones, inline row on desktop) + Search */}
+            {/* Expired Plan / Over-25GB Lock Warning Banner */}
+            {lockedFilesCount > 0 && (
+              <div className="p-4 bg-[#1C1A17] border border-[#D99B26] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div className="flex items-center gap-2.5 text-xs">
+                  <Lock className="w-4 h-4 text-[#D99B26] shrink-0" />
+                  <span>
+                    <strong className="text-[#F2EFE9]">
+                      {lockedFilesCount} file(s) over your 25 GB Free limit are locked
+                    </strong>{' '}
+                    <span className="text-[#9E978E]">
+                      (3-month grace period active — extend your plan to unlock before auto-clear).
+                    </span>
+                  </span>
+                </div>
+                <button
+                  onClick={() => setActiveView('pricing')}
+                  className="min-h-[38px] px-4 py-1.5 text-xs font-bold bg-[#D97757] text-[#141311] shrink-0 cursor-pointer"
+                >
+                  Extend Plan with Tokens
+                </button>
+              </div>
+            )}
+
+            {/* Action Grid + Search */}
             <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
               <div className="grid grid-cols-2 sm:flex sm:flex-wrap items-center gap-2">
                 <button
@@ -833,7 +1236,6 @@ export default function App() {
                 </button>
               </div>
 
-              {/* Search Box (44px height on mobile) */}
               <div className="relative w-full lg:w-80">
                 <Search className="w-4 h-4 text-[#9E978E] absolute left-3.5 top-1/2 -translate-y-1/2" />
                 <input
@@ -878,7 +1280,7 @@ export default function App() {
               </form>
             )}
 
-            {/* Simple Breadcrumb when inside a folder */}
+            {/* Breadcrumb */}
             {(activeFolder || onlyStarred) && (
               <div className="flex items-center gap-2 text-sm font-semibold">
                 <button
@@ -897,7 +1299,7 @@ export default function App() {
               </div>
             )}
 
-            {/* Folders Section (Google Drive Style Cards) */}
+            {/* Folders Section */}
             {!onlyStarred && !searchQuery.trim() && visibleSubfolders.length > 0 && (
               <div className="space-y-2.5">
                 <h2 className="text-xs font-semibold text-[#9E978E] uppercase tracking-wider">
@@ -927,7 +1329,12 @@ export default function App() {
                         <button
                           onClick={(e) => {
                             e.stopPropagation();
-                            handleDeleteFolder(folder.id);
+                            setDeleteTarget({
+                              type: 'folder',
+                              id: folder.id,
+                              name: folder.name,
+                              subtitle: `Contains ${count} ${count === 1 ? 'file' : 'files'}`,
+                            });
                           }}
                           className="min-w-[44px] min-h-[44px] -mr-2 flex items-center justify-center text-[#9E978E] hover:text-[#D94848] cursor-pointer"
                           title="Delete Folder"
@@ -941,14 +1348,14 @@ export default function App() {
               </div>
             )}
 
-            {/* Files Section (Google Drive Style Visual Cards) */}
+            {/* Files Section */}
             <div className="space-y-2.5">
               <div className="flex items-center justify-between">
                 <h2 className="text-xs font-semibold text-[#9E978E] uppercase tracking-wider">
                   Files ({visibleFiles.length})
                 </h2>
                 <span className="hidden sm:inline text-xs text-[#9E978E]">
-                  Tip: Drag and drop files anywhere to upload
+                  Tap any file to preview · Drag & drop files anywhere to upload
                 </span>
               </div>
 
@@ -983,26 +1390,45 @@ export default function App() {
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
                   {visibleFiles.map((file) => {
                     const existingShare = shares.find((s) => s.fileId === file.id);
+                    const isLocked = Boolean(file.lockedOverQuota);
                     return (
                       <div
                         key={file.id}
-                        className="p-4 sm:p-5 bg-[#1C1A17] border border-[#2C2824] hover:border-[#D97757]/70 transition-colors flex flex-col justify-between gap-4"
+                        className={`p-4 sm:p-5 bg-[#1C1A17] border transition-colors flex flex-col justify-between gap-4 ${
+                          isLocked
+                            ? 'border-[#D99B26]/80'
+                            : 'border-[#2C2824] hover:border-[#D97757]/70'
+                        }`}
                       >
-                        {/* Top Card Row: File Icon + Star & Delete (with 44px touch hitboxes) */}
                         <div className="space-y-3">
                           <div className="flex items-start justify-between gap-2">
                             <button
                               onClick={() => setInspectedFile(file)}
-                              className="w-11 h-11 bg-[#24211D] border border-[#2C2824] flex items-center justify-center shrink-0 cursor-pointer"
+                              className="w-11 h-11 bg-[#24211D] border border-[#2C2824] flex items-center justify-center shrink-0 cursor-pointer overflow-hidden"
                               title="Preview File"
                             >
-                              {renderFileIcon(file.name)}
+                              {file.previewDataUrl && file.mimeType.startsWith('image/') ? (
+                                <img
+                                  src={file.previewDataUrl}
+                                  alt={file.name}
+                                  className="w-full h-full object-cover"
+                                />
+                              ) : (
+                                renderFileIcon(file)
+                              )}
                             </button>
 
                             <div className="flex items-center -mr-2 -mt-2">
                               <button
+                                onClick={() => setInspectedFile(file)}
+                                className="min-w-[40px] min-h-[44px] flex items-center justify-center text-[#9E978E] hover:text-[#F2EFE9] cursor-pointer"
+                                title="Preview File"
+                              >
+                                <Eye className="w-4 h-4" />
+                              </button>
+                              <button
                                 onClick={() => handleToggleStar(file)}
-                                className={`min-w-[44px] min-h-[44px] flex items-center justify-center cursor-pointer ${
+                                className={`min-w-[40px] min-h-[44px] flex items-center justify-center cursor-pointer ${
                                   file.starred
                                     ? 'text-[#D97757]'
                                     : 'text-[#9E978E] hover:text-[#F2EFE9]'
@@ -1015,8 +1441,15 @@ export default function App() {
                                 />
                               </button>
                               <button
-                                onClick={() => handleDeleteFile(file)}
-                                className="min-w-[44px] min-h-[44px] flex items-center justify-center text-[#9E978E] hover:text-[#D94848] cursor-pointer"
+                                onClick={() =>
+                                  setDeleteTarget({
+                                    type: 'file',
+                                    id: file.id,
+                                    name: file.name,
+                                    subtitle: `Size: ${formatBytes(file.sizeBytes)}`,
+                                  })
+                                }
+                                className="min-w-[40px] min-h-[44px] flex items-center justify-center text-[#9E978E] hover:text-[#D94848] cursor-pointer"
                                 title="Delete File"
                               >
                                 <Trash2 className="w-4 h-4" />
@@ -1024,7 +1457,6 @@ export default function App() {
                             </div>
                           </div>
 
-                          {/* File Name & Simple Metadata */}
                           <div>
                             <button
                               onClick={() => setInspectedFile(file)}
@@ -1038,35 +1470,48 @@ export default function App() {
                                 {formatBytes(file.sizeBytes)}
                               </span>
                               <span aria-hidden="true">·</span>
-                              <span>
-                                {file.storageDriver === 'telegram'
-                                  ? 'Telegram Cloud'
-                                  : 'Cloud Drive'}
-                              </span>
+                              {isLocked ? (
+                                <span className="text-[#D99B26] font-semibold">
+                                  Locked (&gt;25 GB Limit)
+                                </span>
+                              ) : (
+                                <span>Encrypted Vault</span>
+                              )}
                               <span aria-hidden="true">·</span>
                               <span>{formatShortDate(file.updatedAt)}</span>
                             </div>
                           </div>
                         </div>
 
-                        {/* Bottom Card Row: Big Clear Share & Download Buttons (min-h-[44px]) */}
-                        <div className="grid grid-cols-2 gap-2.5 pt-3 border-t border-[#2C2824]">
-                          <button
-                            onClick={() => setShareModalFile(file)}
-                            className="min-h-[44px] py-2.5 px-3 text-xs font-semibold bg-[#24211D] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center justify-center gap-1.5 cursor-pointer"
-                          >
-                            <Link2 className="w-4 h-4 text-[#D97757]" />
-                            {existingShare ? 'Shared Link' : 'Share'}
-                          </button>
+                        {isLocked ? (
+                          <div className="pt-3 border-t border-[#2C2824]">
+                            <button
+                              onClick={() => setActiveView('pricing')}
+                              className="w-full min-h-[44px] py-2.5 px-3 text-xs font-bold bg-[#24211D] border border-[#D99B26] text-[#D99B26] hover:bg-[#D99B26] hover:text-[#141311] flex items-center justify-center gap-1.5 cursor-pointer"
+                            >
+                              <Lock className="w-3.5 h-3.5" />
+                              Extend Plan to Unlock
+                            </button>
+                          </div>
+                        ) : (
+                          <div className="grid grid-cols-2 gap-2.5 pt-3 border-t border-[#2C2824]">
+                            <button
+                              onClick={() => setShareModalFile(file)}
+                              className="min-h-[44px] py-2.5 px-3 text-xs font-semibold bg-[#24211D] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center justify-center gap-1.5 cursor-pointer"
+                            >
+                              <Link2 className="w-4 h-4 text-[#D97757]" />
+                              {existingShare ? 'Shared Link' : 'Share'}
+                            </button>
 
-                          <button
-                            onClick={() => handleDownloadFile(file)}
-                            className="min-h-[44px] py-2.5 px-3 text-xs font-bold bg-[#D97757] text-[#141311] hover:bg-[#E08568] flex items-center justify-center gap-1.5 cursor-pointer"
-                          >
-                            <Download className="w-4 h-4" />
-                            Download
-                          </button>
-                        </div>
+                            <button
+                              onClick={() => handleDownloadFile(file)}
+                              className="min-h-[44px] py-2.5 px-3 text-xs font-bold bg-[#D97757] text-[#141311] hover:bg-[#E08568] flex items-center justify-center gap-1.5 cursor-pointer"
+                            >
+                              <Download className="w-4 h-4" />
+                              Download
+                            </button>
+                          </div>
+                        )}
                       </div>
                     );
                   })}
@@ -1090,7 +1535,21 @@ export default function App() {
         )}
 
         {/* ==================================================================
-            VIEW 3: ACTIVITY & SPEED
+            VIEW 3: STORAGE PRICING & TOKEN WALLET
+        ================================================================== */}
+        {activeView === 'pricing' && currentUser && (
+          <StoragePricingView
+            user={currentUser}
+            lockedFilesCount={lockedFilesCount}
+            onOpenBuyTokens={() => setShowBuyTokensModal(true)}
+            onRedeemPromo={handleRedeemPromo}
+            onSubscribePlan={handleSubscribePlan}
+            onSimulateExpiry={handleSimulateExpiry}
+          />
+        )}
+
+        {/* ==================================================================
+            VIEW 4: ACTIVITY & SPEED
         ================================================================== */}
         {activeView === 'activity' && (
           <ActivityAndSpeedView
@@ -1101,9 +1560,9 @@ export default function App() {
         )}
 
         {/* ==================================================================
-            VIEW 4: TELEGRAM SETUP
+            VIEW 5: ADMIN-ONLY STORAGE NODE SETUP
         ================================================================== */}
-        {activeView === 'telegram_settings' && (
+        {activeView === 'telegram_settings' && isAdminUser && (
           <TelegramStorageView
             config={telegramConfig}
             onSaveConfig={handleSaveTelegramConfig}
@@ -1112,9 +1571,13 @@ export default function App() {
       </main>
 
       {/* ====================================================================
-          MOBILE FIXED BOTTOM TAB BAR (Thumb-Zone Navigation for Phones)
+          MOBILE FIXED BOTTOM TAB BAR
       ==================================================================== */}
-      <nav className="fixed bottom-0 left-0 right-0 z-40 md:hidden grid grid-cols-4 bg-[#1C1A17] border-t border-[#2C2824]">
+      <nav
+        className={`fixed bottom-0 left-0 right-0 z-40 md:hidden grid ${
+          isAdminUser ? 'grid-cols-5' : 'grid-cols-4'
+        } bg-[#1C1A17] border-t border-[#2C2824]`}
+      >
         <button
           onClick={() => {
             setActiveView('explorer');
@@ -1135,7 +1598,17 @@ export default function App() {
           }`}
         >
           <Link2 className="w-5 h-5" />
-          <span>Shared ({shares.length})</span>
+          <span>Shared</span>
+        </button>
+
+        <button
+          onClick={() => setActiveView('pricing')}
+          className={`min-h-[56px] flex flex-col items-center justify-center gap-1 text-[11px] font-medium cursor-pointer ${
+            activeView === 'pricing' ? 'text-[#D97757] font-bold' : 'text-[#9E978E]'
+          }`}
+        >
+          <Coins className="w-5 h-5" />
+          <span>Plans</span>
         </button>
 
         <button
@@ -1145,20 +1618,22 @@ export default function App() {
           }`}
         >
           <Gauge className="w-5 h-5" />
-          <span>Speed & Logs</span>
+          <span>Speed</span>
         </button>
 
-        <button
-          onClick={() => setActiveView('telegram_settings')}
-          className={`min-h-[56px] flex flex-col items-center justify-center gap-1 text-[11px] font-medium cursor-pointer ${
-            activeView === 'telegram_settings'
-              ? 'text-[#D97757] font-bold'
-              : 'text-[#9E978E]'
-          }`}
-        >
-          <Settings className="w-5 h-5" />
-          <span>Telegram</span>
-        </button>
+        {isAdminUser && (
+          <button
+            onClick={() => setActiveView('telegram_settings')}
+            className={`min-h-[56px] flex flex-col items-center justify-center gap-1 text-[11px] font-medium cursor-pointer ${
+              activeView === 'telegram_settings'
+                ? 'text-[#D97757] font-bold'
+                : 'text-[#9E978E]'
+            }`}
+          >
+            <Settings className="w-5 h-5" />
+            <span>Node</span>
+          </button>
+        )}
       </nav>
 
       {/* ====================================================================
@@ -1222,10 +1697,36 @@ export default function App() {
       {inspectedFile && (
         <FileDetailDrawer
           file={inspectedFile}
+          sessionToken={sessionToken}
           onClose={() => setInspectedFile(null)}
           onDownload={handleDownloadFile}
           onOpenShareModal={(f) => setShareModalFile(f)}
-          onDelete={handleDeleteFile}
+          onRequestDelete={(f) =>
+            setDeleteTarget({
+              type: 'file',
+              id: f.id,
+              name: f.name,
+              subtitle: `Size: ${formatBytes(f.sizeBytes)}`,
+            })
+          }
+          onGoToPricing={() => setActiveView('pricing')}
+        />
+      )}
+
+      {deleteTarget && (
+        <DeleteConfirmModal
+          target={deleteTarget}
+          onCancel={() => setDeleteTarget(null)}
+          onConfirm={executeDeleteTarget}
+        />
+      )}
+
+      {showBuyTokensModal && (
+        <BuyTokensModal
+          currentBalance={tokenBalance}
+          onClose={() => setShowBuyTokensModal(false)}
+          onRedeemPromo={handleRedeemPromo}
+          onPurchaseTokens={handlePurchaseTokens}
         />
       )}
 
@@ -1233,9 +1734,10 @@ export default function App() {
         <AuthModal
           currentUser={currentUser}
           users={users}
+          isFirebaseAuthenticated={Boolean(firebaseUser)}
           onClose={() => setShowAuthModal(false)}
-          onLogin={handleLogin}
-          onRegister={handleRegister}
+          onGoogleSignIn={handleGoogleSignIn}
+          onSignOut={handleSignOut}
           onSwitchUser={handleSwitchUser}
         />
       )}

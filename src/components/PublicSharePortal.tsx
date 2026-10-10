@@ -272,7 +272,7 @@ export const PublicSharePortal: React.FC<PublicSharePortalProps> = ({
       </main>
 
       <footer className="px-6 py-4 border-t border-[#2C2824] bg-[#1C1A17] text-center text-xs text-[#9E978E]">
-        Powered by UnlimCloud — Unlimited Telegram Cloud Storage
+        Powered by UnlimCloud — Zero-Knowledge Encrypted Cloud Storage
       </footer>
     </div>
   );

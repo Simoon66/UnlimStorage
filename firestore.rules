@@ -1,0 +1,196 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 1. Global Safety Net (Default-Deny Catch-All)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // 2. Reusable Hardened Primitives
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isAdmin() {
+      return isVerifiedUser() && (
+        request.auth.token.email == 'titumamma2425@gmail.com' ||
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+
+    // 3. Entity Validation Blueprints (Synchronized with firebase-blueprint.json)
+    function isValidUserProfile(data) {
+      return data.keys().hasAll([
+        'uid',
+        'displayName',
+        'planId',
+        'tokenBalance',
+        'planExpiresAt',
+        'graceEndsAt',
+        'usedPromoCodes',
+        'createdAt',
+        'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'uid',
+        'displayName',
+        'planId',
+        'tokenBalance',
+        'planExpiresAt',
+        'graceEndsAt',
+        'usedPromoCodes',
+        'createdAt',
+        'updatedAt'
+      ]) &&
+      data.uid == request.auth.uid &&
+      data.uid is string && data.uid.size() >= 1 && data.uid.size() <= 128 && data.uid.matches('^[a-zA-Z0-9_\\-]+$') &&
+      data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 120 &&
+      data.planId is string && data.planId.size() >= 1 && data.planId.size() <= 32 &&
+      data.planId in ['free_25gb', 'pro_50gb', 'ultra_1tb'] &&
+      data.tokenBalance is number && data.tokenBalance >= 0 && data.tokenBalance <= 100000000 &&
+      data.planExpiresAt is string && data.planExpiresAt.size() <= 64 &&
+      data.graceEndsAt is string && data.graceEndsAt.size() <= 64 &&
+      data.usedPromoCodes is string && data.usedPromoCodes.size() <= 256 &&
+      data.createdAt is timestamp &&
+      data.updatedAt is timestamp;
+    }
+
+    function isValidCloudFileMeta(data) {
+      return data.keys().hasAll([
+        'id',
+        'ownerId',
+        'ownerName',
+        'folderId',
+        'name',
+        'sizeBytes',
+        'mimeType',
+        'starred',
+        'downloadCount',
+        'createdAt',
+        'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'id',
+        'ownerId',
+        'ownerName',
+        'folderId',
+        'name',
+        'sizeBytes',
+        'mimeType',
+        'starred',
+        'downloadCount',
+        'createdAt',
+        'updatedAt'
+      ]) &&
+      data.ownerId == request.auth.uid &&
+      data.id is string && data.id.size() >= 1 && data.id.size() <= 128 && data.id.matches('^[a-zA-Z0-9_\\-]+$') &&
+      data.ownerId is string && data.ownerId.size() >= 1 && data.ownerId.size() <= 128 && data.ownerId.matches('^[a-zA-Z0-9_\\-]+$') &&
+      data.ownerName is string && data.ownerName.size() >= 1 && data.ownerName.size() <= 120 &&
+      data.folderId is string && data.folderId.size() >= 1 && data.folderId.size() <= 128 && data.folderId.matches('^[a-zA-Z0-9_\\-]+$') &&
+      data.name is string && data.name.size() >= 1 && data.name.size() <= 255 &&
+      data.sizeBytes is number && data.sizeBytes >= 0 && data.sizeBytes <= 1099511627776 &&
+      data.mimeType is string && data.mimeType.size() >= 1 && data.mimeType.size() <= 128 &&
+      data.starred is bool &&
+      data.downloadCount is number && data.downloadCount >= 0 && data.downloadCount <= 100000000 &&
+      data.createdAt is timestamp &&
+      data.updatedAt is timestamp;
+    }
+
+    // 4. Admins Collection (Read-Only From Client)
+    match /admins/{adminId} {
+      allow get: if isVerifiedUser() && isValidId(adminId) && request.auth.uid == adminId;
+      allow list, create, update, delete: if false;
+    }
+
+    // 5. User Profiles Collection (/userProfiles/{userId})
+    match /userProfiles/{userId} {
+      allow get: if isSignedIn() && isValidId(userId) && (request.auth.uid == userId || isAdmin());
+      allow list: if isAdmin();
+
+      allow create: if isVerifiedUser() &&
+        isValidId(userId) &&
+        request.auth.uid == userId &&
+        isValidUserProfile(incoming()) &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+
+      allow update: if isVerifiedUser() &&
+        isValidId(userId) &&
+        isValidUserProfile(incoming()) &&
+        incoming().uid == existing().uid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isAdmin() ||
+          // Action: Update wallet tokens, promo code redemption, or storage plan subscription
+          (
+            request.auth.uid == userId &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'displayName',
+              'planId',
+              'tokenBalance',
+              'planExpiresAt',
+              'graceEndsAt',
+              'usedPromoCodes',
+              'updatedAt'
+            ])
+          )
+        );
+
+      allow delete: if isAdmin();
+    }
+
+    // 6. Cloud File Metadata Collection (/cloudFiles/{fileId})
+    match /cloudFiles/{fileId} {
+      allow get: if isSignedIn() && isValidId(fileId) && (existing().ownerId == request.auth.uid || isAdmin());
+      allow list: if isSignedIn() && (resource.data.ownerId == request.auth.uid || isAdmin());
+
+      allow create: if isVerifiedUser() &&
+        isValidId(fileId) &&
+        isValidCloudFileMeta(incoming()) &&
+        incoming().id == fileId &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        exists(/databases/$(database)/documents/userProfiles/$(request.auth.uid));
+
+      allow update: if isVerifiedUser() &&
+        isValidId(fileId) &&
+        isValidCloudFileMeta(incoming()) &&
+        incoming().id == existing().id &&
+        incoming().ownerId == existing().ownerId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isAdmin() ||
+          // Action: Star/unstar, rename, move folder, or increment download counter
+          (
+            existing().ownerId == request.auth.uid &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'name',
+              'folderId',
+              'starred',
+              'downloadCount',
+              'updatedAt'
+            ])
+          )
+        );
+
+      allow delete: if isVerifiedUser() && isValidId(fileId) && (existing().ownerId == request.auth.uid || isAdmin());
+    }
+  }
+}

@@ -1,5 +1,7 @@
 export type UserRole = 'admin' | 'member';
 
+export type StoragePlanId = 'free_25gb' | 'pro_50gb' | 'ultra_1tb';
+
 export interface User {
   id: string;
   name: string;
@@ -9,6 +11,34 @@ export interface User {
   bandwidthUsedBytes: number;
   storageUsedBytes: number;
   createdAt: string;
+  // Storage plan & token wallet fields
+  planId?: StoragePlanId;
+  tokenBalance?: number;
+  planExpiresAt?: string | null; // ISO date when monthly paid plan ends
+  graceEndsAt?: string | null; // ISO date 90 days (3 months) after planExpiresAt
+  usedPromoCodes?: string[];
+  photoURL?: string;
+}
+
+export interface StoragePlanSpec {
+  id: StoragePlanId;
+  name: string;
+  quotaBytes: number;
+  quotaLabel: string;
+  monthlyTokens: number;
+  badge: string;
+  features: string[];
+}
+
+export interface TokenTransaction {
+  id: string;
+  userId: string;
+  type: 'promo_redeem' | 'token_purchase' | 'plan_subscribe' | 'plan_extend';
+  tokensDelta: number;
+  description: string;
+  paymentMethod?: string;
+  amountPaidLabel?: string;
+  timestamp: string;
 }
 
 export interface FolderRecord {
@@ -47,6 +77,8 @@ export interface FileRecord {
   createdAt: string;
   updatedAt: string;
   previewText?: string;
+  previewDataUrl?: string;
+  lockedOverQuota?: boolean;
 }
 
 export interface ShareLink {
@@ -108,7 +140,10 @@ export type AuditAction =
   | 'TELEGRAM_SYNC'
   | 'TELEGRAM_CONFIG'
   | 'USER_LOGIN'
-  | 'USER_REGISTER';
+  | 'USER_REGISTER'
+  | 'PROMO_REDEEMED'
+  | 'TOKENS_PURCHASED'
+  | 'PLAN_SUBSCRIBED';
 
 export interface AuditLog {
   id: string;

@@ -20,6 +20,7 @@ import {
   TelegramConfigState,
   TelegramChunk,
   AuditAction,
+  StoragePlanId,
 } from './src/types.ts';
 
 dotenv.config();
@@ -29,8 +30,10 @@ const DATA_DIR = path.resolve(process.cwd(), '.data');
 const CHUNKS_DIR = path.join(DATA_DIR, 'chunks');
 const DB_PATH = path.join(DATA_DIR, 'db.json');
 
-// Telegram Bot API chunk size (19 MB safe limit under 20 MB getFile download limit)
 const TELEGRAM_CHUNK_SIZE = 19 * 1024 * 1024;
+const FREE_25GB_BYTES = 25 * 1024 * 1024 * 1024;
+const PRO_50GB_BYTES = 50 * 1024 * 1024 * 1024;
+const ULTRA_1TB_BYTES = 1024 * 1024 * 1024 * 1024;
 
 if (!fs.existsSync(DATA_DIR)) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -49,7 +52,7 @@ interface StoredShareLink extends ShareLink {
 
 interface DatabaseSchema {
   users: StoredUser[];
-  sessions: Record<string, string>; // token -> userId
+  sessions: Record<string, string>;
   folders: FolderRecord[];
   files: FileRecord[];
   shares: StoredShareLink[];
@@ -75,6 +78,12 @@ function computeSha256(buf: Buffer): string {
   return crypto.createHash('sha256').update(buf).digest('hex');
 }
 
+function getPlanQuotaBytes(planId: StoragePlanId = 'free_25gb'): number {
+  if (planId === 'ultra_1tb') return ULTRA_1TB_BYTES;
+  if (planId === 'pro_50gb') return PRO_50GB_BYTES;
+  return FREE_25GB_BYTES;
+}
+
 function createSeedDatabase(): DatabaseSchema {
   const now = new Date();
   const iso = (minsAgo: number) => new Date(now.getTime() - minsAgo * 60000).toISOString();
@@ -82,63 +91,38 @@ function createSeedDatabase(): DatabaseSchema {
   const adminId = 'usr_admin_01';
   const memberId = 'usr_dev_02';
 
-  // Create real seed files on disk so every seed file can be downloaded and verified immediately
   const seedFile1Content = Buffer.from(
-    `# UnlimCloud Architecture Specification\n\n` +
-      `Storage Engine: Telegram Channel Chunk Manifest + Local Vault Fallback\n` +
-      `Chunk Size: 19,922,944 bytes (19 MB per Telegram sendDocument part)\n` +
-      `Integrity: End-to-End SHA-256 Verification\n` +
-      `Bandwidth Control: Token-Bucket Stream Throttling (KB/s precision)\n\n` +
-      `## Multi-Part Manifest Example\n` +
-      `- Part 00: msg_id=40812, file_id=BQACAgUAAxkBAAI..., sha256=9f86d081884c7d659a2feaa0c55ad015\n` +
-      `- Part 01: msg_id=40813, file_id=BQACAgUAAxkBAAI..., sha256=4b227777d4dd1fc61c6f884f48641d02\n`,
+    `# UnlimCloud Encrypted Cloud Drive — Quick Start Guide\n\n` +
+      `Welcome to your private UnlimCloud storage vault.\n\n` +
+      `## Storage Tiers & Token Billing\n` +
+      `- **Starter Free**: 25 GB included free for every account\n` +
+      `- **Pro 50 GB**: 500 Tokens / month\n` +
+      `- **Ultra 1 TB**: 1024 Tokens / month\n\n` +
+      `## 3-Month Data Protection Guarantee\n` +
+      `If your monthly plan expires, your files are never deleted right away.\n` +
+      `Your first 25 GB stays accessible at all times, and any files above 25 GB are safely held for 3 months (90 days) so you can renew whenever you are ready.\n`,
     'utf-8'
   );
   const seedFile1Hash = computeSha256(seedFile1Content);
   fs.writeFileSync(path.join(CHUNKS_DIR, 'file_spec_01'), seedFile1Content);
 
-  const seedFile2Content = Buffer.from(
-    JSON.stringify(
-      {
-        cluster: 'ap-southeast-tg-bridge-01',
-        telegramChannelId: '-1002198471092',
-        encryption: 'AES-256-GCM + SHA-256 Manifest',
-        nodes: [
-          { id: 'edge-dhaka-01', status: 'nominal', throughputMbps: 420 },
-          { id: 'edge-singapore-02', status: 'nominal', throughputMbps: 890 },
-        ],
-        snapshotTimestamp: iso(180),
-      },
-      null,
-      2
-    ),
+  const seedSvg = Buffer.from(
+    `<svg xmlns="http://www.w3.org/2000/svg" width="640" height="320" viewBox="0 0 640 320">` +
+      `<rect width="640" height="320" fill="#141311"/>` +
+      `<rect x="24" y="24" width="592" height="272" fill="#1C1A17" stroke="#D97757" stroke-width="2"/>` +
+      `<text x="52" y="95" fill="#F2EFE9" font-family="monospace" font-size="24" font-weight="bold">UNLIMCLOUD ENCRYPTED VAULT</text>` +
+      `<text x="52" y="140" fill="#9E978E" font-family="sans-serif" font-size="16">Zero-Knowledge Multi-Tenant Cloud Storage</text>` +
+      `<rect x="52" y="185" width="160" height="64" fill="#24211D" stroke="#2C2824"/>` +
+      `<text x="72" y="222" fill="#D97757" font-family="monospace" font-size="15">25 GB FREE</text>` +
+      `<rect x="236" y="185" width="160" height="64" fill="#24211D" stroke="#2C2824"/>` +
+      `<text x="256" y="222" fill="#2E9E6B" font-family="monospace" font-size="15">50 GB / 500T</text>` +
+      `<rect x="420" y="185" width="168" height="64" fill="#24211D" stroke="#2C2824"/>` +
+      `<text x="440" y="222" fill="#F2EFE9" font-family="monospace" font-size="15">1 TB / 1024T</text>` +
+      `</svg>`,
     'utf-8'
   );
-  const seedFile2Hash = computeSha256(seedFile2Content);
-  fs.writeFileSync(path.join(CHUNKS_DIR, 'file_manifest_02'), seedFile2Content);
-
-  const seedFile3Content = Buffer.from(
-    `#!/usr/bin/env bash\n` +
-      `# UnlimCloud CLI Remote Upload & Direct Stream Utility\n` +
-      `set -euo pipefail\n\n` +
-      `UNLIM_HOST="\${UNLIM_HOST:-http://localhost:3000}"\n` +
-      `echo "[unlim-cli] Uploading stream to Telegram Cloud Vault..."\n` +
-      `curl -fsSL -X POST "\$UNLIM_HOST/api/files/upload" -F "file=@\$1"\n`,
-    'utf-8'
-  );
-  const seedFile3Hash = computeSha256(seedFile3Content);
-  fs.writeFileSync(path.join(CHUNKS_DIR, 'file_cli_03'), seedFile3Content);
-
-  const seedFile4Content = Buffer.from(
-    `timestamp,event,node,bytes_transferred,sha256_verified,latency_ms\n` +
-      `2026-10-09T08:12:00Z,TELEGRAM_CHUNK_COMMIT,tg-dc5-singapore,19922944,true,142\n` +
-      `2026-10-09T09:30:11Z,DIRECT_LINK_STREAM,edge-proxy-01,8421376,true,38\n` +
-      `2026-10-09T11:04:49Z,REMOTE_URL_INGEST,worker-fetch-02,15728640,true,219\n` +
-      `2026-10-09T13:20:05Z,BANDWIDTH_THROTTLE_APPLIED,edge-proxy-01,2097152,true,64\n`,
-    'utf-8'
-  );
-  const seedFile4Hash = computeSha256(seedFile4Content);
-  fs.writeFileSync(path.join(CHUNKS_DIR, 'file_telemetry_04'), seedFile4Content);
+  const seedFile2Hash = computeSha256(seedSvg);
+  fs.writeFileSync(path.join(CHUNKS_DIR, 'file_diagram_02'), seedSvg);
 
   const envBotToken = process.env.TELEGRAM_BOT_TOKEN || '';
   const envChatId = process.env.TELEGRAM_CHAT_ID || '';
@@ -148,17 +132,18 @@ function createSeedDatabase(): DatabaseSchema {
       {
         id: adminId,
         name: 'Arian Rahman',
-        email: 'admin@unlim.cloud',
+        email: 'titumamma2425@gmail.com',
         passwordHash: hashPassword('admin123'),
         role: 'admin',
-        bandwidthLimitBytes: 50 * 1024 * 1024 * 1024, // 50 GB
-        bandwidthUsedBytes: 482_344_960, // ~460 MB
-        storageUsedBytes:
-          seedFile1Content.length +
-          seedFile2Content.length +
-          seedFile3Content.length +
-          seedFile4Content.length,
+        bandwidthLimitBytes: FREE_25GB_BYTES,
+        bandwidthUsedBytes: 482_344_960,
+        storageUsedBytes: seedFile1Content.length + seedSvg.length,
         createdAt: iso(4320),
+        planId: 'free_25gb',
+        tokenBalance: 250,
+        planExpiresAt: null,
+        graceEndsAt: null,
+        usedPromoCodes: [],
       },
       {
         id: memberId,
@@ -166,10 +151,15 @@ function createSeedDatabase(): DatabaseSchema {
         email: 'dev@unlim.cloud',
         passwordHash: hashPassword('dev123'),
         role: 'member',
-        bandwidthLimitBytes: 10 * 1024 * 1024 * 1024, // 10 GB
-        bandwidthUsedBytes: 128_974_848, // ~123 MB
-        storageUsedBytes: seedFile3Content.length,
+        bandwidthLimitBytes: FREE_25GB_BYTES,
+        bandwidthUsedBytes: 128_974_848,
+        storageUsedBytes: 0,
         createdAt: iso(2880),
+        planId: 'free_25gb',
+        tokenBalance: 100,
+        planExpiresAt: null,
+        graceEndsAt: null,
+        usedPromoCodes: [],
       },
     ],
     sessions: {
@@ -179,7 +169,7 @@ function createSeedDatabase(): DatabaseSchema {
     folders: [
       {
         id: 'fld_architecture',
-        name: '01_System_Architecture',
+        name: 'Documents & Guides',
         parentId: null,
         ownerId: adminId,
         ownerName: 'Arian Rahman',
@@ -187,116 +177,50 @@ function createSeedDatabase(): DatabaseSchema {
       },
       {
         id: 'fld_releases',
-        name: '02_Release_Artifacts',
+        name: 'Media & Backups',
         parentId: null,
         ownerId: adminId,
         ownerName: 'Arian Rahman',
         createdAt: iso(1200),
       },
-      {
-        id: 'fld_audits',
-        name: '03_Security_Logs',
-        parentId: null,
-        ownerId: memberId,
-        ownerName: 'Nadia Karim',
-        createdAt: iso(720),
-      },
     ],
     files: [
       {
         id: 'file_spec_01',
-        name: 'UNLIM_CLOUD_PROTOCOL_SPEC.md',
-        folderId: 'fld_architecture',
+        name: 'UnlimCloud-QuickStart-Guide.md',
+        folderId: null,
         ownerId: adminId,
         ownerName: 'Arian Rahman',
         sizeBytes: seedFile1Content.length,
         mimeType: 'text/markdown',
         sha256: seedFile1Hash,
-        storageDriver: 'telegram',
-        telegramChatId: envChatId || '-1002198471092',
-        telegramChunks: [
-          {
-            partIndex: 0,
-            messageId: 40812,
-            fileId: 'BQACAgUAAxkBAAJ_UnlimSpecPart00',
-            sizeBytes: seedFile1Content.length,
-            sha256Part: seedFile1Hash,
-          },
-        ],
+        storageDriver: 'local_vault',
+        telegramChunks: [],
         starred: true,
         downloadCount: 18,
         createdAt: iso(640),
         updatedAt: iso(640),
         previewText: seedFile1Content.toString('utf-8'),
+        lockedOverQuota: false,
       },
       {
-        id: 'file_manifest_02',
-        name: 'telegram-channel-cluster-manifest.json',
-        folderId: 'fld_architecture',
+        id: 'file_diagram_02',
+        name: 'UnlimCloud-Vault-Overview.svg',
+        folderId: null,
         ownerId: adminId,
         ownerName: 'Arian Rahman',
-        sizeBytes: seedFile2Content.length,
-        mimeType: 'application/json',
+        sizeBytes: seedSvg.length,
+        mimeType: 'image/svg+xml',
         sha256: seedFile2Hash,
-        storageDriver: 'telegram',
-        telegramChatId: envChatId || '-1002198471092',
-        telegramChunks: [
-          {
-            partIndex: 0,
-            messageId: 40819,
-            fileId: 'BQACAgUAAxkBAAJ_ClusterManifest00',
-            sizeBytes: seedFile2Content.length,
-            sha256Part: seedFile2Hash,
-          },
-        ],
+        storageDriver: 'local_vault',
+        telegramChunks: [],
         starred: true,
         downloadCount: 9,
         createdAt: iso(410),
         updatedAt: iso(410),
-        previewText: seedFile2Content.toString('utf-8'),
-      },
-      {
-        id: 'file_cli_03',
-        name: 'unlim-remote-sync.sh',
-        folderId: 'fld_releases',
-        ownerId: memberId,
-        ownerName: 'Nadia Karim',
-        sizeBytes: seedFile3Content.length,
-        mimeType: 'application/x-sh',
-        sha256: seedFile3Hash,
-        storageDriver: 'local_vault',
-        telegramChunks: [],
-        starred: false,
-        downloadCount: 31,
-        createdAt: iso(220),
-        updatedAt: iso(220),
-        previewText: seedFile3Content.toString('utf-8'),
-      },
-      {
-        id: 'file_telemetry_04',
-        name: 'bandwidth-integrity-audit-2026-10.csv',
-        folderId: 'fld_audits',
-        ownerId: adminId,
-        ownerName: 'Arian Rahman',
-        sizeBytes: seedFile4Content.length,
-        mimeType: 'text/csv',
-        sha256: seedFile4Hash,
-        storageDriver: 'telegram',
-        telegramChatId: envChatId || '-1002198471092',
-        telegramChunks: [
-          {
-            partIndex: 0,
-            messageId: 40844,
-            fileId: 'BQACAgUAAxkBAAJ_AuditCsvPart00',
-            sizeBytes: seedFile4Content.length,
-            sha256Part: seedFile4Hash,
-          },
-        ],
-        starred: false,
-        downloadCount: 14,
-        createdAt: iso(95),
-        updatedAt: iso(95),
-        previewText: seedFile4Content.toString('utf-8'),
+        previewText: seedSvg.toString('utf-8'),
+        previewDataUrl: `data:image/svg+xml;base64,${seedSvg.toString('base64')}`,
+        lockedOverQuota: false,
       },
     ],
     shares: [
@@ -304,7 +228,7 @@ function createSeedDatabase(): DatabaseSchema {
         id: 'shr_01',
         token: 'tg-spec-vault-2026',
         fileId: 'file_spec_01',
-        fileName: 'UNLIM_CLOUD_PROTOCOL_SPEC.md',
+        fileName: 'UnlimCloud-QuickStart-Guide.md',
         fileSizeBytes: seedFile1Content.length,
         fileMimeType: 'text/markdown',
         fileSha256: seedFile1Hash,
@@ -322,49 +246,8 @@ function createSeedDatabase(): DatabaseSchema {
         createdAt: iso(500),
         lastAccessedAt: iso(25),
       },
-      {
-        id: 'shr_02',
-        token: 'open-cli-script',
-        fileId: 'file_cli_03',
-        fileName: 'unlim-remote-sync.sh',
-        fileSizeBytes: seedFile3Content.length,
-        fileMimeType: 'application/x-sh',
-        fileSha256: seedFile3Hash,
-        creatorId: memberId,
-        creatorName: 'Nadia Karim',
-        hasPassword: false,
-        passwordHash: null,
-        expiresAt: null,
-        maxDownloads: null,
-        downloadCount: 31,
-        throttleKbps: 2048,
-        bandwidthCapBytes: null,
-        bandwidthUsedBytes: 4_120_000,
-        active: true,
-        createdAt: iso(180),
-        lastAccessedAt: iso(12),
-      },
     ],
-    transfers: [
-      {
-        id: 'trf_seed_01',
-        userId: adminId,
-        userName: 'Arian Rahman',
-        type: 'remote_url',
-        sourceUrl: 'https://raw.githubusercontent.com/inulute/unlim-cloud/main/README.md',
-        fileName: 'UNLIM_CLOUD_PROTOCOL_SPEC.md',
-        folderId: 'fld_architecture',
-        totalBytes: seedFile1Content.length,
-        transferredBytes: seedFile1Content.length,
-        speedBps: 1_450_000,
-        status: 'completed',
-        storageDriver: 'telegram',
-        fileId: 'file_spec_01',
-        sha256: seedFile1Hash,
-        createdAt: iso(640),
-        completedAt: iso(639),
-      },
-    ],
+    transfers: [],
     logs: [
       {
         id: 'log_01',
@@ -372,64 +255,12 @@ function createSeedDatabase(): DatabaseSchema {
         userId: adminId,
         userName: 'Arian Rahman',
         action: 'FILE_UPLOAD',
-        targetName: 'UNLIM_CLOUD_PROTOCOL_SPEC.md',
+        targetName: 'UnlimCloud-QuickStart-Guide.md',
         ipAddress: '103.145.72.19',
         bytesTransferred: seedFile1Content.length,
         integrityHash: seedFile1Hash.slice(0, 16),
         status: 'success',
-        details: 'Committed 1 chunk to Telegram Channel (-1002198471092) msg_id=40812',
-      },
-      {
-        id: 'log_02',
-        timestamp: iso(500),
-        userId: adminId,
-        userName: 'Arian Rahman',
-        action: 'SHARE_CREATED',
-        targetName: 'UNLIM_CLOUD_PROTOCOL_SPEC.md (/s/tg-spec-vault-2026)',
-        ipAddress: '103.145.72.19',
-        bytesTransferred: 0,
-        integrityHash: seedFile1Hash.slice(0, 16),
-        status: 'success',
-        details: 'Password-protected direct link created (cap: 512 KB/s, max: 100 downloads)',
-      },
-      {
-        id: 'log_03',
-        timestamp: iso(180),
-        userId: memberId,
-        userName: 'Nadia Karim',
-        action: 'REMOTE_UPLOAD',
-        targetName: 'unlim-remote-sync.sh',
-        ipAddress: '103.145.72.44',
-        bytesTransferred: seedFile3Content.length,
-        integrityHash: seedFile3Hash.slice(0, 16),
-        status: 'success',
-        details: 'Remote URL ingested & SHA-256 verified',
-      },
-      {
-        id: 'log_04',
-        timestamp: iso(45),
-        userId: 'anonymous',
-        userName: 'Public Visitor',
-        action: 'SHARE_AUTH_FAILED',
-        targetName: '/s/tg-spec-vault-2026',
-        ipAddress: '185.220.101.9',
-        bytesTransferred: 0,
-        integrityHash: seedFile1Hash.slice(0, 16),
-        status: 'warning',
-        details: 'Invalid share password attempt blocked by access gate',
-      },
-      {
-        id: 'log_05',
-        timestamp: iso(25),
-        userId: 'anonymous',
-        userName: 'Public Visitor',
-        action: 'SHARE_DOWNLOAD',
-        targetName: 'UNLIM_CLOUD_PROTOCOL_SPEC.md',
-        ipAddress: '45.133.19.82',
-        bytesTransferred: seedFile1Content.length,
-        integrityHash: seedFile1Hash.slice(0, 16),
-        status: 'success',
-        details: 'Streamed via token-bucket rate limiter at 512 KB/s ceiling',
+        details: 'Uploaded and encrypted in UnlimCloud Vault',
       },
     ],
     bandwidthSettings: {
@@ -440,41 +271,6 @@ function createSeedDatabase(): DatabaseSchema {
       autoThrottlePeakHours: false,
     },
     dailyBandwidth: [
-      {
-        date: '2026-10-04',
-        uploadBytes: 68_157_440,
-        downloadBytes: 94_371_840,
-        remoteFetchBytes: 41_943_040,
-        shareBytes: 31_457_280,
-      },
-      {
-        date: '2026-10-05',
-        uploadBytes: 83_886_080,
-        downloadBytes: 115_343_360,
-        remoteFetchBytes: 52_428_800,
-        shareBytes: 47_185_920,
-      },
-      {
-        date: '2026-10-06',
-        uploadBytes: 57_671_680,
-        downloadBytes: 146_800_640,
-        remoteFetchBytes: 73_400_320,
-        shareBytes: 62_914_560,
-      },
-      {
-        date: '2026-10-07',
-        uploadBytes: 125_829_120,
-        downloadBytes: 188_743_680,
-        remoteFetchBytes: 94_371_840,
-        shareBytes: 78_643_200,
-      },
-      {
-        date: '2026-10-08',
-        uploadBytes: 104_857_600,
-        downloadBytes: 167_772_160,
-        remoteFetchBytes: 89_128_960,
-        shareBytes: 68_157_440,
-      },
       {
         date: '2026-10-09',
         uploadBytes: 142_606_336,
@@ -512,7 +308,80 @@ function saveDb() {
   }
 }
 
-// Token-bucket stream throttle (KB/s)
+/**
+ * Evaluates a user's subscription plan, 3-month (90-day) grace period,
+ * and marks any files exceeding the 25 GB free limit as lockedOverQuota
+ * when a paid monthly plan has expired. If 90 days have elapsed since expiry,
+ * excess files above 25 GB are automatically cleared.
+ */
+function evaluateUserQuotaAndLocks(user: StoredUser) {
+  if (!user.planId) user.planId = 'free_25gb';
+  if (typeof user.tokenBalance !== 'number') user.tokenBalance = 0;
+  if (!Array.isArray(user.usedPromoCodes)) user.usedPromoCodes = [];
+
+  const nowMs = Date.now();
+  let isExpiredInGrace = false;
+
+  if (user.planId !== 'free_25gb' && user.planExpiresAt) {
+    const expMs = new Date(user.planExpiresAt).getTime();
+    const graceMs = user.graceEndsAt
+      ? new Date(user.graceEndsAt).getTime()
+      : expMs + 90 * 86400_000;
+
+    if (nowMs > graceMs) {
+      // 3-month grace period has expired without plan extension -> clear excess data over 25 GB
+      const userFilesAsc = db.files
+        .filter((f) => f.ownerId === user.id)
+        .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+
+      let runningBytes = 0;
+      const idsToDelete = new Set<string>();
+      for (const f of userFilesAsc) {
+        if (runningBytes + f.sizeBytes > FREE_25GB_BYTES) {
+          idsToDelete.add(f.id);
+        } else {
+          runningBytes += f.sizeBytes;
+        }
+      }
+
+      if (idsToDelete.size > 0) {
+        db.files = db.files.filter((f) => !idsToDelete.has(f.id));
+        db.shares = db.shares.filter((s) => !idsToDelete.has(s.fileId));
+      }
+
+      user.planId = 'free_25gb';
+      user.planExpiresAt = null;
+      user.graceEndsAt = null;
+      user.bandwidthLimitBytes = FREE_25GB_BYTES;
+    } else if (nowMs > expMs) {
+      // Inside 3-month (90-day) grace period: data is NOT deleted, but >25 GB files are locked
+      isExpiredInGrace = true;
+      user.bandwidthLimitBytes = FREE_25GB_BYTES;
+    } else {
+      user.bandwidthLimitBytes = getPlanQuotaBytes(user.planId);
+    }
+  } else {
+    user.bandwidthLimitBytes = getPlanQuotaBytes(user.planId);
+  }
+
+  // Compute cumulative file sizes for this user (oldest to newest)
+  const userFilesAsc = db.files
+    .filter((f) => f.ownerId === user.id)
+    .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+
+  let cumulative = 0;
+  const effectiveUnlockedBytes = isExpiredInGrace
+    ? FREE_25GB_BYTES
+    : getPlanQuotaBytes(user.planId);
+
+  for (const f of userFilesAsc) {
+    cumulative += f.sizeBytes;
+    f.lockedOverQuota = cumulative > effectiveUnlockedBytes;
+  }
+
+  user.storageUsedBytes = cumulative;
+}
+
 class ThrottleStream extends Transform {
   private bytesPerSecond: number;
   private bytesSentInWindow = 0;
@@ -535,7 +404,10 @@ class ThrottleStream extends Transform {
     this.push(chunk);
 
     if (this.bytesSentInWindow > this.bytesPerSecond) {
-      const delayMs = Math.min(400, Math.round(((this.bytesSentInWindow - this.bytesPerSecond) / this.bytesPerSecond) * 1000));
+      const delayMs = Math.min(
+        400,
+        Math.round(((this.bytesSentInWindow - this.bytesPerSecond) / this.bytesPerSecond) * 1000)
+      );
       setTimeout(() => callback(), delayMs);
     } else {
       callback();
@@ -543,7 +415,6 @@ class ThrottleStream extends Transform {
   }
 }
 
-// Real Telegram Bot API Upload Helper (splits buffer into <=19MB chunks and uploads via sendDocument)
 async function pushBufferToTelegram(
   buffer: Buffer,
   fileName: string,
@@ -586,7 +457,7 @@ async function pushBufferToTelegram(
         return {
           success: false,
           chunks: [],
-          error: tgJson.description || 'Telegram sendDocument rejected request',
+          error: tgJson.description || 'Storage node rejected chunk',
         };
       }
 
@@ -604,12 +475,11 @@ async function pushBufferToTelegram(
     return {
       success: false,
       chunks: [],
-      error: err instanceof Error ? err.message : 'Network error contacting Telegram Bot API',
+      error: err instanceof Error ? err.message : 'Network error contacting storage node',
     };
   }
 }
 
-// Fetch file buffer from Telegram chunks if not cached locally
 async function fetchBufferFromTelegramChunks(
   chunks: TelegramChunk[],
   botToken: string
@@ -642,6 +512,38 @@ async function fetchBufferFromTelegramChunks(
   } catch {
     return null;
   }
+}
+
+function seedStarterFilesForNewUser(user: StoredUser) {
+  const guideText =
+    `# Welcome to UnlimCloud, ${user.name}!\n\n` +
+    `Your private 25 GB Encrypted Cloud Drive is active and ready.\n\n` +
+    `- Upload any file with live progress tracking\n` +
+    `- Preview documents, images, audio, and video directly in your browser\n` +
+    `- Create password-protected direct download links\n` +
+    `- Upgrade to 50 GB (500 Tokens/mo) or 1 TB (1024 Tokens/mo) anytime\n`;
+  const buf = Buffer.from(guideText, 'utf-8');
+  const fileId = `file_welcome_${user.id}`;
+  fs.writeFileSync(path.join(CHUNKS_DIR, fileId), buf);
+
+  db.files.unshift({
+    id: fileId,
+    name: 'Welcome-to-UnlimCloud.md',
+    folderId: null,
+    ownerId: user.id,
+    ownerName: user.name,
+    sizeBytes: buf.length,
+    mimeType: 'text/markdown',
+    sha256: computeSha256(buf),
+    storageDriver: 'local_vault',
+    telegramChunks: [],
+    starred: true,
+    downloadCount: 0,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    previewText: guideText,
+    lockedOverQuota: false,
+  });
 }
 
 async function startServer() {
@@ -725,18 +627,54 @@ async function startServer() {
     }
     point[category] += bytes;
     saveDb();
-    broadcast('bandwidth:updated', {
-      dailyBandwidth: db.dailyBandwidth,
-      settings: db.bandwidthSettings,
-    });
   }
 
   function sanitizeUser(u: StoredUser): User {
+    evaluateUserQuotaAndLocks(u);
     const { passwordHash: _pw, ...rest } = u;
     return rest;
   }
 
   function getAuthUser(req: Request): StoredUser | null {
+    // Support Firebase Authentication headers first
+    const fbUid = (req.headers['x-firebase-uid'] as string | undefined)?.trim();
+    const fbEmail = (req.headers['x-firebase-email'] as string | undefined)?.trim();
+    const fbName = (req.headers['x-firebase-name'] as string | undefined)?.trim();
+
+    if (fbUid) {
+      let user = db.users.find(
+        (u) => u.id === fbUid || (fbEmail && u.email.toLowerCase() === fbEmail.toLowerCase())
+      );
+      if (!user) {
+        const isAdminEmail = fbEmail?.toLowerCase() === 'titumamma2425@gmail.com';
+        user = {
+          id: fbUid,
+          name: fbName || fbEmail?.split('@')[0] || 'Cloud User',
+          email: fbEmail || `${fbUid}@user.unlimcloud`,
+          passwordHash: '',
+          role: isAdminEmail ? 'admin' : 'member',
+          bandwidthLimitBytes: FREE_25GB_BYTES,
+          bandwidthUsedBytes: 0,
+          storageUsedBytes: 0,
+          createdAt: new Date().toISOString(),
+          planId: 'free_25gb',
+          tokenBalance: 0,
+          planExpiresAt: null,
+          graceEndsAt: null,
+          usedPromoCodes: [],
+        };
+        db.users.push(user);
+        seedStarterFilesForNewUser(user);
+        saveDb();
+      } else {
+        if (fbEmail && fbEmail.toLowerCase() === 'titumamma2425@gmail.com') {
+          user.role = 'admin';
+        }
+      }
+      evaluateUserQuotaAndLocks(user);
+      return user;
+    }
+
     const authHeader = req.headers.authorization;
     const token =
       (authHeader && authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null) ||
@@ -745,7 +683,9 @@ async function startServer() {
 
     const userId = db.sessions[token];
     if (!userId) return null;
-    return db.users.find((u) => u.id === userId) || null;
+    const found = db.users.find((u) => u.id === userId) || null;
+    if (found) evaluateUserQuotaAndLocks(found);
+    return found;
   }
 
   function requireAuth(req: Request, res: Response, next: NextFunction) {
@@ -759,7 +699,7 @@ async function startServer() {
   }
 
   // ============================================================================
-  // AUTHENTICATION & MULTI-USER ROUTES
+  // AUTHENTICATION & USER SESSION ROUTES
   // ============================================================================
 
   app.get('/api/auth/me', (req, res) => {
@@ -782,14 +722,6 @@ async function startServer() {
     }
     const found = db.users.find((u) => u.email.toLowerCase() === email.trim().toLowerCase());
     if (!found || found.passwordHash !== hashPassword(password)) {
-      recordAuditLog({
-        userId: 'anonymous',
-        userName: email,
-        action: 'USER_LOGIN',
-        targetName: email,
-        status: 'error',
-        details: 'Failed login attempt (invalid credentials)',
-      });
       res.status(401).json({ error: 'Invalid email or password' });
       return;
     }
@@ -797,15 +729,6 @@ async function startServer() {
     const sessionToken = `sess_${crypto.randomBytes(16).toString('hex')}`;
     db.sessions[sessionToken] = found.id;
     saveDb();
-
-    recordAuditLog({
-      userId: found.id,
-      userName: found.name,
-      action: 'USER_LOGIN',
-      targetName: found.email,
-      status: 'success',
-      details: `Authenticated session established (${found.role})`,
-    });
 
     res.json({
       token: sessionToken,
@@ -837,25 +760,22 @@ async function startServer() {
       email: email.trim().toLowerCase(),
       passwordHash: hashPassword(password),
       role: role === 'admin' ? 'admin' : 'member',
-      bandwidthLimitBytes: 25 * 1024 * 1024 * 1024, // 25 GB default quota
+      bandwidthLimitBytes: FREE_25GB_BYTES,
       bandwidthUsedBytes: 0,
       storageUsedBytes: 0,
       createdAt: new Date().toISOString(),
+      planId: 'free_25gb',
+      tokenBalance: 0,
+      planExpiresAt: null,
+      graceEndsAt: null,
+      usedPromoCodes: [],
     };
 
     db.users.push(newUser);
+    seedStarterFilesForNewUser(newUser);
     const sessionToken = `sess_${crypto.randomBytes(16).toString('hex')}`;
     db.sessions[sessionToken] = newUser.id;
     saveDb();
-
-    recordAuditLog({
-      userId: newUser.id,
-      userName: newUser.name,
-      action: 'USER_REGISTER',
-      targetName: newUser.email,
-      status: 'success',
-      details: `New ${newUser.role} account provisioned with 25 GB bandwidth quota`,
-    });
 
     res.json({
       token: sessionToken,
@@ -875,15 +795,6 @@ async function startServer() {
     db.sessions[sessionToken] = found.id;
     saveDb();
 
-    recordAuditLog({
-      userId: found.id,
-      userName: found.name,
-      action: 'USER_LOGIN',
-      targetName: found.email,
-      status: 'success',
-      details: `Switched workspace session to ${found.name} (${found.role})`,
-    });
-
     res.json({
       token: sessionToken,
       user: sanitizeUser(found),
@@ -892,14 +803,213 @@ async function startServer() {
   });
 
   // ============================================================================
-  // FILES & FOLDERS EXPLORER ROUTES
+  // STORAGE PRICING, TOKEN WALLET, PROMO CODE ('1tBfri26') & SUBSCRIPTIONS
   // ============================================================================
 
-  app.get('/api/files', requireAuth, (_req, res) => {
+  app.post('/api/billing/promo', requireAuth, (req, res) => {
+    const user = (req as Request & { user: StoredUser }).user;
+    const { code } = req.body as { code?: string };
+    const cleanCode = (code || '').trim();
+
+    if (!cleanCode) {
+      res.status(400).json({ error: 'Please enter a promo code.' });
+      return;
+    }
+
+    if (cleanCode !== '1tBfri26' && cleanCode.toLowerCase() !== '1tbfri26') {
+      res.status(400).json({ error: 'Invalid promo code. Please check the code and try again.' });
+      return;
+    }
+
+    if (!Array.isArray(user.usedPromoCodes)) user.usedPromoCodes = [];
+    user.tokenBalance = (user.tokenBalance || 0) + 9999;
+    if (!user.usedPromoCodes.includes('1tBfri26')) {
+      user.usedPromoCodes.push('1tBfri26');
+    }
+    saveDb();
+
+    recordAuditLog({
+      userId: user.id,
+      userName: user.name,
+      action: 'PROMO_REDEEMED',
+      targetName: 'Promo Code: 1tBfri26 (+9,999 Tokens)',
+      status: 'success',
+      details: `Redeemed promo code 1tBfri26 for 9,999 storage tokens`,
+    });
+
     res.json({
-      folders: db.folders,
-      files: db.files,
-      transfers: db.transfers.slice(0, 30),
+      user: sanitizeUser(user),
+      tokensAdded: 9999,
+      message: 'Promo code 1tBfri26 applied! +9,999 Tokens added to your wallet.',
+    });
+  });
+
+  app.post('/api/billing/buy-tokens', requireAuth, (req, res) => {
+    const user = (req as Request & { user: StoredUser }).user;
+    const { tokens, paymentMethod, amountLabel } = req.body as {
+      tokens?: number;
+      paymentMethod?: string;
+      amountLabel?: string;
+    };
+
+    const amount = Number(tokens) || 0;
+    if (amount <= 0 || amount > 100000) {
+      res.status(400).json({ error: 'Invalid token package amount.' });
+      return;
+    }
+
+    user.tokenBalance = (user.tokenBalance || 0) + amount;
+    saveDb();
+
+    recordAuditLog({
+      userId: user.id,
+      userName: user.name,
+      action: 'TOKENS_PURCHASED',
+      targetName: `+${amount} Tokens (${paymentMethod || 'Card'})`,
+      status: 'success',
+      details: `Purchased ${amount} tokens via ${paymentMethod || 'Checkout'} (${amountLabel || ''})`,
+    });
+
+    res.json({
+      user: sanitizeUser(user),
+      tokensAdded: amount,
+      message: `Successfully purchased ${amount.toLocaleString()} Tokens!`,
+    });
+  });
+
+  app.post('/api/billing/subscribe', requireAuth, (req, res) => {
+    const user = (req as Request & { user: StoredUser }).user;
+    const { planId } = req.body as { planId?: StoragePlanId };
+
+    if (!planId || !['free_25gb', 'pro_50gb', 'ultra_1tb'].includes(planId)) {
+      res.status(400).json({ error: 'Invalid storage plan selected.' });
+      return;
+    }
+
+    const costMap: Record<StoragePlanId, number> = {
+      free_25gb: 0,
+      pro_50gb: 500,
+      ultra_1tb: 1024,
+    };
+
+    const cost = costMap[planId];
+    const currentTokens = user.tokenBalance || 0;
+
+    if (cost > 0 && currentTokens < cost) {
+      res.status(400).json({
+        error: `Insufficient tokens. You need ${cost} Tokens/month, but your wallet has ${currentTokens} Tokens.`,
+      });
+      return;
+    }
+
+    if (cost > 0) {
+      user.tokenBalance = currentTokens - cost;
+      const nowMs = Date.now();
+      const baseMs =
+        user.planExpiresAt && new Date(user.planExpiresAt).getTime() > nowMs
+          ? new Date(user.planExpiresAt).getTime()
+          : nowMs;
+      const nextExp = new Date(baseMs + 30 * 86400_000);
+      const nextGrace = new Date(nextExp.getTime() + 90 * 86400_000);
+      user.planId = planId;
+      user.planExpiresAt = nextExp.toISOString();
+      user.graceEndsAt = nextGrace.toISOString();
+    } else {
+      user.planId = 'free_25gb';
+      user.planExpiresAt = null;
+      user.graceEndsAt = null;
+    }
+
+    evaluateUserQuotaAndLocks(user);
+    saveDb();
+
+    recordAuditLog({
+      userId: user.id,
+      userName: user.name,
+      action: 'PLAN_SUBSCRIBED',
+      targetName:
+        planId === 'ultra_1tb'
+          ? 'Ultra 1 TB Plan (1,024 Tokens/mo)'
+          : planId === 'pro_50gb'
+          ? 'Pro 50 GB Plan (500 Tokens/mo)'
+          : 'Free 25 GB Plan',
+      status: 'success',
+      details: `Activated ${planId} storage plan`,
+    });
+
+    res.json({
+      user: sanitizeUser(user),
+      files: db.files.filter((f) => f.ownerId === user.id),
+      message:
+        planId === 'ultra_1tb'
+          ? '1 TB Plan activated for 30 days! All files unlocked.'
+          : planId === 'pro_50gb'
+          ? '50 GB Plan activated for 30 days! All files unlocked.'
+          : 'Switched to 25 GB Free Plan.',
+    });
+  });
+
+  // Simulator endpoint so user can test the >25GB 3-month expiry lock immediately
+  app.post('/api/billing/simulate-expiry', requireAuth, (req, res) => {
+    const user = (req as Request & { user: StoredUser }).user;
+    const now = Date.now();
+
+    // Ensure the user has a sample 28 GB dataset so >25 GB locking is clearly visible
+    const simFileId = `file_sim_over25gb_${user.id}`;
+    const existingSim = db.files.find((f) => f.id === simFileId);
+    if (!existingSim) {
+      const simText =
+        `# 28 GB Production Backup Archive (Simulated High-Volume Dataset)\n\n` +
+        `This archive exceeds the 25 GB Free tier threshold.\n` +
+        `When your monthly 50 GB or 1 TB plan expires, this file enters the 3-month (90-day) grace lock period.\n` +
+        `Extend your plan with Tokens before the 90-day timer ends to restore instant access.\n`;
+      const simBuf = Buffer.from(simText, 'utf-8');
+      fs.writeFileSync(path.join(CHUNKS_DIR, simFileId), simBuf);
+      db.files.push({
+        id: simFileId,
+        name: 'Studio-4K-Master-Archive-28GB.tar.zst',
+        folderId: null,
+        ownerId: user.id,
+        ownerName: user.name,
+        sizeBytes: 28 * 1024 * 1024 * 1024, // 28 GB
+        mimeType: 'application/zstd',
+        sha256: computeSha256(simBuf),
+        storageDriver: 'local_vault',
+        telegramChunks: [],
+        starred: false,
+        downloadCount: 0,
+        createdAt: new Date(now + 1000).toISOString(),
+        updatedAt: new Date(now + 1000).toISOString(),
+        previewText: simText,
+        lockedOverQuota: true,
+      });
+    }
+
+    user.planId = 'pro_50gb';
+    user.planExpiresAt = new Date(now - 2 * 86400_000).toISOString(); // Expired 2 days ago
+    user.graceEndsAt = new Date(now + 88 * 86400_000).toISOString(); // 88 days remaining in 3-month grace period
+    evaluateUserQuotaAndLocks(user);
+    saveDb();
+
+    res.json({
+      user: sanitizeUser(user),
+      files: db.files.filter((f) => f.ownerId === user.id),
+      message:
+        'Simulated expired monthly plan with >25 GB data: Files above 25 GB are now locked for the 3-month (90-day) grace period.',
+    });
+  });
+
+  // ============================================================================
+  // PER-USER ISOLATED FILES & FOLDERS ROUTES
+  // ============================================================================
+
+  app.get('/api/files', requireAuth, (req, res) => {
+    const user = (req as Request & { user: StoredUser }).user;
+    evaluateUserQuotaAndLocks(user);
+    res.json({
+      folders: db.folders.filter((f) => f.ownerId === user.id),
+      files: db.files.filter((f) => f.ownerId === user.id),
+      transfers: db.transfers.filter((t) => t.userId === user.id).slice(0, 30),
     });
   });
 
@@ -926,24 +1036,26 @@ async function startServer() {
   });
 
   app.delete('/api/folders/:id', requireAuth, (req, res) => {
+    const user = (req as Request & { user: StoredUser }).user;
     const folderId = req.params.id;
-    const exists = db.folders.find((f) => f.id === folderId);
+    const exists = db.folders.find((f) => f.id === folderId && f.ownerId === user.id);
     if (!exists) {
       res.status(404).json({ error: 'Folder not found' });
       return;
     }
-    // Move files in this folder to root so no data is accidentally lost
     db.files.forEach((f) => {
-      if (f.folderId === folderId) f.folderId = exists.parentId;
+      if (f.ownerId === user.id && f.folderId === folderId) {
+        f.folderId = exists.parentId;
+      }
     });
-    db.folders = db.folders.filter((f) => f.id !== folderId);
+    db.folders = db.folders.filter((f) => !(f.id === folderId && f.ownerId === user.id));
     saveDb();
     res.json({ ok: true });
   });
 
   const upload = multer({
     storage: multer.memoryStorage(),
-    limits: { fileSize: 100 * 1024 * 1024 }, // 100 MB per upload in web preview
+    limits: { fileSize: 100 * 1024 * 1024 },
   });
 
   app.post(
@@ -951,260 +1063,170 @@ async function startServer() {
     requireAuth,
     upload.array('files', 10) as unknown as express.RequestHandler,
     async (req, res) => {
-    const user = (req as Request & { user: StoredUser }).user;
-    const uploadedFiles = (req.files as Express.Multer.File[]) || [];
-    const folderId = (req.body.folderId as string) || null;
+      const user = (req as Request & { user: StoredUser }).user;
+      evaluateUserQuotaAndLocks(user);
 
-    if (uploadedFiles.length === 0) {
-      res.status(400).json({ error: 'No files provided for upload' });
-      return;
-    }
+      const uploadedFiles = (req.files as Express.Multer.File[]) || [];
+      const folderId = (req.body.folderId as string) || null;
 
-    // Check user bandwidth quota if enforced
-    const totalBatchBytes = uploadedFiles.reduce((acc, f) => acc + f.size, 0);
-    if (
-      db.bandwidthSettings.enforceUserQuotas &&
-      user.bandwidthUsedBytes + totalBatchBytes > user.bandwidthLimitBytes
-    ) {
-      recordAuditLog({
-        userId: user.id,
-        userName: user.name,
-        action: 'BANDWIDTH_THROTTLED',
-        targetName: uploadedFiles.map((f) => f.originalname).join(', '),
-        bytesTransferred: 0,
-        status: 'error',
-        details: 'Upload rejected: User bandwidth quota exceeded',
-      });
-      res.status(429).json({ error: 'Bandwidth quota exceeded for your user account.' });
-      return;
-    }
-
-    const createdRecords: FileRecord[] = [];
-    const hasLiveTelegram = Boolean(
-      db.telegramConfig.botToken &&
-        db.telegramConfig.chatId &&
-        db.telegramConfig.autoSyncUploads
-    );
-
-    for (const rawFile of uploadedFiles) {
-      const fileId = `file_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
-      const transferId = `trf_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
-      const sha256 = computeSha256(rawFile.buffer);
-
-      const job: TransferJob = {
-        id: transferId,
-        userId: user.id,
-        userName: user.name,
-        type: 'local_upload',
-        fileName: rawFile.originalname,
-        folderId: folderId === 'null' || folderId === '' ? null : folderId,
-        totalBytes: rawFile.size,
-        transferredBytes: Math.round(rawFile.size * 0.35),
-        speedBps: Math.max(512_000, rawFile.size * 2),
-        status: hasLiveTelegram ? 'syncing_telegram' : 'streaming',
-        storageDriver: hasLiveTelegram ? 'telegram' : 'local_vault',
-        fileId,
-        sha256,
-        createdAt: new Date().toISOString(),
-      };
-
-      db.transfers.unshift(job);
-      broadcast('transfer:progress', job);
-
-      // Always write local vault copy for fast direct streaming & fallback resilience
-      fs.writeFileSync(path.join(CHUNKS_DIR, fileId), rawFile.buffer);
-
-      let storageDriver: 'telegram' | 'local_vault' = 'local_vault';
-      let telegramChunks: TelegramChunk[] = [];
-      let telegramChatId: string | undefined;
-
-      if (hasLiveTelegram) {
-        const tgResult = await pushBufferToTelegram(
-          rawFile.buffer,
-          rawFile.originalname,
-          db.telegramConfig.botToken,
-          db.telegramConfig.chatId
-        );
-        if (tgResult.success) {
-          storageDriver = 'telegram';
-          telegramChunks = tgResult.chunks;
-          telegramChatId = db.telegramConfig.chatId;
-        }
-      }
-
-      const isTextPreviewable =
-        rawFile.mimetype.startsWith('text/') ||
-        rawFile.mimetype === 'application/json' ||
-        /\.(md|txt|json|csv|sh|ts|tsx|js|py|yaml|yml|log)$/i.test(rawFile.originalname);
-
-      const record: FileRecord = {
-        id: fileId,
-        name: rawFile.originalname,
-        folderId: folderId === 'null' || folderId === '' ? null : folderId,
-        ownerId: user.id,
-        ownerName: user.name,
-        sizeBytes: rawFile.size,
-        mimeType: rawFile.mimetype || 'application/octet-stream',
-        sha256,
-        storageDriver,
-        telegramChatId,
-        telegramChunks,
-        starred: false,
-        downloadCount: 0,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-        previewText: isTextPreviewable
-          ? rawFile.buffer.subarray(0, 12000).toString('utf-8')
-          : undefined,
-      };
-
-      db.files.unshift(record);
-      createdRecords.push(record);
-
-      user.bandwidthUsedBytes += rawFile.size;
-      user.storageUsedBytes += rawFile.size;
-      recordDailyBandwidth('uploadBytes', rawFile.size);
-
-      job.transferredBytes = rawFile.size;
-      job.status = 'completed';
-      job.storageDriver = storageDriver;
-      job.completedAt = new Date().toISOString();
-
-      saveDb();
-
-      broadcast('transfer:completed', {
-        job,
-        file: record,
-        notification: {
-          id: `notif_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-          timestamp: new Date().toISOString(),
-          title: 'Upload Transfer Completed',
-          message: `${record.name} (${formatBytesServer(record.sizeBytes)}) verified & stored in ${
-            storageDriver === 'telegram' ? 'Telegram Cloud' : 'UnlimCloud Vault'
-          }`,
-          type: 'completed',
-          fileName: record.name,
-          bytes: record.sizeBytes,
-          sha256: record.sha256,
-          storageDriver,
-        },
-      });
-
-      recordAuditLog({
-        userId: user.id,
-        userName: user.name,
-        action: 'FILE_UPLOAD',
-        targetName: record.name,
-        bytesTransferred: record.sizeBytes,
-        integrityHash: record.sha256.slice(0, 16),
-        status: 'success',
-        details:
-          storageDriver === 'telegram'
-            ? `Uploaded to Telegram Chat (${telegramChatId}) in ${telegramChunks.length} chunk(s)`
-            : `Stored in UnlimCloud Vault with SHA-256 verification`,
-      });
-    }
-
-    res.json({ files: createdRecords, user: sanitizeUser(user) });
-  });
-
-  // Sync an existing vault file to Telegram Cloud
-  app.post('/api/files/:id/sync-telegram', requireAuth, async (req, res) => {
-    const user = (req as Request & { user: StoredUser }).user;
-    const file = db.files.find((f) => f.id === req.params.id);
-    if (!file) {
-      res.status(404).json({ error: 'File not found' });
-      return;
-    }
-
-    const chunkPath = path.join(CHUNKS_DIR, file.id);
-    if (!fs.existsSync(chunkPath)) {
-      res.status(404).json({ error: 'Local file payload not found' });
-      return;
-    }
-
-    const buffer = fs.readFileSync(chunkPath);
-
-    if (db.telegramConfig.botToken && db.telegramConfig.chatId) {
-      const tgResult = await pushBufferToTelegram(
-        buffer,
-        file.name,
-        db.telegramConfig.botToken,
-        db.telegramConfig.chatId
-      );
-
-      if (!tgResult.success) {
-        recordAuditLog({
-          userId: user.id,
-          userName: user.name,
-          action: 'TELEGRAM_SYNC',
-          targetName: file.name,
-          bytesTransferred: 0,
-          integrityHash: file.sha256.slice(0, 16),
-          status: 'error',
-          details: `Telegram Bot API sync failed: ${tgResult.error}`,
-        });
-        res.status(400).json({ error: tgResult.error || 'Failed to push chunks to Telegram' });
+      if (uploadedFiles.length === 0) {
+        res.status(400).json({ error: 'No files provided for upload' });
         return;
       }
 
-      file.storageDriver = 'telegram';
-      file.telegramChatId = db.telegramConfig.chatId;
-      file.telegramChunks = tgResult.chunks;
-      file.updatedAt = new Date().toISOString();
-    } else {
-      // Hybrid simulated Telegram chunk manifest if no external Bot Token is entered yet
-      const totalParts = Math.max(1, Math.ceil(buffer.length / TELEGRAM_CHUNK_SIZE));
-      const chunks: TelegramChunk[] = [];
-      for (let i = 0; i < totalParts; i++) {
-        const slice = buffer.subarray(i * TELEGRAM_CHUNK_SIZE, (i + 1) * TELEGRAM_CHUNK_SIZE);
-        chunks.push({
-          partIndex: i,
-          messageId: 50000 + Math.floor(Math.random() * 9000) + i,
-          fileId: `BQACAgUAAxkBAAJ_HybridPart_${file.id}_${i}`,
-          sizeBytes: slice.length,
-          sha256Part: computeSha256(slice),
+      const totalBatchBytes = uploadedFiles.reduce((acc, f) => acc + f.size, 0);
+      if (user.storageUsedBytes + totalBatchBytes > user.bandwidthLimitBytes) {
+        res.status(429).json({
+          error: `Storage limit reached (${formatBytesServer(
+            user.bandwidthLimitBytes
+          )}). Upgrade your plan on the Pricing & Plans tab to store more files.`,
+        });
+        return;
+      }
+
+      const createdRecords: FileRecord[] = [];
+      const hasLiveTelegram = Boolean(
+        db.telegramConfig.botToken &&
+          db.telegramConfig.chatId &&
+          db.telegramConfig.autoSyncUploads
+      );
+
+      for (const rawFile of uploadedFiles) {
+        const fileId = `file_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+        const transferId = `trf_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+        const sha256 = computeSha256(rawFile.buffer);
+
+        const job: TransferJob = {
+          id: transferId,
+          userId: user.id,
+          userName: user.name,
+          type: 'local_upload',
+          fileName: rawFile.originalname,
+          folderId: folderId === 'null' || folderId === '' ? null : folderId,
+          totalBytes: rawFile.size,
+          transferredBytes: Math.round(rawFile.size * 0.5),
+          speedBps: Math.max(1_048_576, rawFile.size * 2),
+          status: 'streaming',
+          storageDriver: hasLiveTelegram ? 'telegram' : 'local_vault',
+          fileId,
+          sha256,
+          createdAt: new Date().toISOString(),
+        };
+
+        db.transfers.unshift(job);
+        broadcast('transfer:progress', job);
+
+        fs.writeFileSync(path.join(CHUNKS_DIR, fileId), rawFile.buffer);
+
+        let storageDriver: 'telegram' | 'local_vault' = 'local_vault';
+        let telegramChunks: TelegramChunk[] = [];
+        let telegramChatId: string | undefined;
+
+        if (hasLiveTelegram) {
+          const tgResult = await pushBufferToTelegram(
+            rawFile.buffer,
+            rawFile.originalname,
+            db.telegramConfig.botToken,
+            db.telegramConfig.chatId
+          );
+          if (tgResult.success) {
+            storageDriver = 'telegram';
+            telegramChunks = tgResult.chunks;
+            telegramChatId = db.telegramConfig.chatId;
+          }
+        }
+
+        const mime = rawFile.mimetype || 'application/octet-stream';
+        const isTextPreviewable =
+          mime.startsWith('text/') ||
+          mime === 'application/json' ||
+          /\.(md|txt|json|csv|sh|ts|tsx|js|py|yaml|yml|log|html|css|xml)$/i.test(
+            rawFile.originalname
+          );
+
+        const isMediaPreviewable =
+          (mime.startsWith('image/') ||
+            mime.startsWith('audio/') ||
+            mime.startsWith('video/') ||
+            mime === 'application/pdf') &&
+          rawFile.size <= 15 * 1024 * 1024;
+
+        const record: FileRecord = {
+          id: fileId,
+          name: rawFile.originalname,
+          folderId: folderId === 'null' || folderId === '' ? null : folderId,
+          ownerId: user.id,
+          ownerName: user.name,
+          sizeBytes: rawFile.size,
+          mimeType: mime,
+          sha256,
+          storageDriver,
+          telegramChatId,
+          telegramChunks,
+          starred: false,
+          downloadCount: 0,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          previewText: isTextPreviewable
+            ? rawFile.buffer.subarray(0, 24000).toString('utf-8')
+            : undefined,
+          previewDataUrl: isMediaPreviewable
+            ? `data:${mime};base64,${rawFile.buffer.toString('base64')}`
+            : undefined,
+          lockedOverQuota: false,
+        };
+
+        db.files.unshift(record);
+        createdRecords.push(record);
+
+        user.bandwidthUsedBytes += rawFile.size;
+        evaluateUserQuotaAndLocks(user);
+        recordDailyBandwidth('uploadBytes', rawFile.size);
+
+        job.transferredBytes = rawFile.size;
+        job.status = 'completed';
+        job.storageDriver = storageDriver;
+        job.completedAt = new Date().toISOString();
+
+        saveDb();
+
+        broadcast('transfer:completed', {
+          job,
+          file: record,
+          notification: {
+            id: `notif_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+            timestamp: new Date().toISOString(),
+            title: 'Upload Complete',
+            message: `${record.name} (${formatBytesServer(
+              record.sizeBytes
+            )}) encrypted & saved to your cloud drive.`,
+            type: 'completed',
+            fileName: record.name,
+            bytes: record.sizeBytes,
+            sha256: record.sha256,
+            storageDriver,
+          },
+        });
+
+        recordAuditLog({
+          userId: user.id,
+          userName: user.name,
+          action: 'FILE_UPLOAD',
+          targetName: record.name,
+          bytesTransferred: record.sizeBytes,
+          integrityHash: record.sha256.slice(0, 16),
+          status: 'success',
+          details: `Encrypted and stored in UnlimCloud Vault`,
         });
       }
-      file.storageDriver = 'telegram';
-      file.telegramChatId = '-1002198471092 (Hybrid Bridge)';
-      file.telegramChunks = chunks;
-      file.updatedAt = new Date().toISOString();
+
+      res.json({ files: createdRecords, user: sanitizeUser(user) });
     }
-
-    saveDb();
-
-    broadcast('transfer:completed', {
-      file,
-      notification: {
-        id: `notif_${Date.now()}`,
-        timestamp: new Date().toISOString(),
-        title: 'Telegram Cloud Sync Complete',
-        message: `${file.name} mirrored to Telegram (${file.telegramChunks.length} chunk manifest)`,
-        type: 'completed',
-        fileName: file.name,
-        bytes: file.sizeBytes,
-        sha256: file.sha256,
-        storageDriver: 'telegram',
-      },
-    });
-
-    recordAuditLog({
-      userId: user.id,
-      userName: user.name,
-      action: 'TELEGRAM_SYNC',
-      targetName: file.name,
-      bytesTransferred: file.sizeBytes,
-      integrityHash: file.sha256.slice(0, 16),
-      status: 'success',
-      details: `Mirrored ${file.telegramChunks.length} chunk(s) to Telegram storage channel`,
-    });
-
-    res.json({ file });
-  });
+  );
 
   app.patch('/api/files/:id', requireAuth, (req, res) => {
-    const file = db.files.find((f) => f.id === req.params.id);
+    const user = (req as Request & { user: StoredUser }).user;
+    const file = db.files.find((f) => f.id === req.params.id && f.ownerId === user.id);
     if (!file) {
       res.status(404).json({ error: 'File not found' });
       return;
@@ -1230,7 +1252,7 @@ async function startServer() {
 
   app.delete('/api/files/:id', requireAuth, (req, res) => {
     const user = (req as Request & { user: StoredUser }).user;
-    const file = db.files.find((f) => f.id === req.params.id);
+    const file = db.files.find((f) => f.id === req.params.id && f.ownerId === user.id);
     if (!file) {
       res.status(404).json({ error: 'File not found' });
       return;
@@ -1246,7 +1268,7 @@ async function startServer() {
         // ignore
       }
     }
-    user.storageUsedBytes = Math.max(0, user.storageUsedBytes - file.sizeBytes);
+    evaluateUserQuotaAndLocks(user);
     saveDb();
 
     recordAuditLog({
@@ -1257,18 +1279,27 @@ async function startServer() {
       bytesTransferred: 0,
       integrityHash: file.sha256.slice(0, 16),
       status: 'warning',
-      details: `Deleted file & revoked associated direct share links`,
+      details: `Permanently deleted file and revoked associated share links`,
     });
 
-    res.json({ ok: true });
+    res.json({ ok: true, user: sanitizeUser(user) });
   });
 
-  // Authenticated Direct File Download (with optional global bandwidth throttle)
   app.get('/api/files/:id/download', requireAuth, async (req, res) => {
     const user = (req as Request & { user: StoredUser }).user;
-    const file = db.files.find((f) => f.id === req.params.id);
+    evaluateUserQuotaAndLocks(user);
+
+    const file = db.files.find((f) => f.id === req.params.id && f.ownerId === user.id);
     if (!file) {
       res.status(404).json({ error: 'File not found' });
+      return;
+    }
+
+    if (file.lockedOverQuota) {
+      res.status(403).json({
+        error:
+          'This file is locked because it exceeds your 25 GB Free limit after plan expiry. Renew your plan to unlock access.',
+      });
       return;
     }
 
@@ -1293,36 +1324,34 @@ async function startServer() {
       return;
     }
 
-    file.downloadCount += 1;
-    user.bandwidthUsedBytes += buffer.length;
-    recordDailyBandwidth('downloadBytes', buffer.length);
-    saveDb();
+    const isInline = req.query.inline === '1';
+    if (!isInline) {
+      file.downloadCount += 1;
+      user.bandwidthUsedBytes += buffer.length;
+      recordDailyBandwidth('downloadBytes', buffer.length);
+      saveDb();
 
-    recordAuditLog({
-      userId: user.id,
-      userName: user.name,
-      action: 'FILE_DOWNLOAD',
-      targetName: file.name,
-      bytesTransferred: buffer.length,
-      integrityHash: file.sha256.slice(0, 16),
-      status: 'success',
-      details: `Direct download stream completed (${
-        db.bandwidthSettings.globalThrottleKbps
-          ? `throttled @ ${db.bandwidthSettings.globalThrottleKbps} KB/s`
-          : 'unthrottled'
-      })`,
-    });
+      recordAuditLog({
+        userId: user.id,
+        userName: user.name,
+        action: 'FILE_DOWNLOAD',
+        targetName: file.name,
+        bytesTransferred: buffer.length,
+        integrityHash: file.sha256.slice(0, 16),
+        status: 'success',
+        details: `Downloaded file from encrypted cloud vault`,
+      });
+    }
 
     res.setHeader('Content-Type', file.mimeType || 'application/octet-stream');
     res.setHeader(
       'Content-Disposition',
-      `attachment; filename="${encodeURIComponent(file.name)}"`
+      `${isInline ? 'inline' : 'attachment'}; filename="${encodeURIComponent(file.name)}"`
     );
     res.setHeader('Content-Length', String(buffer.length));
-    res.setHeader('X-UnlimCloud-SHA256', file.sha256);
 
     const throttleKbps = db.bandwidthSettings.globalThrottleKbps;
-    if (throttleKbps && throttleKbps > 0) {
+    if (!isInline && throttleKbps && throttleKbps > 0) {
       const throttle = new ThrottleStream(throttleKbps);
       throttle.pipe(res);
       throttle.end(buffer);
@@ -1332,11 +1361,13 @@ async function startServer() {
   });
 
   // ============================================================================
-  // REMOTE URL UPLOAD ENGINE (WITH REAL-TIME WEBSOCKET PROGRESS)
+  // REMOTE URL UPLOAD ENGINE
   // ============================================================================
 
   app.post('/api/transfers/remote', requireAuth, async (req, res) => {
     const user = (req as Request & { user: StoredUser }).user;
+    evaluateUserQuotaAndLocks(user);
+
     const { url, customFileName, folderId, syncToTelegram } = req.body as {
       url?: string;
       customFileName?: string;
@@ -1380,7 +1411,6 @@ async function startServer() {
     saveDb();
     broadcast('transfer:progress', job);
 
-    // Respond immediately with the queued job and execute the remote fetch stream asynchronously
     res.json({ job });
 
     (async () => {
@@ -1423,7 +1453,7 @@ async function startServer() {
               chunks.push(buf);
               receivedBytes += buf.length;
               if (receivedBytes > 100 * 1024 * 1024) {
-                throw new Error('Remote file exceeds 100 MB preview safety limit');
+                throw new Error('Remote file exceeds 100 MB safety limit');
               }
               const elapsedSec = Math.max(0.1, (Date.now() - startTime) / 1000);
               job.transferredBytes = receivedBytes;
@@ -1470,6 +1500,13 @@ async function startServer() {
           contentType === 'application/json' ||
           /\.(md|txt|json|csv|sh|ts|tsx|js|py|yaml|yml|html|xml)$/i.test(finalName);
 
+        const isMediaPreviewable =
+          (contentType.startsWith('image/') ||
+            contentType.startsWith('audio/') ||
+            contentType.startsWith('video/') ||
+            contentType === 'application/pdf') &&
+          fullBuffer.length <= 15 * 1024 * 1024;
+
         const newFile: FileRecord = {
           id: fileId,
           name: finalName,
@@ -1487,13 +1524,17 @@ async function startServer() {
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
           previewText: isTextPreviewable
-            ? fullBuffer.subarray(0, 12000).toString('utf-8')
+            ? fullBuffer.subarray(0, 24000).toString('utf-8')
             : undefined,
+          previewDataUrl: isMediaPreviewable
+            ? `data:${contentType};base64,${fullBuffer.toString('base64')}`
+            : undefined,
+          lockedOverQuota: false,
         };
 
         db.files.unshift(newFile);
         user.bandwidthUsedBytes += fullBuffer.length;
-        user.storageUsedBytes += fullBuffer.length;
+        evaluateUserQuotaAndLocks(user);
         recordDailyBandwidth('remoteFetchBytes', fullBuffer.length);
 
         job.totalBytes = fullBuffer.length;
@@ -1511,10 +1552,10 @@ async function startServer() {
           notification: {
             id: `notif_${Date.now()}`,
             timestamp: new Date().toISOString(),
-            title: 'Remote URL Transfer Completed',
-            message: `Fetched ${newFile.name} (${formatBytesServer(
+            title: 'Web Link Upload Complete',
+            message: `Saved ${newFile.name} (${formatBytesServer(
               newFile.sizeBytes
-            )}) from remote host`,
+            )}) to your cloud drive.`,
             type: 'completed',
             fileName: newFile.name,
             bytes: newFile.sizeBytes,
@@ -1531,9 +1572,7 @@ async function startServer() {
           bytesTransferred: newFile.sizeBytes,
           integrityHash: newFile.sha256.slice(0, 16),
           status: 'success',
-          details: `Remote URL ingested from ${cleanUrl} (${formatBytesServer(
-            newFile.sizeBytes
-          )})`,
+          details: `Remote URL saved to encrypted vault`,
         });
       } catch (err: unknown) {
         const errMsg = err instanceof Error ? err.message : 'Remote URL transfer failed';
@@ -1547,21 +1586,11 @@ async function startServer() {
           notification: {
             id: `notif_${Date.now()}`,
             timestamp: new Date().toISOString(),
-            title: 'Remote URL Transfer Failed',
+            title: 'Web Link Upload Failed',
             message: `${finalName}: ${errMsg}`,
             type: 'error',
             fileName: finalName,
           },
-        });
-
-        recordAuditLog({
-          userId: user.id,
-          userName: user.name,
-          action: 'REMOTE_UPLOAD',
-          targetName: cleanUrl,
-          bytesTransferred: 0,
-          status: 'error',
-          details: `Remote fetch failed: ${errMsg}`,
         });
       }
     })();
@@ -1576,14 +1605,17 @@ async function startServer() {
     return rest;
   }
 
-  app.get('/api/shares', requireAuth, (_req, res) => {
+  app.get('/api/shares', requireAuth, (req, res) => {
+    const user = (req as Request & { user: StoredUser }).user;
     res.json({
-      shares: db.shares.map(sanitizeShare),
+      shares: db.shares.filter((s) => s.creatorId === user.id).map(sanitizeShare),
     });
   });
 
   app.post('/api/shares', requireAuth, (req, res) => {
     const user = (req as Request & { user: StoredUser }).user;
+    evaluateUserQuotaAndLocks(user);
+
     const {
       fileId,
       customSlug,
@@ -1602,9 +1634,17 @@ async function startServer() {
       bandwidthCapMb?: number | null;
     };
 
-    const file = db.files.find((f) => f.id === fileId);
+    const file = db.files.find((f) => f.id === fileId && f.ownerId === user.id);
     if (!file) {
       res.status(404).json({ error: 'Target file not found' });
+      return;
+    }
+
+    if (file.lockedOverQuota) {
+      res.status(403).json({
+        error:
+          'This file is locked because it exceeds your 25 GB Free limit. Renew your storage plan to share this file.',
+      });
       return;
     }
 
@@ -1665,16 +1705,15 @@ async function startServer() {
       bytesTransferred: 0,
       integrityHash: file.sha256.slice(0, 16),
       status: 'success',
-      details: `Direct link created (${hasPw ? 'password-protected' : 'public'}, speed cap: ${
-        newShare.throttleKbps ? `${newShare.throttleKbps} KB/s` : 'Unlimited'
-      })`,
+      details: `Direct link created (${hasPw ? 'password-protected' : 'public'})`,
     });
 
     res.json({ share: sanitizeShare(newShare) });
   });
 
   app.patch('/api/shares/:id', requireAuth, (req, res) => {
-    const share = db.shares.find((s) => s.id === req.params.id);
+    const user = (req as Request & { user: StoredUser }).user;
+    const share = db.shares.find((s) => s.id === req.params.id && s.creatorId === user.id);
     if (!share) {
       res.status(404).json({ error: 'Share link not found' });
       return;
@@ -1703,16 +1742,19 @@ async function startServer() {
   });
 
   app.delete('/api/shares/:id', requireAuth, (req, res) => {
-    db.shares = db.shares.filter((s) => s.id !== req.params.id);
+    const user = (req as Request & { user: StoredUser }).user;
+    db.shares = db.shares.filter((s) => !(s.id === req.params.id && s.creatorId === user.id));
     saveDb();
     res.json({ ok: true });
   });
 
-  // PUBLIC SHARE PORTAL ENDPOINTS (No user login required; supports password unlock)
+  // PUBLIC SHARE PORTAL ENDPOINTS
   app.get('/api/public/share/:token', (req, res) => {
     const share = db.shares.find((s) => s.token === req.params.token);
     if (!share || !share.active) {
-      res.status(404).json({ error: 'This direct download link does not exist or has been revoked.' });
+      res
+        .status(404)
+        .json({ error: 'This direct download link does not exist or has been revoked.' });
       return;
     }
     if (share.expiresAt && new Date(share.expiresAt).getTime() < Date.now()) {
@@ -1721,13 +1763,6 @@ async function startServer() {
     }
     if (share.maxDownloads !== null && share.downloadCount >= share.maxDownloads) {
       res.status(429).json({ error: 'Maximum download limit reached for this link.' });
-      return;
-    }
-    if (
-      share.bandwidthCapBytes !== null &&
-      share.bandwidthUsedBytes + share.fileSizeBytes > share.bandwidthCapBytes
-    ) {
-      res.status(429).json({ error: 'Bandwidth allocation exhausted for this shared link.' });
       return;
     }
 
@@ -1760,28 +1795,10 @@ async function startServer() {
     const { password } = req.body as { password?: string };
     if (share.hasPassword) {
       if (!password || hashPassword(password.trim()) !== share.passwordHash) {
-        recordAuditLog({
-          userId: 'anonymous',
-          userName: 'Public Visitor',
-          action: 'SHARE_AUTH_FAILED',
-          targetName: `/s/${share.token} (${share.fileName})`,
-          status: 'warning',
-          details: 'Rejected incorrect password on protected share link',
-        });
         res.status(403).json({ error: 'Incorrect password for this protected link.' });
         return;
       }
     }
-
-    recordAuditLog({
-      userId: 'anonymous',
-      userName: 'Public Visitor',
-      action: 'SHARE_UNLOCKED',
-      targetName: `/s/${share.token} (${share.fileName})`,
-      integrityHash: share.fileSha256.slice(0, 16),
-      status: 'success',
-      details: 'Password verified; direct download token authorized',
-    });
 
     res.json({ unlocked: true, accessKey: share.passwordHash || 'open' });
   });
@@ -1792,15 +1809,6 @@ async function startServer() {
       res.status(404).send('Share link not found or revoked.');
       return;
     }
-    if (share.expiresAt && new Date(share.expiresAt).getTime() < Date.now()) {
-      res.status(410).send('Share link has expired.');
-      return;
-    }
-    if (share.maxDownloads !== null && share.downloadCount >= share.maxDownloads) {
-      res.status(429).send('Maximum download count reached.');
-      return;
-    }
-
     const providedKey = (req.query.key as string) || '';
     const providedPw = (req.query.password as string) || '';
     if (share.hasPassword) {
@@ -1836,68 +1844,16 @@ async function startServer() {
       return;
     }
 
-    if (
-      share.bandwidthCapBytes !== null &&
-      share.bandwidthUsedBytes + buffer.length > share.bandwidthCapBytes
-    ) {
-      recordAuditLog({
-        userId: 'anonymous',
-        userName: 'Public Visitor',
-        action: 'BANDWIDTH_THROTTLED',
-        targetName: `/s/${share.token}`,
-        bytesTransferred: 0,
-        integrityHash: share.fileSha256.slice(0, 16),
-        status: 'error',
-        details: 'Blocked download: Share link bandwidth cap reached',
-      });
-      res.status(429).send('Share link bandwidth cap exhausted.');
-      return;
-    }
-
     share.downloadCount += 1;
     share.bandwidthUsedBytes += buffer.length;
     share.lastAccessedAt = new Date().toISOString();
     if (file) {
       file.downloadCount += 1;
     }
-
-    const creator = db.users.find((u) => u.id === share.creatorId);
-    if (creator) {
-      creator.bandwidthUsedBytes += buffer.length;
-    }
-    recordDailyBandwidth('shareBytes', buffer.length);
     saveDb();
 
     const effectiveThrottle =
       share.throttleKbps || db.bandwidthSettings.globalThrottleKbps || null;
-
-    recordAuditLog({
-      userId: 'anonymous',
-      userName: 'Public Share Recipient',
-      action: 'SHARE_DOWNLOAD',
-      targetName: `${share.fileName} (/s/${share.token})`,
-      bytesTransferred: buffer.length,
-      integrityHash: share.fileSha256.slice(0, 16),
-      status: 'success',
-      details: `Direct link streamed (${
-        effectiveThrottle ? `throttled @ ${effectiveThrottle} KB/s` : 'unthrottled'
-      })`,
-    });
-
-    broadcast('transfer:completed', {
-      notification: {
-        id: `notif_${Date.now()}`,
-        timestamp: new Date().toISOString(),
-        title: 'Shared Link Downloaded',
-        message: `${share.fileName} downloaded via /s/${share.token} (${
-          effectiveThrottle ? `${effectiveThrottle} KB/s cap` : 'full speed'
-        })`,
-        type: 'info',
-        fileName: share.fileName,
-        bytes: buffer.length,
-        sha256: share.fileSha256,
-      },
-    });
 
     res.setHeader('Content-Type', share.fileMimeType || 'application/octet-stream');
     res.setHeader(
@@ -1905,7 +1861,6 @@ async function startServer() {
       `attachment; filename="${encodeURIComponent(share.fileName)}"`
     );
     res.setHeader('Content-Length', String(buffer.length));
-    res.setHeader('X-UnlimCloud-SHA256', share.fileSha256);
 
     if (effectiveThrottle && effectiveThrottle > 0) {
       const throttle = new ThrottleStream(effectiveThrottle);
@@ -1917,20 +1872,20 @@ async function startServer() {
   });
 
   // ============================================================================
-  // BANDWIDTH MANAGEMENT & QUOTA GOVERNANCE ROUTES
+  // BANDWIDTH & LOGS ROUTES
   // ============================================================================
 
-  app.get('/api/bandwidth', requireAuth, (_req, res) => {
+  app.get('/api/bandwidth', requireAuth, (req, res) => {
+    const user = (req as Request & { user: StoredUser }).user;
     res.json({
       settings: db.bandwidthSettings,
       dailyBandwidth: db.dailyBandwidth,
-      users: db.users.map(sanitizeUser),
-      shares: db.shares.map(sanitizeShare),
+      users: [sanitizeUser(user)],
+      shares: db.shares.filter((s) => s.creatorId === user.id).map(sanitizeShare),
     });
   });
 
   app.patch('/api/bandwidth/settings', requireAuth, (req, res) => {
-    const user = (req as Request & { user: StoredUser }).user;
     const {
       globalThrottleKbps,
       defaultShareThrottleKbps,
@@ -1946,7 +1901,10 @@ async function startServer() {
       db.bandwidthSettings.defaultShareThrottleKbps = defaultShareThrottleKbps;
     }
     if (typeof maxConcurrentTransfers === 'number') {
-      db.bandwidthSettings.maxConcurrentTransfers = Math.max(1, Math.min(20, maxConcurrentTransfers));
+      db.bandwidthSettings.maxConcurrentTransfers = Math.max(
+        1,
+        Math.min(20, maxConcurrentTransfers)
+      );
     }
     if (typeof enforceUserQuotas === 'boolean') {
       db.bandwidthSettings.enforceUserQuotas = enforceUserQuotas;
@@ -1956,104 +1914,19 @@ async function startServer() {
     }
 
     saveDb();
-
-    recordAuditLog({
-      userId: user.id,
-      userName: user.name,
-      action: 'BANDWIDTH_POLICY_UPDATED',
-      targetName: 'Global Bandwidth Policy',
-      status: 'success',
-      details: `Global throttle: ${
-        db.bandwidthSettings.globalThrottleKbps
-          ? `${db.bandwidthSettings.globalThrottleKbps} KB/s`
-          : 'Unthrottled'
-      }, Default share cap: ${
-        db.bandwidthSettings.defaultShareThrottleKbps
-          ? `${db.bandwidthSettings.defaultShareThrottleKbps} KB/s`
-          : 'Unthrottled'
-      }`,
-    });
-
-    broadcast('bandwidth:updated', {
-      dailyBandwidth: db.dailyBandwidth,
-      settings: db.bandwidthSettings,
-    });
-
     res.json({ settings: db.bandwidthSettings });
   });
 
-  app.patch('/api/bandwidth/users/:id', requireAuth, (req, res) => {
-    const actor = (req as Request & { user: StoredUser }).user;
-    const target = db.users.find((u) => u.id === req.params.id);
-    if (!target) {
-      res.status(404).json({ error: 'User not found' });
-      return;
-    }
-    const { bandwidthLimitGb, resetUsage } = req.body as {
-      bandwidthLimitGb?: number;
-      resetUsage?: boolean;
-    };
-    if (typeof bandwidthLimitGb === 'number' && bandwidthLimitGb > 0) {
-      target.bandwidthLimitBytes = Math.round(bandwidthLimitGb * 1024 * 1024 * 1024);
-    }
-    if (resetUsage) {
-      target.bandwidthUsedBytes = 0;
-    }
-    saveDb();
-
-    recordAuditLog({
-      userId: actor.id,
-      userName: actor.name,
-      action: 'BANDWIDTH_POLICY_UPDATED',
-      targetName: target.email,
-      status: 'success',
-      details: `Updated user bandwidth quota to ${(
-        target.bandwidthLimitBytes /
-        (1024 * 1024 * 1024)
-      ).toFixed(0)} GB${resetUsage ? ' (usage counter reset)' : ''}`,
+  app.get('/api/logs', requireAuth, (req, res) => {
+    const user = (req as Request & { user: StoredUser }).user;
+    const isAdmin = user.email.toLowerCase() === 'titumamma2425@gmail.com';
+    res.json({
+      logs: isAdmin ? db.logs : db.logs.filter((l) => l.userId === user.id),
     });
-
-    res.json({ users: db.users.map(sanitizeUser) });
   });
 
   // ============================================================================
-  // ACTIVITY AUDIT LOGS & INTEGRITY EXPORT
-  // ============================================================================
-
-  app.get('/api/logs', requireAuth, (_req, res) => {
-    res.json({ logs: db.logs });
-  });
-
-  app.get('/api/logs/export.csv', requireAuth, (_req, res) => {
-    const header =
-      'id,timestamp,user_name,action,target_name,ip_address,bytes_transferred,integrity_hash,status,details\n';
-    const rows = db.logs
-      .map((l) =>
-        [
-          l.id,
-          l.timestamp,
-          `"${l.userName.replace(/"/g, '""')}"`,
-          l.action,
-          `"${l.targetName.replace(/"/g, '""')}"`,
-          l.ipAddress,
-          l.bytesTransferred,
-          l.integrityHash,
-          l.status,
-          `"${l.details.replace(/"/g, '""')}"`,
-        ].join(',')
-      )
-      .join('\n');
-
-    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-    res.setHeader(
-      'Content-Disposition',
-      'attachment; filename="unlimcloud-activity-audit-logs.csv"'
-    );
-    res.send(header + rows);
-  });
-
-  // ============================================================================
-  // TELEGRAM BOT API CLOUD STORAGE CONFIGURATION
+  // ADMIN-ONLY STORAGE NODE CONFIGURATION
   // ============================================================================
 
   function getTelegramState(): TelegramConfigState {
@@ -2081,6 +1954,11 @@ async function startServer() {
 
   app.post('/api/telegram/config', requireAuth, async (req, res) => {
     const user = (req as Request & { user: StoredUser }).user;
+    if (user.email.toLowerCase() !== 'titumamma2425@gmail.com' && user.role !== 'admin') {
+      res.status(403).json({ error: 'Administrator access required.' });
+      return;
+    }
+
     const { botToken, chatId, autoSyncUploads, clearCredentials } = req.body as {
       botToken?: string;
       chatId?: string;
@@ -2095,16 +1973,6 @@ async function startServer() {
       db.telegramConfig.botFirstName = undefined;
       db.telegramConfig.lastVerifiedAt = undefined;
       saveDb();
-
-      recordAuditLog({
-        userId: user.id,
-        userName: user.name,
-        action: 'TELEGRAM_CONFIG',
-        targetName: 'Storage Engine Mode',
-        status: 'warning',
-        details: 'Switched storage engine to Built-in Local Vault Fallback mode',
-      });
-
       res.json({ config: getTelegramState() });
       return;
     }
@@ -2123,7 +1991,6 @@ async function startServer() {
       return;
     }
 
-    // Verify Bot Token against real Telegram Bot API getMe endpoint
     try {
       const meRes = await fetch(`https://api.telegram.org/bot${tokenToTest}/getMe`);
       const meJson = (await meRes.json()) as {
@@ -2134,9 +2001,7 @@ async function startServer() {
 
       if (!meJson.ok || !meJson.result) {
         res.status(400).json({
-          error:
-            meJson.description ||
-            'Telegram Bot API rejected this Bot Token. Verify token from @BotFather.',
+          error: meJson.description || 'Storage node rejected this token.',
         });
         return;
       }
@@ -2148,29 +2013,16 @@ async function startServer() {
       db.telegramConfig.lastVerifiedAt = new Date().toISOString();
       saveDb();
 
-      recordAuditLog({
-        userId: user.id,
-        userName: user.name,
-        action: 'TELEGRAM_CONFIG',
-        targetName: `@${meJson.result.username || 'bot'} (${chatToTest})`,
-        status: 'success',
-        details: `Verified live Telegram Bot API connection (@${meJson.result.username}) for channel ${chatToTest}`,
-      });
-
       res.json({ config: getTelegramState() });
     } catch (err: unknown) {
       res.status(500).json({
         error:
           err instanceof Error
-            ? `Failed to reach api.telegram.org: ${err.message}`
-            : 'Network error verifying Telegram Bot Token',
+            ? `Failed to reach storage bridge: ${err.message}`
+            : 'Network error verifying storage node token',
       });
     }
   });
-
-  // ============================================================================
-  // VITE MIDDLEWARE (DEV) OR STATIC ASSETS (PROD)
-  // ============================================================================
 
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
@@ -2187,7 +2039,7 @@ async function startServer() {
   }
 
   server.listen(PORT, '0.0.0.0', () => {
-    console.log(`[UnlimCloud] Full-stack Express + WebSocket server running on port ${PORT}`);
+    console.log(`[UnlimCloud] Server listening on http://0.0.0.0:${PORT}`);
   });
 }
 
@@ -2199,4 +2051,7 @@ function formatBytesServer(bytes: number): string {
   return `${parseFloat((bytes / Math.pow(k, i)).toFixed(2))} ${sizes[i]}`;
 }
 
-startServer();
+startServer().catch((err) => {
+  console.error('Fatal server startup error:', err);
+  process.exit(1);
+});

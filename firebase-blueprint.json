@@ -1,0 +1,166 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Per-user storage plan, token wallet balance, and subscription expiry state.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Firebase Auth UID of the account owner.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "displayName": {
+          "type": "string",
+          "description": "Display name of the user.",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "planId": {
+          "type": "string",
+          "description": "Active storage tier identifier.",
+          "enum": ["free_25gb", "pro_50gb", "ultra_1tb"],
+          "minLength": 1,
+          "maxLength": 32
+        },
+        "tokenBalance": {
+          "type": "number",
+          "description": "Available storage tokens in the user's wallet."
+        },
+        "planExpiresAt": {
+          "type": "string",
+          "description": "ISO timestamp when the active monthly plan expires, or empty string for free plan.",
+          "maxLength": 64
+        },
+        "graceEndsAt": {
+          "type": "string",
+          "description": "ISO timestamp when the 3-month (90-day) grace period ends after plan expiry.",
+          "maxLength": 64
+        },
+        "usedPromoCodes": {
+          "type": "string",
+          "description": "Comma-separated list of redeemed promo codes.",
+          "maxLength": 256
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of profile creation."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of last profile update."
+        }
+      },
+      "required": [
+        "uid",
+        "displayName",
+        "planId",
+        "tokenBalance",
+        "planExpiresAt",
+        "graceEndsAt",
+        "usedPromoCodes",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "CloudFileMeta": {
+      "title": "CloudFileMeta",
+      "description": "Per-user cloud file metadata isolated by ownerId.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique file identifier.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerId": {
+          "type": "string",
+          "description": "Firebase Auth UID of the file owner.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerName": {
+          "type": "string",
+          "description": "Display name of the file owner.",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "folderId": {
+          "type": "string",
+          "description": "Parent folder ID or 'root'.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "name": {
+          "type": "string",
+          "description": "File name.",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "sizeBytes": {
+          "type": "number",
+          "description": "File size in bytes."
+        },
+        "mimeType": {
+          "type": "string",
+          "description": "MIME type of the file.",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "starred": {
+          "type": "boolean",
+          "description": "Whether the file is starred by the owner."
+        },
+        "downloadCount": {
+          "type": "number",
+          "description": "Total number of downloads."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when file was uploaded."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when file was last updated."
+        }
+      },
+      "required": [
+        "id",
+        "ownerId",
+        "ownerName",
+        "folderId",
+        "name",
+        "sizeBytes",
+        "mimeType",
+        "starred",
+        "downloadCount",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/userProfiles/{userId}": {
+      "schema": {
+        "$ref": "#/entities/UserProfile"
+      },
+      "description": "Stores each authenticated user's storage plan, token balance, and subscription expiry."
+    },
+    "/cloudFiles/{fileId}": {
+      "schema": {
+        "$ref": "#/entities/CloudFileMeta"
+      },
+      "description": "Stores per-user cloud file metadata strictly isolated to the owning user."
+    }
+  }
+}

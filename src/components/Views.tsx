@@ -13,17 +13,23 @@ import {
   RefreshCw,
   FileText,
   Clock,
+  Coins,
+  Sparkles,
+  HardDrive,
+  AlertTriangle,
 } from 'lucide-react';
 import {
   ShareLink,
   BandwidthSettings,
   AuditLog,
   TelegramConfigState,
+  User,
+  StoragePlanId,
 } from '../types';
 import { formatBytes, formatShortDate } from '../utils/format';
 
 // ============================================================================
-// 1. SHARED LINKS VIEW (Phone-Friendly Visual Cards)
+// 1. SHARED LINKS VIEW
 // ============================================================================
 
 interface SharedLinksViewProps {
@@ -110,7 +116,6 @@ export const SharedLinksView: React.FC<SharedLinksViewProps> = ({
                   </div>
                 </div>
 
-                {/* Simple Speed Control */}
                 <div className="flex items-center justify-between pt-2.5 border-t border-[#2C2824] text-xs">
                   <span className="text-[#9E978E]">Speed Limit:</span>
                   <select
@@ -131,7 +136,6 @@ export const SharedLinksView: React.FC<SharedLinksViewProps> = ({
                 </div>
               </div>
 
-              {/* Action Buttons (44px min height for mobile thumb ergonomics) */}
               <div className="grid grid-cols-2 gap-2.5 pt-2">
                 <button
                   onClick={() => handleCopy(s)}
@@ -161,7 +165,366 @@ export const SharedLinksView: React.FC<SharedLinksViewProps> = ({
 };
 
 // ============================================================================
-// 2. SIMPLE ACTIVITY & DOWNLOAD SPEED VIEW
+// 2. STORAGE PRICING & TOKEN PLANS VIEW (25GB Free, 50GB/500T, 1TB/1024T)
+// ============================================================================
+
+interface StoragePricingViewProps {
+  user: User;
+  lockedFilesCount: number;
+  onOpenBuyTokens: () => void;
+  onRedeemPromo: (code: string) => Promise<string>;
+  onSubscribePlan: (planId: StoragePlanId) => Promise<string>;
+  onSimulateExpiry: () => Promise<string>;
+}
+
+const PLANS: {
+  id: StoragePlanId;
+  name: string;
+  storageLabel: string;
+  tokensPerMonth: number;
+  tag: string;
+  description: string;
+  features: string[];
+}[] = [
+  {
+    id: 'free_25gb',
+    name: 'Starter Cloud',
+    storageLabel: '25 GB',
+    tokensPerMonth: 0,
+    tag: 'Free Forever',
+    description: 'Included for every account with full encryption and file sharing.',
+    features: [
+      '25 GB Encrypted Cloud Storage',
+      'Direct Download Links & Password Lock',
+      'Built-in File Previews (Docs, Images, Media)',
+      'Never expires — your first 25 GB is always free',
+    ],
+  },
+  {
+    id: 'pro_50gb',
+    name: 'Pro Vault 50 GB',
+    storageLabel: '50 GB',
+    tokensPerMonth: 500,
+    tag: 'Popular Monthly Plan',
+    description: 'Double your encrypted cloud capacity for large projects and archives.',
+    features: [
+      '50 GB Encrypted Cloud Storage (Per Month)',
+      'High-Speed Direct & Remote URL Transfers',
+      '3-Month (90-Day) Data Hold if plan expires',
+      'Instant activation & renewal with Tokens',
+    ],
+  },
+  {
+    id: 'ultra_1tb',
+    name: 'Ultra Vault 1 TB',
+    storageLabel: '1 TB',
+    tokensPerMonth: 1024,
+    tag: 'Maximum Capacity',
+    description: '1,024 GB of private high-speed cloud storage for heavy backups and teams.',
+    features: [
+      '1 TB (1,024 GB) Encrypted Cloud Storage (Per Month)',
+      'Maximum Unthrottled Download Streams',
+      '3-Month (90-Day) Data Hold if plan expires',
+      'Priority Cloud Storage Allocation',
+    ],
+  },
+];
+
+export const StoragePricingView: React.FC<StoragePricingViewProps> = ({
+  user,
+  lockedFilesCount,
+  onOpenBuyTokens,
+  onRedeemPromo,
+  onSubscribePlan,
+  onSimulateExpiry,
+}) => {
+  const [promoCode, setPromoCode] = useState('');
+  const [busyPlan, setBusyPlan] = useState<string | null>(null);
+  const [notice, setNotice] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+
+  const tokenBalance = user.tokenBalance || 0;
+  const activePlan = user.planId || 'free_25gb';
+
+  const nowMs = Date.now();
+  const expMs = user.planExpiresAt ? new Date(user.planExpiresAt).getTime() : null;
+  const graceMs = user.graceEndsAt ? new Date(user.graceEndsAt).getTime() : null;
+  const isExpiredInGrace = Boolean(expMs && expMs < nowMs && (!graceMs || nowMs <= graceMs));
+  const graceDaysLeft = graceMs
+    ? Math.max(1, Math.ceil((graceMs - nowMs) / 86400_000))
+    : 90;
+
+  const handlePromoSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!promoCode.trim()) return;
+    setBusyPlan('promo');
+    setNotice(null);
+    try {
+      const msg = await onRedeemPromo(promoCode.trim());
+      setNotice({ type: 'success', text: msg });
+      setPromoCode('');
+    } catch (err: unknown) {
+      setNotice({
+        type: 'error',
+        text: err instanceof Error ? err.message : 'Invalid promo code',
+      });
+    } finally {
+      setBusyPlan(null);
+    }
+  };
+
+  const handlePlanSelect = async (planId: StoragePlanId) => {
+    setBusyPlan(planId);
+    setNotice(null);
+    try {
+      const msg = await onSubscribePlan(planId);
+      setNotice({ type: 'success', text: msg });
+    } catch (err: unknown) {
+      setNotice({
+        type: 'error',
+        text: err instanceof Error ? err.message : 'Could not activate plan',
+      });
+    } finally {
+      setBusyPlan(null);
+    }
+  };
+
+  const handleSimulate = async () => {
+    setBusyPlan('sim');
+    setNotice(null);
+    try {
+      const msg = await onSimulateExpiry();
+      setNotice({ type: 'success', text: msg });
+    } catch (err: unknown) {
+      setNotice({
+        type: 'error',
+        text: err instanceof Error ? err.message : 'Simulation failed',
+      });
+    } finally {
+      setBusyPlan(null);
+    }
+  };
+
+  return (
+    <div className="space-y-6">
+      {/* Header & Wallet Bar */}
+      <div className="p-4 sm:p-5 bg-[#1C1A17] border border-[#2C2824] flex flex-col md:flex-row md:items-center justify-between gap-4">
+        <div className="space-y-1">
+          <h1 className="text-lg sm:text-xl font-bold text-[#F2EFE9]">
+            Storage Plans & Token Wallet
+          </h1>
+          <p className="text-xs text-[#9E978E]">
+            Every user gets <strong className="text-[#F2EFE9]">25 GB Free</strong>. Upgrade to{' '}
+            <strong className="text-[#F2EFE9]">50 GB (500 Tokens/mo)</strong> or{' '}
+            <strong className="text-[#F2EFE9]">1 TB (1,024 Tokens/mo)</strong> anytime.
+          </p>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="px-4 py-2.5 bg-[#141311] border border-[#2C2824] flex items-center gap-2.5">
+            <Coins className="w-4 h-4 text-[#D97757]" />
+            <div className="text-xs">
+              <span className="text-[#9E978E]">Wallet: </span>
+              <strong className="text-sm text-[#F2EFE9] tabular-nums">
+                {tokenBalance.toLocaleString()} Tokens
+              </strong>
+            </div>
+          </div>
+
+          <button
+            onClick={onOpenBuyTokens}
+            className="min-h-[44px] px-5 py-2.5 text-xs font-bold bg-[#D97757] text-[#141311] hover:bg-[#E08568] flex items-center gap-1.5 cursor-pointer"
+          >
+            <Coins className="w-4 h-4" />
+            Buy Tokens (BDT / USD)
+          </button>
+        </div>
+      </div>
+
+      {/* 3-Month Grace Period Alert if Expired */}
+      {(isExpiredInGrace || lockedFilesCount > 0) && (
+        <div className="p-4 sm:p-5 bg-[#1C1A17] border border-[#D99B26] flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div className="flex items-start gap-3">
+            <AlertTriangle className="w-5 h-5 text-[#D99B26] shrink-0 mt-0.5" />
+            <div className="space-y-1">
+              <div className="text-sm font-bold text-[#F2EFE9]">
+                Monthly Plan Expired — {graceDaysLeft} Days Left in 3-Month Grace Period
+              </div>
+              <p className="text-xs text-[#9E978E]">
+                Your files are safe and have not been deleted. Your first 25 GB remains accessible,
+                while <strong className="text-[#D99B26]">{lockedFilesCount} file(s)</strong> above
+                25 GB are temporarily locked. Extend your 50 GB or 1 TB plan within {graceDaysLeft}{' '}
+                days to restore full access before excess data over 25 GB is cleared.
+              </p>
+            </div>
+          </div>
+          <button
+            onClick={() => handlePlanSelect(activePlan === 'free_25gb' ? 'pro_50gb' : activePlan)}
+            className="min-h-[44px] px-4 py-2 text-xs font-bold bg-[#D97757] text-[#141311] shrink-0 cursor-pointer"
+          >
+            Extend Plan & Unlock Files
+          </button>
+        </div>
+      )}
+
+      {/* Quick Promo Code Redemption Bar */}
+      <form
+        onSubmit={handlePromoSubmit}
+        className="p-4 bg-[#1C1A17] border border-[#2C2824] flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3"
+      >
+        <div className="flex items-center gap-2.5">
+          <Sparkles className="w-4 h-4 text-[#D97757] shrink-0" />
+          <div className="text-xs">
+            <span className="font-bold text-[#F2EFE9]">Redeem Promo Code</span>
+            <span className="text-[#9E978E] ml-2">
+              Have a token voucher code? Enter it to credit your wallet immediately.
+            </span>
+          </div>
+        </div>
+
+        <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+          <input
+            type="text"
+            value={promoCode}
+            onChange={(e) => setPromoCode(e.target.value)}
+            placeholder="Enter promo code..."
+            className="min-h-[42px] bg-[#141311] border border-[#2C2824] px-3.5 py-2 text-xs font-mono text-[#F2EFE9] focus:outline-none focus:border-[#D97757]"
+          />
+          <button
+            type="submit"
+            disabled={busyPlan === 'promo'}
+            className="min-h-[42px] px-4 py-2 text-xs font-bold bg-[#24211D] border border-[#D97757] text-[#D97757] hover:bg-[#D97757] hover:text-[#141311] transition-colors cursor-pointer shrink-0"
+          >
+            {busyPlan === 'promo' ? 'Applying...' : 'Apply Code'}
+          </button>
+        </div>
+      </form>
+
+      {notice && (
+        <div
+          className={`p-4 border text-xs font-semibold ${
+            notice.type === 'success'
+              ? 'bg-[#1C1A17] border-[#2E9E6B] text-[#2E9E6B]'
+              : 'bg-[#1C1A17] border-[#D94848] text-[#D94848]'
+          }`}
+        >
+          {notice.text}
+        </div>
+      )}
+
+      {/* 3 Plan Cards */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        {PLANS.map((plan) => {
+          const isCurrent = activePlan === plan.id && !isExpiredInGrace;
+          return (
+            <div
+              key={plan.id}
+              className={`p-5 sm:p-6 bg-[#1C1A17] border flex flex-col justify-between gap-6 ${
+                isCurrent ? 'border-[#D97757]' : 'border-[#2C2824]'
+              }`}
+            >
+              <div className="space-y-4">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs font-bold uppercase tracking-wider text-[#D97757]">
+                    {plan.tag}
+                  </span>
+                  {isCurrent && (
+                    <span className="px-2.5 py-0.5 text-[11px] font-bold bg-[#24211D] border border-[#D97757] text-[#D97757]">
+                      Active Plan
+                    </span>
+                  )}
+                </div>
+
+                <div>
+                  <div className="text-2xl sm:text-3xl font-bold text-[#F2EFE9] tabular-nums">
+                    {plan.storageLabel}
+                  </div>
+                  <div className="text-sm font-semibold text-[#F2EFE9] mt-0.5">{plan.name}</div>
+                  <p className="text-xs text-[#9E978E] mt-1.5">{plan.description}</p>
+                </div>
+
+                <div className="p-3.5 bg-[#141311] border border-[#2C2824] flex items-baseline justify-between">
+                  <span className="text-xs text-[#9E978E]">Monthly Price</span>
+                  <span className="text-base font-bold text-[#F2EFE9] tabular-nums">
+                    {plan.tokensPerMonth === 0
+                      ? '0 Tokens (Free)'
+                      : `${plan.tokensPerMonth.toLocaleString()} Tokens / mo`}
+                  </span>
+                </div>
+
+                <ul className="space-y-2 text-xs text-[#F2EFE9]">
+                  {plan.features.map((feat) => (
+                    <li key={feat} className="flex items-start gap-2">
+                      <Check className="w-4 h-4 text-[#2E9E6B] shrink-0 mt-0.5" />
+                      <span>{feat}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+
+              <div className="space-y-2 pt-3 border-t border-[#2C2824]">
+                {plan.id === 'free_25gb' ? (
+                  <button
+                    type="button"
+                    disabled={isCurrent}
+                    onClick={() => handlePlanSelect('free_25gb')}
+                    className="w-full min-h-[44px] px-4 py-2.5 text-xs font-semibold bg-[#24211D] border border-[#2C2824] text-[#F2EFE9] disabled:opacity-50 cursor-pointer"
+                  >
+                    {isCurrent ? 'Included Free Plan (Active)' : 'Switch to 25 GB Free'}
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    disabled={busyPlan === plan.id}
+                    onClick={() => handlePlanSelect(plan.id)}
+                    className="w-full min-h-[44px] px-4 py-2.5 text-xs font-bold bg-[#D97757] text-[#141311] hover:bg-[#E08568] cursor-pointer"
+                  >
+                    {busyPlan === plan.id
+                      ? 'Activating...'
+                      : isCurrent
+                      ? `Extend +30 Days (${plan.tokensPerMonth.toLocaleString()} Tokens)`
+                      : `Activate ${plan.storageLabel} (${plan.tokensPerMonth.toLocaleString()} Tokens/mo)`}
+                  </button>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* 3-Month Data Retention Policy Box + Interactive Test Button */}
+      <div className="p-4 sm:p-5 bg-[#1C1A17] border border-[#2C2824] flex flex-col md:flex-row md:items-center justify-between gap-4">
+        <div className="flex items-start gap-3">
+          <HardDrive className="w-5 h-5 text-[#D97757] shrink-0 mt-0.5" />
+          <div className="space-y-1">
+            <div className="text-xs font-bold text-[#F2EFE9]">
+              How Monthly Plan Expiry & 3-Month Data Protection Works
+            </div>
+            <p className="text-xs text-[#9E978E] max-w-3xl leading-relaxed">
+              When your monthly 50 GB or 1 TB plan ends, your files are{' '}
+              <strong className="text-[#F2EFE9]">not deleted</strong>. Your first 25 GB stays open
+              and downloadable at all times. Any files stored above 25 GB are locked for{' '}
+              <strong className="text-[#F2EFE9]">3 months (90 days)</strong>. If you extend your
+              plan within 3 months, all files unlock immediately; if not extended after 3 months,
+              only the excess data over 25 GB is automatically cleared.
+            </p>
+          </div>
+        </div>
+
+        <button
+          type="button"
+          onClick={handleSimulate}
+          disabled={busyPlan === 'sim'}
+          className="min-h-[42px] px-4 py-2 text-xs font-semibold bg-[#24211D] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] shrink-0 cursor-pointer"
+        >
+          {busyPlan === 'sim' ? 'Simulating...' : 'Test >25 GB Expiry Lock'}
+        </button>
+      </div>
+    </div>
+  );
+};
+
+// ============================================================================
+// 3. SIMPLE ACTIVITY & DOWNLOAD SPEED VIEW (White-Label, No Telegram Mentions)
 // ============================================================================
 
 interface ActivityAndSpeedViewProps {
@@ -185,6 +548,8 @@ function friendlyActionLabel(action: string): string {
       return 'Uploaded from web link';
     case 'FILE_DOWNLOAD':
       return 'Downloaded file';
+    case 'FILE_DELETE':
+      return 'Deleted file';
     case 'SHARE_CREATED':
       return 'Created share link';
     case 'SHARE_UNLOCKED':
@@ -193,8 +558,12 @@ function friendlyActionLabel(action: string): string {
       return 'Shared link downloaded';
     case 'SHARE_AUTH_FAILED':
       return 'Wrong password entered';
-    case 'TELEGRAM_SYNC':
-      return 'Saved to Telegram Cloud';
+    case 'PROMO_REDEEMED':
+      return 'Redeemed promo code';
+    case 'TOKENS_PURCHASED':
+      return 'Purchased storage tokens';
+    case 'PLAN_SUBSCRIBED':
+      return 'Updated storage plan';
     default:
       return 'Account activity';
   }
@@ -207,7 +576,6 @@ export const ActivityAndSpeedView: React.FC<ActivityAndSpeedViewProps> = ({
 }) => {
   return (
     <div className="space-y-8">
-      {/* Section 1: Easy Download Speed Control */}
       <div className="space-y-4">
         <div className="border-b border-[#2C2824] pb-3">
           <h1 className="text-lg sm:text-xl font-bold text-[#F2EFE9] flex items-center gap-2">
@@ -243,7 +611,6 @@ export const ActivityAndSpeedView: React.FC<ActivityAndSpeedViewProps> = ({
         </div>
       </div>
 
-      {/* Section 2: Clean Recent Activity List */}
       <div className="space-y-4">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-[#2C2824] pb-3">
           <div>
@@ -252,7 +619,7 @@ export const ActivityAndSpeedView: React.FC<ActivityAndSpeedViewProps> = ({
               Recent Activity
             </h2>
             <p className="text-xs text-[#9E978E] mt-0.5">
-              A simple timeline of uploads, downloads, and shared files.
+              A private timeline of your uploads, downloads, shared links, and plan updates.
             </p>
           </div>
 
@@ -314,7 +681,7 @@ export const ActivityAndSpeedView: React.FC<ActivityAndSpeedViewProps> = ({
 };
 
 // ============================================================================
-// 3. SIMPLE TELEGRAM CLOUD SETUP VIEW
+// 4. ADMIN-ONLY STORAGE NODE CONFIGURATION (Hidden from Regular Users)
 // ============================================================================
 
 interface TelegramStorageViewProps {
@@ -349,9 +716,9 @@ export const TelegramStorageView: React.FC<TelegramStorageViewProps> = ({
         autoSyncUploads: true,
       });
       setBotToken('');
-      setSuccessMsg('Telegram Cloud connected! Your uploads will now save to Telegram.');
+      setSuccessMsg('Backend Storage Node connected! All user uploads will route through this node.');
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Could not connect to Telegram');
+      setError(err instanceof Error ? err.message : 'Could not connect storage node');
     } finally {
       setSaving(false);
     }
@@ -360,12 +727,15 @@ export const TelegramStorageView: React.FC<TelegramStorageViewProps> = ({
   return (
     <div className="max-w-2xl space-y-6">
       <div className="border-b border-[#2C2824] pb-4">
-        <h1 className="text-lg sm:text-xl font-bold text-[#F2EFE9]">
-          Telegram Unlimited Storage Setup
+        <div className="text-[11px] font-bold uppercase tracking-wider text-[#D97757]">
+          Administrator Only — Hidden from Public Users
+        </div>
+        <h1 className="text-lg sm:text-xl font-bold text-[#F2EFE9] mt-0.5">
+          Backend Storage Node Configuration
         </h1>
         <p className="text-xs text-[#9E978E] mt-1">
-          Your drive works right away using built-in cloud storage. Connect your Telegram Bot
-          below if you want files saved directly inside your private Telegram channel.
+          This panel is visible only to your administrator account. Regular users never see this
+          tab or know how backend storage is powered.
         </p>
       </div>
 
@@ -375,13 +745,13 @@ export const TelegramStorageView: React.FC<TelegramStorageViewProps> = ({
           <div>
             <div className="text-sm font-bold text-[#F2EFE9]">
               {config.connected
-                ? `Connected to Telegram Bot (@${config.botUsername || 'Active'})`
-                : 'Built-In Unlimited Cloud Storage Active'}
+                ? `Connected to Live Storage Bot (@${config.botUsername || 'Active'})`
+                : 'Built-In Encrypted Vault Active'}
             </div>
             <div className="text-xs text-[#9E978E]">
               {config.connected
-                ? `Saving files to Telegram Channel ${config.chatId}`
-                : 'Ready to upload and share files immediately'}
+                ? `Routing chunks to Channel ${config.chatId}`
+                : 'Ready to accept and serve user uploads immediately'}
             </div>
           </div>
         </div>
@@ -403,7 +773,7 @@ export const TelegramStorageView: React.FC<TelegramStorageViewProps> = ({
       >
         <div className="space-y-1.5">
           <label className="block text-xs font-semibold text-[#F2EFE9]">
-            1. Telegram Bot Token (Optional — from @BotFather)
+            1. Bot Token (From @BotFather)
           </label>
           <input
             type="password"
@@ -416,7 +786,7 @@ export const TelegramStorageView: React.FC<TelegramStorageViewProps> = ({
 
         <div className="space-y-1.5">
           <label className="block text-xs font-semibold text-[#F2EFE9]">
-            2. Telegram Channel or Chat ID
+            2. Private Storage Channel ID
           </label>
           <input
             type="text"
@@ -441,7 +811,7 @@ export const TelegramStorageView: React.FC<TelegramStorageViewProps> = ({
             ) : (
               <Send className="w-4 h-4" />
             )}
-            {saving ? 'Connecting...' : 'Save Telegram Connection'}
+            {saving ? 'Connecting...' : 'Save Storage Node'}
           </button>
         </div>
       </form>
