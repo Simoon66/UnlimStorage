@@ -636,62 +636,59 @@ async function startServer() {
   }
 
   function getAuthUser(req: Request): StoredUser | null {
-    // Support Firebase Authentication headers first
-    const fbUid = (req.headers['x-firebase-uid'] as string | undefined)?.trim();
-    const fbEmail = (req.headers['x-firebase-email'] as string | undefined)?.trim();
-    const fbName = (req.headers['x-firebase-name'] as string | undefined)?.trim();
+    const fbUid = (
+      (req.headers['x-firebase-uid'] as string | undefined) ||
+      (req.query.uid as string | undefined) ||
+      ''
+    ).trim();
+    const fbEmail = (
+      (req.headers['x-firebase-email'] as string | undefined) ||
+      (req.query.email as string | undefined) ||
+      ''
+    ).trim();
+    const fbName = ((req.headers['x-firebase-name'] as string | undefined) || '').trim();
 
-    if (fbUid) {
-      let user = db.users.find(
-        (u) => u.id === fbUid || (fbEmail && u.email.toLowerCase() === fbEmail.toLowerCase())
-      );
-      if (!user) {
-        const isAdminEmail = fbEmail?.toLowerCase() === 'titumamma2425@gmail.com';
-        user = {
-          id: fbUid,
-          name: fbName || fbEmail?.split('@')[0] || 'Cloud User',
-          email: fbEmail || `${fbUid}@user.unlimcloud`,
-          passwordHash: '',
-          role: isAdminEmail ? 'admin' : 'member',
-          bandwidthLimitBytes: FREE_25GB_BYTES,
-          bandwidthUsedBytes: 0,
-          storageUsedBytes: 0,
-          createdAt: new Date().toISOString(),
-          planId: 'free_25gb',
-          tokenBalance: 0,
-          planExpiresAt: null,
-          graceEndsAt: null,
-          usedPromoCodes: [],
-        };
-        db.users.push(user);
-        seedStarterFilesForNewUser(user);
-        saveDb();
-      } else {
-        if (fbEmail && fbEmail.toLowerCase() === 'titumamma2425@gmail.com') {
-          user.role = 'admin';
-        }
-      }
-      evaluateUserQuotaAndLocks(user);
-      return user;
+    if (!fbUid) {
+      return null;
     }
 
-    const authHeader = req.headers.authorization;
-    const token =
-      (authHeader && authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null) ||
-      (req.query.token as string | undefined) ||
-      'demo_admin_session_token';
+    const isAdminEmail = fbEmail.toLowerCase() === 'titumamma2425@gmail.com';
+    let user = db.users.find((u) => u.id === fbUid);
 
-    const userId = db.sessions[token];
-    if (!userId) return null;
-    const found = db.users.find((u) => u.id === userId) || null;
-    if (found) evaluateUserQuotaAndLocks(found);
-    return found;
+    if (!user) {
+      user = {
+        id: fbUid,
+        name: fbName || fbEmail.split('@')[0] || 'Cloud User',
+        email: fbEmail || `${fbUid}@user.unlimcloud`,
+        passwordHash: '',
+        role: isAdminEmail ? 'admin' : 'member',
+        bandwidthLimitBytes: FREE_25GB_BYTES,
+        bandwidthUsedBytes: 0,
+        storageUsedBytes: 0,
+        createdAt: new Date().toISOString(),
+        planId: 'free_25gb',
+        tokenBalance: 0,
+        planExpiresAt: null,
+        graceEndsAt: null,
+        usedPromoCodes: [],
+      };
+      db.users.push(user);
+      seedStarterFilesForNewUser(user);
+      saveDb();
+    } else {
+      if (fbEmail) user.email = fbEmail;
+      if (fbName) user.name = fbName;
+      user.role = isAdminEmail ? 'admin' : 'member';
+    }
+
+    evaluateUserQuotaAndLocks(user);
+    return user;
   }
 
   function requireAuth(req: Request, res: Response, next: NextFunction) {
     const user = getAuthUser(req);
     if (!user) {
-      res.status(401).json({ error: 'Authentication required' });
+      res.status(401).json({ error: 'Authentication required. Please sign in with Google.' });
       return;
     }
     (req as Request & { user: StoredUser }).user = user;
@@ -705,12 +702,12 @@ async function startServer() {
   app.get('/api/auth/me', (req, res) => {
     const user = getAuthUser(req);
     if (!user) {
-      res.status(401).json({ error: 'Invalid session' });
+      res.status(401).json({ error: 'Authentication required' });
       return;
     }
     res.json({
       user: sanitizeUser(user),
-      users: db.users.map(sanitizeUser),
+      users: [sanitizeUser(user)],
     });
   });
 
@@ -1948,13 +1945,18 @@ async function startServer() {
     };
   }
 
-  app.get('/api/telegram/config', requireAuth, (_req, res) => {
+  app.get('/api/telegram/config', requireAuth, (req, res) => {
+    const user = (req as Request & { user: StoredUser }).user;
+    if (user.email.toLowerCase() !== 'titumamma2425@gmail.com' || user.role !== 'admin') {
+      res.status(403).json({ error: 'Administrator access required.' });
+      return;
+    }
     res.json({ config: getTelegramState() });
   });
 
   app.post('/api/telegram/config', requireAuth, async (req, res) => {
     const user = (req as Request & { user: StoredUser }).user;
-    if (user.email.toLowerCase() !== 'titumamma2425@gmail.com' && user.role !== 'admin') {
+    if (user.email.toLowerCase() !== 'titumamma2425@gmail.com' || user.role !== 'admin') {
       res.status(403).json({ error: 'Administrator access required.' });
       return;
     }

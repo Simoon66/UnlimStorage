@@ -484,7 +484,8 @@ export const CreateShareModal: React.FC<CreateShareModalProps> = ({
 
 interface FileDetailDrawerProps {
   file: FileRecord;
-  sessionToken: string;
+  firebaseUid?: string;
+  firebaseEmail?: string;
   onClose: () => void;
   onDownload: (file: FileRecord) => void;
   onOpenShareModal: (file: FileRecord) => void;
@@ -494,7 +495,8 @@ interface FileDetailDrawerProps {
 
 export const FileDetailDrawer: React.FC<FileDetailDrawerProps> = ({
   file,
-  sessionToken,
+  firebaseUid,
+  firebaseEmail,
   onClose,
   onDownload,
   onOpenShareModal,
@@ -505,9 +507,9 @@ export const FileDetailDrawer: React.FC<FileDetailDrawerProps> = ({
 
   const inlineUrl =
     file.previewDataUrl ||
-    `/api/files/${encodeURIComponent(file.id)}/download?inline=1&token=${encodeURIComponent(
-      sessionToken
-    )}`;
+    `/api/files/${encodeURIComponent(file.id)}/download?inline=1&uid=${encodeURIComponent(
+      firebaseUid || ''
+    )}&email=${encodeURIComponent(firebaseEmail || '')}`;
 
   const isImage =
     file.mimeType.startsWith('image/') ||
@@ -1074,22 +1076,18 @@ export const BuyTokensModal: React.FC<BuyTokensModalProps> = ({
 
 interface AuthModalProps {
   currentUser: User;
-  users: User[];
-  isFirebaseAuthenticated: boolean;
+  isAdmin: boolean;
   onClose: () => void;
   onGoogleSignIn: () => Promise<void>;
   onSignOut: () => Promise<void>;
-  onSwitchUser: (userId: string) => Promise<void>;
 }
 
 export const AuthModal: React.FC<AuthModalProps> = ({
   currentUser,
-  users,
-  isFirebaseAuthenticated,
+  isAdmin,
   onClose,
   onGoogleSignIn,
   onSignOut,
-  onSwitchUser,
 }) => {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -1106,6 +1104,13 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       setBusy(false);
     }
   };
+
+  const planLabel =
+    currentUser.planId === 'ultra_1tb'
+      ? '1 TB Ultra Plan'
+      : currentUser.planId === 'pro_50gb'
+      ? '50 GB Pro Plan'
+      : '25 GB Free Plan';
 
   return (
     <div className="fixed inset-0 z-50 bg-black/80 flex items-end sm:items-center justify-center p-0 sm:p-4">
@@ -1124,68 +1129,33 @@ export const AuthModal: React.FC<AuthModalProps> = ({
           {/* Active Profile Card */}
           <div className="p-4 bg-[#141311] border border-[#D97757] space-y-2">
             <div className="flex items-center justify-between">
-              <span className="text-xs font-semibold text-[#D97757]">Signed-In Account</span>
-              <span className="text-[11px] text-[#2E9E6B] font-medium">
-                {isFirebaseAuthenticated ? 'Firebase Verified' : 'Encrypted Session'}
+              <span className="text-xs font-semibold text-[#D97757]">
+                {isAdmin ? 'Administrator Account' : 'Personal Cloud Account'}
+              </span>
+              <span className="text-[11px] text-[#2E9E6B] font-medium flex items-center gap-1">
+                <UserCheck className="w-3.5 h-3.5" /> Google Verified
               </span>
             </div>
             <div className="text-sm font-bold text-[#F2EFE9] truncate">{currentUser.name}</div>
             <div className="text-xs text-[#9E978E] truncate">{currentUser.email}</div>
+            <div className="pt-2 border-t border-[#2C2824] flex items-center justify-between text-xs text-[#9E978E]">
+              <span>Active Plan:</span>
+              <strong className="text-[#F2EFE9]">{planLabel}</strong>
+            </div>
           </div>
 
-          {/* Primary Google Sign-In Button */}
+          {/* Switch Google Account Button */}
           <div className="space-y-2">
             <button
               type="button"
               onClick={handleGoogleClick}
               disabled={busy}
-              className="w-full min-h-[46px] px-4 py-2.5 text-xs font-bold bg-[#D97757] text-[#141311] hover:bg-[#E08568] flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+              className="w-full min-h-[46px] px-4 py-2.5 text-xs font-bold bg-[#24211D] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
             >
-              <LogIn className="w-4 h-4" />
-              {busy ? 'Connecting to Google...' : 'Sign In / Switch with Google Account'}
+              <LogIn className="w-4 h-4 text-[#D97757]" />
+              {busy ? 'Connecting to Google...' : 'Switch Google Account'}
             </button>
             {error && <p className="text-xs text-[#D94848]">{error}</p>}
-          </div>
-
-          {/* Quick Demo Account Switcher (for testing multi-user isolation) */}
-          <div className="space-y-2 pt-3 border-t border-[#2C2824]">
-            <div className="text-xs font-semibold text-[#9E978E]">
-              Test Multi-User Data Isolation (Switch Sandbox Account):
-            </div>
-            {users.slice(0, 4).map((u) => {
-              const isCurrent = u.id === currentUser.id;
-              return (
-                <div
-                  key={u.id}
-                  className={`p-3 border flex items-center justify-between gap-3 ${
-                    isCurrent
-                      ? 'bg-[#24211D] border-[#D97757]'
-                      : 'bg-[#141311] border-[#2C2824]'
-                  }`}
-                >
-                  <div className="min-w-0">
-                    <div className="text-xs font-bold text-[#F2EFE9] truncate">{u.name}</div>
-                    <div className="text-[11px] text-[#9E978E] truncate">{u.email}</div>
-                  </div>
-                  {isCurrent ? (
-                    <span className="text-[11px] font-medium text-[#2E9E6B] shrink-0 flex items-center gap-1">
-                      <UserCheck className="w-3.5 h-3.5" /> Active
-                    </span>
-                  ) : (
-                    <button
-                      type="button"
-                      onClick={async () => {
-                        await onSwitchUser(u.id);
-                        onClose();
-                      }}
-                      className="min-h-[36px] px-3 py-1.5 text-xs font-semibold bg-[#24211D] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] shrink-0 cursor-pointer"
-                    >
-                      Switch
-                    </button>
-                  )}
-                </div>
-              );
-            })}
           </div>
 
           <div className="pt-3 border-t border-[#2C2824] flex items-center justify-between">
@@ -1195,7 +1165,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 await onSignOut();
                 onClose();
               }}
-              className="min-h-[40px] px-4 py-2 text-xs font-medium text-[#D94848] border border-[#2C2824] bg-[#141311] flex items-center gap-1.5 cursor-pointer"
+              className="min-h-[40px] px-4 py-2 text-xs font-medium text-[#D94848] border border-[#2C2824] bg-[#141311] hover:border-[#D94848] flex items-center gap-1.5 cursor-pointer"
             >
               <LogOut className="w-3.5 h-3.5" />
               Sign Out

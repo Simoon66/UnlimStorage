@@ -11,8 +11,8 @@ import {
   StoragePlanId,
 } from '../types';
 
-const STORAGE_KEY = 'unlimcloud_client_db_v3';
-const FILE_BLOBS_KEY = 'unlimcloud_client_blobs_v3';
+const STORAGE_KEY = 'unlimcloud_client_db_v4';
+const FILE_BLOBS_KEY = 'unlimcloud_client_blobs_v4';
 
 const FREE_25GB_BYTES = 25 * 1024 * 1024 * 1024;
 const PRO_50GB_BYTES = 50 * 1024 * 1024 * 1024;
@@ -407,87 +407,77 @@ async function handleClientApi(urlStr: string, init?: RequestInit): Promise<Resp
   const path = parsed.pathname;
   const method = (init?.method || 'GET').toUpperCase();
 
-  let fbUid = '';
-  let fbEmail = '';
-  let fbName = '';
-  if (init?.headers) {
-    const h = new Headers(init.headers);
-    fbUid = (h.get('X-Firebase-Uid') || '').trim();
-    fbEmail = (h.get('X-Firebase-Email') || '').trim();
-    fbName = (h.get('X-Firebase-Name') || '').trim();
-  }
-
-  let currentUser: ClientStoredUser | undefined;
-  if (fbUid) {
-    currentUser = db.users.find(
-      (u) => u.id === fbUid || (fbEmail && u.email.toLowerCase() === fbEmail.toLowerCase())
-    );
-    if (!currentUser) {
-      const isAdminEmail = fbEmail.toLowerCase() === 'titumamma2425@gmail.com';
-      currentUser = {
-        id: fbUid,
-        name: fbName || fbEmail.split('@')[0] || 'Cloud User',
-        email: fbEmail || `${fbUid}@user.unlimcloud`,
-        passwordHash: '',
-        role: isAdminEmail ? 'admin' : 'member',
-        bandwidthLimitBytes: FREE_25GB_BYTES,
-        bandwidthUsedBytes: 0,
-        storageUsedBytes: 0,
-        createdAt: new Date().toISOString(),
-        planId: 'free_25gb',
-        tokenBalance: 0,
-        planExpiresAt: null,
-        graceEndsAt: null,
-        usedPromoCodes: [],
-      };
-      db.users.push(currentUser);
-      seedStarterClientFilesForNewUser(db, currentUser);
-      saveClientDb(db);
-    } else if (fbEmail.toLowerCase() === 'titumamma2425@gmail.com') {
-      currentUser.role = 'admin';
-    }
-  } else {
-    const token = localStorage.getItem('unlim_session_token') || 'demo_admin_session_token';
-    const userId = db.sessions[token] || 'usr_admin_01';
-    currentUser = db.users.find((u) => u.id === userId) || db.users[0];
-  }
-
-  evaluateClientQuotaAndLocks(db, currentUser);
-  saveClientDb(db);
-
   const parseBody = async () => {
     if (!init?.body) return {};
     if (typeof init.body === 'string') return JSON.parse(init.body);
     return {};
   };
 
-  if (path === '/api/auth/me' && method === 'GET') {
-    return jsonResponse({ user: currentUser, users: db.users });
+  // Public share links do not require authentication
+  if (path.startsWith('/api/public/share/') && method === 'GET' && !path.endsWith('/download')) {
+    const tok = decodeURIComponent(path.slice('/api/public/share/'.length));
+    const share = db.shares.find((s) => s.token === tok && s.active);
+    if (!share) return jsonResponse({ error: 'Share link not found or disabled' }, 404);
+    return jsonResponse({ share });
   }
 
-  if (path === '/api/auth/login' && method === 'POST') {
-    const body = await parseBody();
-    const found = db.users.find(
-      (u) => u.email.toLowerCase() === String(body.email || '').trim().toLowerCase()
+  if (path.startsWith('/api/public/share/') && path.endsWith('/verify') && method === 'POST') {
+    const tok = decodeURIComponent(
+      path.slice('/api/public/share/'.length, path.length - '/verify'.length)
     );
-    if (!found || found.passwordHash !== simpleHash(String(body.password || ''))) {
-      return jsonResponse({ error: 'Invalid email or password' }, 401);
+    const share = db.shares.find((s) => s.token === tok && s.active);
+    if (!share) return jsonResponse({ error: 'Share link not found' }, 404);
+    const body = await parseBody();
+    if (share.hasPassword && simpleHash(String(body.password || '').trim()) !== share.passwordHash) {
+      return jsonResponse({ error: 'Incorrect password' }, 403);
     }
-    const newTok = `sess_${Date.now().toString(36)}`;
-    db.sessions[newTok] = found.id;
-    evaluateClientQuotaAndLocks(db, found);
-    saveClientDb(db);
-    return jsonResponse({ token: newTok, user: found, users: db.users });
+    return jsonResponse({ unlocked: true, accessKey: share.passwordHash || 'open' });
   }
 
-  if (path === '/api/auth/register' && method === 'POST') {
-    const body = await parseBody();
-    const newUser: ClientStoredUser = {
-      id: `usr_${Date.now().toString(36)}`,
-      name: String(body.name || 'User').trim(),
-      email: String(body.email || 'user@unlim.cloud').trim().toLowerCase(),
-      passwordHash: simpleHash(String(body.password || '123456')),
-      role: body.role === 'admin' ? 'admin' : 'member',
+  if (path.startsWith('/api/public/share/') && path.endsWith('/download') && method === 'GET') {
+    const tok = decodeURIComponent(
+      path.slice('/api/public/share/'.length, path.length - '/download'.length)
+    );
+    const share = db.shares.find((s) => s.token === tok && s.active);
+    if (!share) return new Response('Not found', { status: 404 });
+    const blobs = getBlobStore();
+    const content = blobs[share.fileId] || `Shared file: ${share.fileName}`;
+    share.downloadCount += 1;
+    saveClientDb(db);
+    return new Response(content, {
+      status: 200,
+      headers: { 'Content-Type': share.fileMimeType || 'application/octet-stream' },
+    });
+  }
+
+  // All other routes strictly require Firebase Authentication
+  let fbUid = (parsed.searchParams.get('uid') || '').trim();
+  let fbEmail = (parsed.searchParams.get('email') || '').trim();
+  let fbName = '';
+  if (init?.headers) {
+    const h = new Headers(init.headers);
+    fbUid = (h.get('X-Firebase-Uid') || fbUid).trim();
+    fbEmail = (h.get('X-Firebase-Email') || fbEmail).trim();
+    fbName = (h.get('X-Firebase-Name') || '').trim();
+  }
+
+  if (!fbUid) {
+    return jsonResponse(
+      { error: 'Authentication required. Please sign in with Google to access UnlimCloud.' },
+      401
+    );
+  }
+
+  const isAdminEmail = fbEmail.toLowerCase() === 'titumamma2425@gmail.com';
+  let currentUser = db.users.find((u) => u.id === fbUid);
+
+  if (!currentUser) {
+    currentUser = {
+      id: fbUid,
+      name: fbName || fbEmail.split('@')[0] || 'Cloud User',
+      email: fbEmail || `${fbUid}@user.unlimcloud`,
+      passwordHash: '',
+      role: isAdminEmail ? 'admin' : 'member',
       bandwidthLimitBytes: FREE_25GB_BYTES,
       bandwidthUsedBytes: 0,
       storageUsedBytes: 0,
@@ -498,22 +488,20 @@ async function handleClientApi(urlStr: string, init?: RequestInit): Promise<Resp
       graceEndsAt: null,
       usedPromoCodes: [],
     };
-    db.users.push(newUser);
-    seedStarterClientFilesForNewUser(db, newUser);
-    const newTok = `sess_${Date.now().toString(36)}`;
-    db.sessions[newTok] = newUser.id;
+    db.users.push(currentUser);
+    seedStarterClientFilesForNewUser(db, currentUser);
     saveClientDb(db);
-    return jsonResponse({ token: newTok, user: newUser, users: db.users });
+  } else {
+    if (fbEmail) currentUser.email = fbEmail;
+    if (fbName) currentUser.name = fbName;
+    currentUser.role = isAdminEmail ? 'admin' : 'member';
   }
 
-  if (path === '/api/auth/switch-user' && method === 'POST') {
-    const body = await parseBody();
-    const found = db.users.find((u) => u.id === body.userId) || db.users[0];
-    const newTok = `sess_${Date.now().toString(36)}`;
-    db.sessions[newTok] = found.id;
-    evaluateClientQuotaAndLocks(db, found);
-    saveClientDb(db);
-    return jsonResponse({ token: newTok, user: found, users: db.users });
+  evaluateClientQuotaAndLocks(db, currentUser);
+  saveClientDb(db);
+
+  if (path === '/api/auth/me' && method === 'GET') {
+    return jsonResponse({ user: currentUser, users: [currentUser] });
   }
 
   // Billing & Token Endpoints
@@ -1111,6 +1099,9 @@ async function handleClientApi(urlStr: string, init?: RequestInit): Promise<Resp
   }
 
   if (path === '/api/telegram/config' && method === 'GET') {
+    if (currentUser.email.toLowerCase() !== 'titumamma2425@gmail.com' || currentUser.role !== 'admin') {
+      return jsonResponse({ error: 'Administrator access required.' }, 403);
+    }
     const connected = Boolean(db.telegramConfig.botToken && db.telegramConfig.chatId);
     const state: TelegramConfigState = {
       connected,
@@ -1125,6 +1116,9 @@ async function handleClientApi(urlStr: string, init?: RequestInit): Promise<Resp
   }
 
   if (path === '/api/telegram/config' && method === 'POST') {
+    if (currentUser.email.toLowerCase() !== 'titumamma2425@gmail.com' || currentUser.role !== 'admin') {
+      return jsonResponse({ error: 'Administrator access required.' }, 403);
+    }
     const body = await parseBody();
     if (body.clearCredentials) {
       db.telegramConfig.botToken = '';

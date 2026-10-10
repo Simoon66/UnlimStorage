@@ -105,15 +105,11 @@ export default function App() {
   });
 
   const [firebaseUser, setFirebaseUser] = useState<FirebaseUser | null>(null);
-  const [signedOutGate, setSignedOutGate] = useState<boolean>(false);
+  const [authLoading, setAuthLoading] = useState<boolean>(true);
   const [signingInGoogle, setSigningInGoogle] = useState<boolean>(false);
   const [authGateError, setAuthGateError] = useState<string | null>(null);
 
-  const [sessionToken, setSessionToken] = useState<string>(
-    () => localStorage.getItem('unlim_session_token') || 'demo_admin_session_token'
-  );
   const [currentUser, setCurrentUser] = useState<User | null>(null);
-  const [users, setUsers] = useState<User[]>([]);
 
   const [activeView, setActiveView] = useState<ActiveView>('explorer');
   const [folders, setFolders] = useState<FolderRecord[]>([]);
@@ -170,7 +166,6 @@ export default function App() {
   const authHeaders = useCallback(
     (extra: Record<string, string> = {}) => {
       const headers: Record<string, string> = {
-        Authorization: `Bearer ${sessionToken}`,
         ...extra,
       };
       if (firebaseUser) {
@@ -180,7 +175,7 @@ export default function App() {
       }
       return headers;
     },
-    [sessionToken, firebaseUser]
+    [firebaseUser]
   );
 
   const pushNotification = useCallback((notif: RealtimeNotification) => {
@@ -194,33 +189,43 @@ export default function App() {
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (fbUser) => {
       setFirebaseUser(fbUser);
+      setAuthLoading(false);
       if (fbUser) {
-        setSignedOutGate(false);
         try {
           await ensureFirestoreUserProfile(fbUser);
         } catch {
           // ignore if offline or unverified
         }
+      } else {
+        setCurrentUser(null);
+        setFolders([]);
+        setFiles([]);
+        setShares([]);
+        setTransfers([]);
+        setLogs([]);
       }
     });
     return () => unsubscribe();
   }, []);
 
   const loadWorkspaceData = useCallback(async () => {
+    if (!firebaseUser) return;
     try {
+      const isAdminEmail = firebaseUser.email?.toLowerCase() === 'titumamma2425@gmail.com';
       const [meRes, filesRes, sharesRes, bwRes, logsRes, tgRes] = await Promise.all([
         apiFetch('/api/auth/me', { headers: authHeaders() }),
         apiFetch('/api/files', { headers: authHeaders() }),
         apiFetch('/api/shares', { headers: authHeaders() }),
         apiFetch('/api/bandwidth', { headers: authHeaders() }),
         apiFetch('/api/logs', { headers: authHeaders() }),
-        apiFetch('/api/telegram/config', { headers: authHeaders() }),
+        isAdminEmail
+          ? apiFetch('/api/telegram/config', { headers: authHeaders() })
+          : Promise.resolve(null),
       ]);
 
       if (meRes.ok) {
         const meData = await meRes.json();
         setCurrentUser(meData.user);
-        setUsers(meData.users || []);
       }
       if (filesRes.ok) {
         const fData = await filesRes.json();
@@ -240,18 +245,20 @@ export default function App() {
         const lData = await logsRes.json();
         setLogs(lData.logs || []);
       }
-      if (tgRes.ok) {
+      if (tgRes && tgRes.ok) {
         const tData = await tgRes.json();
         setTelegramConfig(tData.config);
       }
     } catch (err) {
       console.error('Error loading workspace data:', err);
     }
-  }, [authHeaders]);
+  }, [authHeaders, firebaseUser]);
 
   useEffect(() => {
-    loadWorkspaceData();
-  }, [loadWorkspaceData]);
+    if (firebaseUser) {
+      loadWorkspaceData();
+    }
+  }, [firebaseUser, loadWorkspaceData]);
 
   // Real-time WebSocket updates for transfers & notifications
   useEffect(() => {
@@ -352,7 +359,6 @@ export default function App() {
     try {
       const fbUser = await signInWithGooglePopup();
       setFirebaseUser(fbUser);
-      setSignedOutGate(false);
       await ensureFirestoreUserProfile(fbUser).catch(() => null);
       pushNotification({
         id: `auth_${Date.now()}`,
@@ -373,7 +379,13 @@ export default function App() {
   const handleSignOut = async () => {
     await signOutFirebaseUser().catch(() => null);
     setFirebaseUser(null);
-    setSignedOutGate(true);
+    setCurrentUser(null);
+    setFolders([]);
+    setFiles([]);
+    setShares([]);
+    setTransfers([]);
+    setLogs([]);
+    setActiveView('explorer');
   };
 
   const handleUploadFiles = async (fileList: FileList | File[]) => {
@@ -521,9 +533,9 @@ export default function App() {
     }
 
     try {
-      const url = `/api/files/${encodeURIComponent(file.id)}/download?token=${encodeURIComponent(
-        sessionToken
-      )}`;
+      const url = `/api/files/${encodeURIComponent(file.id)}/download?uid=${encodeURIComponent(
+        firebaseUser?.uid || ''
+      )}&email=${encodeURIComponent(firebaseUser?.email || '')}`;
       const res = await apiFetch(url, { headers: authHeaders() });
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
@@ -784,23 +796,6 @@ export default function App() {
     return data.message;
   };
 
-  const handleSwitchUser = async (userId: string) => {
-    await signOutFirebaseUser().catch(() => null);
-    setFirebaseUser(null);
-    setSignedOutGate(false);
-    const res = await apiFetch('/api/auth/switch-user', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ userId }),
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Failed to switch account');
-    localStorage.setItem('unlim_session_token', data.token);
-    setSessionToken(data.token);
-    setCurrentUser(data.user);
-    setUsers(data.users || []);
-  };
-
   // ============================================================================
   // 1. PUBLIC SHARE PORTAL RENDERING
   // ============================================================================
@@ -814,21 +809,40 @@ export default function App() {
           url.searchParams.delete('share');
           window.history.pushState({}, '', url.toString());
           setPublicShareToken(null);
-          loadWorkspaceData();
+          if (firebaseUser) {
+            loadWorkspaceData();
+          }
         }}
       />
     );
   }
 
   // ============================================================================
-  // 2. FIREBASE GOOGLE SIGN-IN SCREEN (WHEN USER SIGNS OUT)
+  // 2. STRICT FIREBASE GOOGLE LOGIN LANDING PAGE GATE
+  //    (No user can access the platform without signing in with Google)
   // ============================================================================
 
-  if (signedOutGate) {
+  if (authLoading) {
+    return (
+      <div className="min-h-screen bg-[#141311] text-[#F2EFE9] flex items-center justify-center p-6">
+        <div className="p-6 bg-[#1C1A17] border border-[#2C2824] text-center space-y-2 max-w-sm w-full">
+          <div className="text-sm font-bold text-[#F2EFE9]">UnlimCloud Encrypted Vault</div>
+          <div className="text-xs text-[#9E978E]">Verifying your secure cloud session...</div>
+        </div>
+      </div>
+    );
+  }
+
+  if (!firebaseUser) {
     return (
       <div className="min-h-screen bg-[#141311] text-[#F2EFE9] flex flex-col justify-between p-4 sm:p-6">
-        <header className="max-w-7xl w-full mx-auto flex items-center justify-between py-2">
-          <div className="text-lg font-bold tracking-tight text-[#F2EFE9]">UnlimCloud</div>
+        <header className="max-w-7xl w-full mx-auto flex items-center justify-between py-2 border-b border-[#2C2824]">
+          <div className="flex items-center gap-2.5">
+            <div className="w-8 h-8 bg-[#1C1A17] border border-[#2C2824] flex items-center justify-center">
+              <Cloud className="w-4 h-4 text-[#D97757]" />
+            </div>
+            <span className="text-lg font-bold tracking-tight text-[#F2EFE9]">UnlimCloud</span>
+          </div>
           <div className="text-xs text-[#9E978E]">25 GB Free Encrypted Cloud Storage</div>
         </header>
 
@@ -843,48 +857,62 @@ export default function App() {
                 Sign in to UnlimCloud
               </h1>
               <p className="text-xs sm:text-sm text-[#9E978E] leading-relaxed">
-                Access your private encrypted cloud vault with{' '}
-                <strong className="text-[#F2EFE9]">25 GB Free storage</strong>, rich file
-                previews, and password-protected direct download links.
+                Sign in with your Google account to unlock your private{' '}
+                <strong className="text-[#F2EFE9]">25 GB Free encrypted cloud drive</strong>.
+                Authentication is required to upload, preview, or manage files.
               </p>
             </div>
 
-            <div className="space-y-3 pt-2">
+            <div className="p-4 bg-[#141311] border border-[#2C2824] space-y-2 text-xs text-[#9E978E]">
+              <div className="flex items-center justify-between">
+                <span>Starter Storage Included</span>
+                <strong className="text-[#2E9E6B]">25 GB Free Forever</strong>
+              </div>
+              <div className="flex items-center justify-between">
+                <span>Pro &amp; Ultra Plans</span>
+                <strong className="text-[#F2EFE9]">50 GB (500 T) · 1 TB (1024 T)</strong>
+              </div>
+              <div className="flex items-center justify-between">
+                <span>Account Privacy</span>
+                <strong className="text-[#F2EFE9]">100% Isolated Per-User Vault</strong>
+              </div>
+            </div>
+
+            <div className="space-y-3 pt-1">
               <button
-                onClick={handleGoogleSignIn}
+                onClick={() => {
+                  handleGoogleSignIn().catch(() => null);
+                }}
                 disabled={signingInGoogle}
                 className="w-full min-h-[48px] px-5 py-3 text-xs sm:text-sm font-bold bg-[#D97757] text-[#141311] hover:bg-[#E08568] flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
               >
                 <LogIn className="w-4 h-4" />
-                {signingInGoogle ? 'Signing in with Google...' : 'Continue with Google'}
-              </button>
-
-              <button
-                onClick={() => setSignedOutGate(false)}
-                className="w-full min-h-[44px] px-4 py-2.5 text-xs font-semibold bg-[#24211D] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] cursor-pointer"
-              >
-                Continue with Demo Vault
+                {signingInGoogle ? 'Signing in with Google...' : 'Sign in with Google'}
               </button>
             </div>
 
-            {authGateError && <p className="text-xs text-[#D94848]">{authGateError}</p>}
+            {authGateError && (
+              <div className="p-3 bg-[#141311] border border-[#D94848] text-xs text-[#D94848]">
+                {authGateError}
+              </div>
+            )}
           </div>
         </main>
 
         <footer className="text-center text-xs text-[#9E978E] py-2">
-          UnlimCloud — Private Multi-Tenant Encrypted Cloud Storage
+          UnlimCloud — Private Encrypted Cloud Storage · Login Required
         </footer>
       </div>
     );
   }
 
   // ============================================================================
-  // 3. COMPUTED WORKSPACE DATA
+  // 3. COMPUTED WORKSPACE DATA (STRICT ADMIN EMAIL CHECK)
   // ============================================================================
 
   const isAdminUser =
-    currentUser?.email?.toLowerCase() === 'titumamma2425@gmail.com' ||
-    firebaseUser?.email?.toLowerCase() === 'titumamma2425@gmail.com';
+    Boolean(firebaseUser) &&
+    firebaseUser.email?.toLowerCase() === 'titumamma2425@gmail.com';
 
   const activeFolder = folders.find((f) => f.id === currentFolderId) || null;
   const visibleSubfolders = folders.filter((f) => f.parentId === currentFolderId);
@@ -1697,7 +1725,8 @@ export default function App() {
       {inspectedFile && (
         <FileDetailDrawer
           file={inspectedFile}
-          sessionToken={sessionToken}
+          firebaseUid={firebaseUser?.uid}
+          firebaseEmail={firebaseUser?.email || ''}
           onClose={() => setInspectedFile(null)}
           onDownload={handleDownloadFile}
           onOpenShareModal={(f) => setShareModalFile(f)}
@@ -1733,12 +1762,10 @@ export default function App() {
       {showAuthModal && currentUser && (
         <AuthModal
           currentUser={currentUser}
-          users={users}
-          isFirebaseAuthenticated={Boolean(firebaseUser)}
+          isAdmin={isAdminUser}
           onClose={() => setShowAuthModal(false)}
           onGoogleSignIn={handleGoogleSignIn}
           onSignOut={handleSignOut}
-          onSwitchUser={handleSwitchUser}
         />
       )}
     </div>
