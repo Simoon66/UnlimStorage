@@ -659,9 +659,9 @@ export const FileDetailDrawer: React.FC<FileDetailDrawerProps> = ({
     firebaseUid || ''
   )}&email=${encodeURIComponent(firebaseEmail || '')}&name=${encodeURIComponent(file.name)}`;
 
-  const inlineUrl = isVideo
+  const inlineUrl: string = isVideo
     ? localBlobUrl || serverInlineUrl
-    : localBlobUrl || file.previewDataUrl || serverInlineUrl;
+    : localBlobUrl || serverInlineUrl || file.previewDataUrl || '';
 
   const handleVideoFallback = () => {
     if (isMkv && videoContainerFallback === 'webm') {

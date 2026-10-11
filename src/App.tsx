@@ -21,7 +21,6 @@ import {
   CheckCircle2,
   AlertCircle,
   Cloud,
-  Gauge,
   Settings,
   Coins,
   Lock,
@@ -49,7 +48,6 @@ import {
   FileRecord,
   ShareLink,
   TransferJob,
-  AuditLog,
   BandwidthSettings,
   TelegramConfigState,
   RealtimeNotification,
@@ -101,7 +99,6 @@ import {
 import {
   SharedLinksView,
   StoragePricingView,
-  ActivityAndSpeedView,
   TelegramStorageView,
 } from './components/Views';
 import { PWAInstallButton } from './components/PWAInstallButton';
@@ -118,7 +115,6 @@ type ActiveView =
   | 'trash'
   | 'shares'
   | 'pricing'
-  | 'activity'
   | 'telegram_settings';
 
 function renderFileIcon(file: FileRecord) {
@@ -293,7 +289,6 @@ export default function App() {
   const [files, setFiles] = useState<FileRecord[]>([]);
   const [shares, setShares] = useState<ShareLink[]>([]);
   const [transfers, setTransfers] = useState<TransferJob[]>([]);
-  const [logs, setLogs] = useState<AuditLog[]>([]);
   const [bandwidthSettings, setBandwidthSettings] = useState<BandwidthSettings>({
     globalThrottleKbps: null,
     defaultShareThrottleKbps: 1024,
@@ -333,6 +328,8 @@ export default function App() {
   const [newFolderName, setNewFolderName] = useState('');
   const [newFolderPin, setNewFolderPin] = useState('');
   const [isDraggingOver, setIsDraggingOver] = useState(false);
+  const [showMobilePlusMenu, setShowMobilePlusMenu] = useState(false);
+  const dragDepthRef = useRef<number>(0);
 
   // Explorer Grid / List layout toggle (persisted in localStorage)
   const [explorerLayout, setExplorerLayout] = useState<'grid' | 'list'>(() => {
@@ -443,7 +440,6 @@ export default function App() {
         setFiles([]);
         setShares([]);
         setTransfers([]);
-        setLogs([]);
       }
     });
     return () => unsubscribe();
@@ -527,12 +523,11 @@ export default function App() {
         // Proceed with local/server state if Firestore query fails
       }
 
-      const [meRes, filesRes, sharesRes, bwRes, logsRes, tgRes] = await Promise.all([
+      const [meRes, filesRes, sharesRes, bwRes, tgRes] = await Promise.all([
         apiFetch('/api/auth/me', { headers: authHeaders() }),
         apiFetch('/api/files', { headers: authHeaders() }),
         apiFetch('/api/shares', { headers: authHeaders() }),
         apiFetch('/api/bandwidth', { headers: authHeaders() }),
-        apiFetch('/api/logs', { headers: authHeaders() }),
         isAdminEmail
           ? apiFetch('/api/telegram/config', { headers: authHeaders() })
           : Promise.resolve(null),
@@ -581,10 +576,6 @@ export default function App() {
       if (bwRes.ok) {
         const bData = await bwRes.json();
         setBandwidthSettings(bData.settings);
-      }
-      if (logsRes.ok) {
-        const lData = await logsRes.json();
-        setLogs(lData.logs || []);
       }
       if (tgRes && tgRes.ok) {
         const tData = await tgRes.json();
@@ -722,7 +713,8 @@ export default function App() {
                 pushNotification(notification);
               }
             } else if (msg.event === 'file:updated' && msg.payload) {
-              const updatedFile = msg.payload as FileRecord;
+              const updatedFile = (msg.payload.file || msg.payload) as FileRecord;
+              if (!updatedFile || !updatedFile.id) return;
               setFiles((prev) => {
                 const idx = prev.findIndex((f) => f.id === updatedFile.id);
                 if (idx === -1) return prev;
@@ -815,7 +807,6 @@ export default function App() {
     setFiles([]);
     setShares([]);
     setTransfers([]);
-    setLogs([]);
     setActiveView('explorer');
   };
 
@@ -1785,19 +1776,8 @@ export default function App() {
     }
   };
 
-  const handleUpdateBandwidthSettings = async (patch: Partial<BandwidthSettings>) => {
-    const res = await apiFetch('/api/bandwidth/settings', {
-      method: 'PATCH',
-      headers: authHeaders({ 'Content-Type': 'application/json' }),
-      body: JSON.stringify(patch),
-    });
-    if (res.ok) {
-      const data = await res.json();
-      setBandwidthSettings(data.settings);
-    }
-  };
-
   const handleSaveTelegramConfig = async (payload: {
+    authMode?: 'mtproto' | 'bot';
     botToken?: string;
     chatId?: string;
     autoSyncUploads?: boolean;
@@ -1814,8 +1794,13 @@ export default function App() {
     }
     setTelegramConfig(data.config);
     await saveStorageNodeConfigToFirestore({
-      botToken: payload.clearCredentials ? '' : payload.botToken,
-      chatId: payload.clearCredentials ? '' : payload.chatId,
+      authMode: payload.authMode || (data.config?.mtprotoConnected ? 'mtproto' : 'bot'),
+      botToken: payload.clearCredentials
+        ? ''
+        : payload.authMode === 'mtproto'
+        ? ''
+        : payload.botToken,
+      chatId: payload.clearCredentials ? '' : payload.chatId || data.config?.chatId,
       autoSyncUploads: payload.autoSyncUploads,
       clearCredentials: payload.clearCredentials,
     }).catch(() => null);
@@ -1824,6 +1809,8 @@ export default function App() {
       timestamp: new Date().toISOString(),
       title: payload.clearCredentials
         ? 'Telegram Node Disconnected'
+        : payload.authMode === 'mtproto'
+        ? 'Main Account Private Channel Updated'
         : 'Telegram Storage Node Connected',
       message: payload.clearCredentials
         ? 'Reverted to local disk storage fallback.'
@@ -1848,10 +1835,12 @@ export default function App() {
       throw new Error(data.error || 'Failed to send Telegram OTP code');
     }
     await saveStorageNodeConfigToFirestore({
+      authMode: 'mtproto',
       apiId: String(payload.apiId),
       apiHash: payload.apiHash,
       phoneNumber: payload.phoneNumber,
       chatId: payload.chatId || 'me',
+      botToken: '',
     }).catch(() => null);
     return {
       phoneCodeHash: data.phoneCodeHash,
@@ -1874,21 +1863,26 @@ export default function App() {
       throw new Error(data.error || 'Failed to verify Telegram OTP code');
     }
     setTelegramConfig(data.config);
+    const verifiedSession = data.mtprotoSession || data.sessionString || '';
     await saveStorageNodeConfigToFirestore({
       authMode: 'mtproto',
-      mtprotoSession: data.mtprotoSession || '',
-      accountName: data.config?.accountName || data.config?.mtprotoUser || '',
-      accountUsername: data.config?.accountUsername || '',
-      chatId: data.config?.chatId || payload.chatId || 'me',
+      apiId: data.apiId || data.config?.apiId || '',
+      apiHash: data.apiHash || '',
+      phoneNumber: data.phoneNumber || data.config?.phoneNumber || '',
+      mtprotoSession: verifiedSession,
+      accountName: data.accountName || data.config?.accountName || data.config?.mtprotoUser || '',
+      accountUsername: data.accountUsername || data.config?.accountUsername || '',
+      chatId: data.chatId || data.config?.chatId || payload.chatId || 'me',
+      botToken: '',
       autoSyncUploads: true,
     }).catch(() => null);
     pushNotification({
       id: `tg_mtproto_${Date.now()}`,
       timestamp: new Date().toISOString(),
-      title: '2 GB Telegram MTProto Connected',
+      title: 'Main Telegram Account Connected',
       message: `Logged in as ${
-        data.config?.accountName || data.config?.mtprotoUser || 'User'
-      } — 2 GB single-file uploads active!`,
+        data.accountName || data.config?.accountName || data.config?.mtprotoUser || 'User'
+      } — files now upload via your main account in 100% original quality!`,
       type: 'completed',
     });
   };
@@ -2326,6 +2320,68 @@ export default function App() {
     currentFolderId,
   ]);
 
+  // Global Desktop Screen-Wide Drag-and-Drop File Upload Listener
+  useEffect(() => {
+    if (!firebaseUser || publicShareToken) return;
+
+    const hasExternalFiles = (e: DragEvent) => {
+      if (draggedFileId) return false;
+      const types = Array.from(e.dataTransfer?.types || []);
+      return types.includes('Files');
+    };
+
+    const handleWindowDragEnter = (e: DragEvent) => {
+      if (!hasExternalFiles(e)) return;
+      e.preventDefault();
+      dragDepthRef.current += 1;
+      setIsDraggingOver(true);
+    };
+
+    const handleWindowDragOver = (e: DragEvent) => {
+      if (!hasExternalFiles(e)) return;
+      e.preventDefault();
+      if (e.dataTransfer) {
+        e.dataTransfer.dropEffect = 'copy';
+      }
+      if (!isDraggingOver) {
+        setIsDraggingOver(true);
+      }
+    };
+
+    const handleWindowDragLeave = (e: DragEvent) => {
+      if (!hasExternalFiles(e)) return;
+      e.preventDefault();
+      dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+      if (dragDepthRef.current === 0) {
+        setIsDraggingOver(false);
+      }
+    };
+
+    const handleWindowDrop = (e: DragEvent) => {
+      if (!hasExternalFiles(e)) return;
+      e.preventDefault();
+      dragDepthRef.current = 0;
+      setIsDraggingOver(false);
+      if (e.dataTransfer?.files && e.dataTransfer.files.length > 0) {
+        if (activeView !== 'explorer') {
+          setActiveView('explorer');
+        }
+        handleUploadFiles(e.dataTransfer.files);
+      }
+    };
+
+    window.addEventListener('dragenter', handleWindowDragEnter);
+    window.addEventListener('dragover', handleWindowDragOver);
+    window.addEventListener('dragleave', handleWindowDragLeave);
+    window.addEventListener('drop', handleWindowDrop);
+    return () => {
+      window.removeEventListener('dragenter', handleWindowDragEnter);
+      window.removeEventListener('dragover', handleWindowDragOver);
+      window.removeEventListener('dragleave', handleWindowDragLeave);
+      window.removeEventListener('drop', handleWindowDrop);
+    };
+  });
+
   // ============================================================================
   // 1. PUBLIC SHARE PORTAL RENDERING
   // ============================================================================
@@ -2716,20 +2772,6 @@ export default function App() {
             }`}
           >
             Plans & Tokens ({tokenBalance.toLocaleString()} T)
-          </a>
-          <a
-            href="#activity"
-            onClick={(e) => {
-              e.preventDefault();
-              setActiveView('activity');
-            }}
-            className={`transition-colors whitespace-nowrap shrink-0 py-1 ${
-              activeView === 'activity'
-                ? 'text-[#F2EFE9] border-b-2 border-[#D97757] font-semibold'
-                : 'hover:text-[#F2EFE9]'
-            }`}
-          >
-            Activity & Speed
           </a>
           {isAdminUser && (
             <a
@@ -4272,22 +4314,12 @@ export default function App() {
         )}
 
         {/* ==================================================================
-            VIEW 4: ACTIVITY & SPEED
-        ================================================================== */}
-        {activeView === 'activity' && (
-          <ActivityAndSpeedView
-            settings={bandwidthSettings}
-            logs={logs}
-            onUpdateSettings={handleUpdateBandwidthSettings}
-          />
-        )}
-
-        {/* ==================================================================
-            VIEW 5: ADMIN-ONLY STORAGE NODE SETUP
+            VIEW 4: ADMIN-ONLY STORAGE NODE SETUP
         ================================================================== */}
         {activeView === 'telegram_settings' && isAdminUser && (
           <TelegramStorageView
             config={telegramConfig}
+            authHeaders={authHeaders}
             onSaveConfig={handleSaveTelegramConfig}
             onSendMtprotoCode={handleSendMtprotoCode}
             onVerifyMtprotoCode={handleVerifyMtprotoCode}
@@ -4297,11 +4329,163 @@ export default function App() {
       </main>
 
       {/* ====================================================================
+          FULL-SCREEN DESKTOP DRAG & DROP UPLOAD OVERLAY
+      ==================================================================== */}
+      {isDraggingOver && !draggedFileId && (
+        <div
+          onDragOver={(e) => e.preventDefault()}
+          onDrop={(e) => {
+            e.preventDefault();
+            dragDepthRef.current = 0;
+            setIsDraggingOver(false);
+            if (e.dataTransfer?.files && e.dataTransfer.files.length > 0) {
+              if (activeView !== 'explorer') {
+                setActiveView('explorer');
+              }
+              handleUploadFiles(e.dataTransfer.files);
+            }
+          }}
+          className="fixed inset-0 z-50 bg-[#141311]/90 backdrop-blur-sm border-4 border-dashed border-[#D97757] m-3 flex items-center justify-center p-6 pointer-events-auto"
+        >
+          <div className="max-w-md w-full bg-[#1C1A17] border border-[#D97757] p-8 text-center space-y-4 shadow-2xl pointer-events-none">
+            <div className="w-16 h-16 mx-auto bg-[#24211D] border border-[#D97757] flex items-center justify-center">
+              <Upload className="w-8 h-8 text-[#D97757]" />
+            </div>
+            <div className="space-y-1.5">
+              <div className="text-lg font-bold text-[#F2EFE9]">
+                Drop Files Anywhere to Upload
+              </div>
+              <p className="text-xs text-[#9E978E]">
+                Uploading to{' '}
+                <strong className="text-[#F2EFE9]">
+                  {activeFolder ? activeFolder.name : 'My Cloud Drive (Root)'}
+                </strong>{' '}
+                in <strong className="text-[#D97757]">100% Original Lossless Quality</strong>
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ====================================================================
+          GOOGLE DRIVE-STYLE MOBILE FLOATING PLUS (+) UPLOAD BUTTON & ACTION SHEET
+      ==================================================================== */}
+      {showMobilePlusMenu && (
+        <div
+          onClick={() => setShowMobilePlusMenu(false)}
+          className="fixed inset-0 z-40 bg-black/60 md:hidden flex items-end justify-end p-4 pb-36"
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-xs bg-[#1C1A17] border border-[#D97757] shadow-2xl divide-y divide-[#2C2824]"
+          >
+            <div className="px-4 py-2.5 bg-[#24211D] flex items-center justify-between">
+              <span className="text-xs font-bold text-[#F2EFE9] uppercase tracking-wider">
+                Add to {activeFolder ? activeFolder.name : 'Cloud Drive'}
+              </span>
+              <button
+                type="button"
+                onClick={() => setShowMobilePlusMenu(false)}
+                className="p-1 text-[#9E978E] hover:text-[#F2EFE9] cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                setShowMobilePlusMenu(false);
+                if (activeView !== 'explorer') setActiveView('explorer');
+                fileInputRef.current?.click();
+              }}
+              className="w-full px-4 py-3.5 text-left flex items-center gap-3 hover:bg-[#24211D] cursor-pointer"
+            >
+              <div className="w-9 h-9 bg-[#D97757] text-[#141311] flex items-center justify-center shrink-0">
+                <Upload className="w-4 h-4" />
+              </div>
+              <div>
+                <div className="text-xs font-bold text-[#F2EFE9]">
+                  Upload Files / Videos / Photos
+                </div>
+                <div className="text-[11px] text-[#9E978E]">
+                  100% Original Quality via Main Account
+                </div>
+              </div>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setShowMobilePlusMenu(false);
+                if (activeView !== 'explorer') setActiveView('explorer');
+                setCreatingFolder(true);
+              }}
+              className="w-full px-4 py-3.5 text-left flex items-center gap-3 hover:bg-[#24211D] cursor-pointer"
+            >
+              <div className="w-9 h-9 bg-[#24211D] border border-[#2C2824] text-[#D97757] flex items-center justify-center shrink-0">
+                <FolderPlus className="w-4 h-4" />
+              </div>
+              <div>
+                <div className="text-xs font-bold text-[#F2EFE9]">Create New Folder</div>
+                <div className="text-[11px] text-[#9E978E]">
+                  Organize files with optional PIN lock
+                </div>
+              </div>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setShowMobilePlusMenu(false);
+                if (activeView !== 'explorer') setActiveView('explorer');
+                setShowRemoteModal(true);
+              }}
+              className="w-full px-4 py-3.5 text-left flex items-center gap-3 hover:bg-[#24211D] cursor-pointer"
+            >
+              <div className="w-9 h-9 bg-[#24211D] border border-[#2C2824] text-[#D97757] flex items-center justify-center shrink-0">
+                <Globe className="w-4 h-4" />
+              </div>
+              <div>
+                <div className="text-xs font-bold text-[#F2EFE9]">Upload from Web Link</div>
+                <div className="text-[11px] text-[#9E978E]">
+                  Fetch direct URL to your cloud vault
+                </div>
+              </div>
+            </button>
+          </div>
+        </div>
+      )}
+
+      <div className="fixed right-4 bottom-20 z-40 md:hidden flex items-center shadow-2xl">
+        <button
+          type="button"
+          onClick={() => {
+            if (activeView !== 'explorer') setActiveView('explorer');
+            fileInputRef.current?.click();
+          }}
+          disabled={uploadingFiles}
+          title="Tap to Upload Files in Original Quality"
+          aria-label="Upload Files"
+          className="h-14 px-4 bg-[#D97757] text-[#141311] hover:bg-[#E08568] active:scale-95 transition-all flex items-center justify-center gap-2 font-bold text-xs border-r border-[#141311]/20 cursor-pointer"
+        >
+          <Plus className="w-6 h-6 stroke-[2.5]" />
+          <span>Upload</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => setShowMobilePlusMenu((prev) => !prev)}
+          title="More Upload & Folder Options"
+          aria-label="More Upload Options"
+          className="w-11 h-14 bg-[#24211D] border border-[#D97757] text-[#D97757] hover:bg-[#D97757] hover:text-[#141311] active:scale-95 transition-all flex items-center justify-center cursor-pointer"
+        >
+          <FolderPlus className="w-4 h-4" />
+        </button>
+      </div>
+
+      {/* ====================================================================
           MOBILE FIXED BOTTOM TAB BAR
       ==================================================================== */}
       <nav
         className={`fixed bottom-0 left-0 right-0 z-40 md:hidden grid ${
-          isAdminUser ? 'grid-cols-6' : 'grid-cols-5'
+          isAdminUser ? 'grid-cols-5' : 'grid-cols-4'
         } bg-[#1C1A17] border-t border-[#2C2824]`}
       >
         <button
@@ -4345,16 +4529,6 @@ export default function App() {
         >
           <Coins className="w-5 h-5" />
           <span>Plans</span>
-        </button>
-
-        <button
-          onClick={() => setActiveView('activity')}
-          className={`min-h-[56px] flex flex-col items-center justify-center gap-1 text-[11px] font-medium cursor-pointer ${
-            activeView === 'activity' ? 'text-[#D97757] font-bold' : 'text-[#9E978E]'
-          }`}
-        >
-          <Gauge className="w-5 h-5" />
-          <span>Speed</span>
         </button>
 
         {isAdminUser && (

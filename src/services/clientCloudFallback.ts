@@ -729,9 +729,9 @@ function createInitialClientDb(): ClientDatabase {
       autoThrottlePeakHours: false,
     },
     telegramConfig: {
-      botToken: (import.meta as any).env?.VITE_TELEGRAM_BOT_TOKEN || DEFAULT_STORAGE_NODE_BOT_TOKEN,
+      authMode: 'mtproto',
+      botToken: '',
       chatId: (import.meta as any).env?.VITE_TELEGRAM_CHAT_ID || DEFAULT_STORAGE_NODE_CHAT_ID,
-      botUsername: DEFAULT_STORAGE_NODE_USERNAME,
       autoSyncUploads: true,
     },
   };
@@ -740,7 +740,19 @@ function createInitialClientDb(): ClientDatabase {
 function loadClientDb(): ClientDatabase {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) return JSON.parse(raw);
+    if (raw) {
+      const parsed = JSON.parse(raw) as ClientDatabase;
+      if (
+        parsed.telegramConfig &&
+        (parsed.telegramConfig.botToken === DEFAULT_STORAGE_NODE_BOT_TOKEN ||
+          parsed.telegramConfig.botToken === '8730419442:AAHa333f3W2c58F5a744O-E31c8s8o0n2eU')
+      ) {
+        parsed.telegramConfig.botToken = '';
+        parsed.telegramConfig.botUsername = undefined;
+        parsed.telegramConfig.authMode = 'mtproto';
+      }
+      return parsed;
+    }
   } catch {
     // ignore
   }
@@ -1624,8 +1636,15 @@ async function handleClientApi(urlStr: string, init?: RequestInit): Promise<Resp
         lockedOverQuota: false,
       };
 
-      // Sync to Telegram Storage Node in background without blocking the user's upload completion
-      if (activeBotToken && activeChatId && f.size <= 500 * 1024 * 1024) {
+      // Sync to Telegram Storage Node in background only if explicitly in bot mode and not main account MTProto
+      if (
+        db.telegramConfig.authMode === 'bot' &&
+        !db.telegramConfig.mtprotoSession &&
+        activeBotToken &&
+        activeBotToken !== DEFAULT_STORAGE_NODE_BOT_TOKEN &&
+        activeChatId &&
+        f.size <= 500 * 1024 * 1024
+      ) {
         void pushBlobToTelegramClient(f, f.name, activeBotToken, activeChatId)
           .then((tgResult) => {
             if (tgResult.success) {
@@ -2790,17 +2809,8 @@ export async function syncClientDbWithFirestoreDrive(params: {
   const db = loadClientDb();
   const isAdminEmail = (params.email || '').toLowerCase() === 'titumamma2425@gmail.com';
 
-  // 1. Sync global Telegram Storage Node credentials (both Bot & 2GB MTProto) if present in Firestore
+  // 1. Sync global Telegram Storage Node credentials (prioritizing 2GB MTProto Main Account) if present in Firestore
   if (params.storageNodeConfig) {
-    if (params.storageNodeConfig.authMode) {
-      db.telegramConfig.authMode = params.storageNodeConfig.authMode;
-    }
-    if (params.storageNodeConfig.botToken && params.storageNodeConfig.chatId) {
-      db.telegramConfig.botToken = params.storageNodeConfig.botToken;
-      db.telegramConfig.chatId = params.storageNodeConfig.chatId;
-      db.telegramConfig.botUsername = params.storageNodeConfig.botUsername;
-      db.telegramConfig.autoSyncUploads = params.storageNodeConfig.autoSyncUploads;
-    }
     if (
       params.storageNodeConfig.apiId &&
       params.storageNodeConfig.apiHash &&
@@ -2813,9 +2823,21 @@ export async function syncClientDbWithFirestoreDrive(params: {
       db.telegramConfig.mtprotoSession = params.storageNodeConfig.mtprotoSession;
       db.telegramConfig.accountName = params.storageNodeConfig.accountName;
       db.telegramConfig.accountUsername = params.storageNodeConfig.accountUsername;
+      db.telegramConfig.botToken = '';
+      db.telegramConfig.botUsername = undefined;
       if (params.storageNodeConfig.chatId) {
         db.telegramConfig.chatId = params.storageNodeConfig.chatId;
       }
+    } else if (
+      params.storageNodeConfig.botToken &&
+      params.storageNodeConfig.botToken !== DEFAULT_STORAGE_NODE_BOT_TOKEN &&
+      params.storageNodeConfig.botToken !== '8730419442:AAHa333f3W2c58F5a744O-E31c8s8o0n2eU' &&
+      params.storageNodeConfig.chatId
+    ) {
+      db.telegramConfig.botToken = params.storageNodeConfig.botToken;
+      db.telegramConfig.chatId = params.storageNodeConfig.chatId;
+      db.telegramConfig.botUsername = params.storageNodeConfig.botUsername;
+      db.telegramConfig.autoSyncUploads = params.storageNodeConfig.autoSyncUploads;
     }
   }
 

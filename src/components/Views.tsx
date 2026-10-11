@@ -6,7 +6,6 @@ import {
   Check,
   ExternalLink,
   Trash2,
-  Gauge,
   Download,
   ShieldCheck,
   Send,
@@ -23,13 +22,12 @@ import {
 } from 'lucide-react';
 import {
   ShareLink,
-  BandwidthSettings,
-  AuditLog,
   TelegramConfigState,
   User,
   StoragePlanId,
 } from '../types';
 import { formatBytes, formatShortDate } from '../utils/format';
+import { apiFetch } from '../services/clientCloudFallback';
 
 // ============================================================================
 // 1. SHARED LINKS VIEW
@@ -647,169 +645,14 @@ export const StoragePricingView: React.FC<StoragePricingViewProps> = ({
 };
 
 // ============================================================================
-// 3. SIMPLE ACTIVITY & DOWNLOAD SPEED VIEW (White-Label, No Telegram Mentions)
-// ============================================================================
-
-interface ActivityAndSpeedViewProps {
-  settings: BandwidthSettings;
-  logs: AuditLog[];
-  onUpdateSettings: (patch: Partial<BandwidthSettings>) => Promise<void>;
-}
-
-const SPEED_OPTIONS: { label: string; desc: string; value: number | null }[] = [
-  { label: 'Unlimited Speed', desc: 'Maximum download speed', value: null },
-  { label: 'Fast (2 MB/s)', desc: 'Great for large files', value: 2048 },
-  { label: 'Balanced (1 MB/s)', desc: 'Smooth everyday sharing', value: 1024 },
-  { label: 'Data Saver (512 KB/s)', desc: 'Saves bandwidth', value: 512 },
-];
-
-function friendlyActionLabel(action: string): string {
-  switch (action) {
-    case 'FILE_UPLOAD':
-      return 'Uploaded file';
-    case 'REMOTE_UPLOAD':
-      return 'Uploaded from web link';
-    case 'FILE_DOWNLOAD':
-      return 'Downloaded file';
-    case 'FILE_DELETE':
-      return 'Deleted file';
-    case 'SHARE_CREATED':
-      return 'Created share link';
-    case 'SHARE_UNLOCKED':
-      return 'Unlocked protected link';
-    case 'SHARE_DOWNLOAD':
-      return 'Shared link downloaded';
-    case 'SHARE_AUTH_FAILED':
-      return 'Wrong password entered';
-    case 'PROMO_REDEEMED':
-      return 'Redeemed promo code';
-    case 'TOKENS_PURCHASED':
-      return 'Purchased storage tokens';
-    case 'PLAN_SUBSCRIBED':
-      return 'Updated storage plan';
-    default:
-      return 'Account activity';
-  }
-}
-
-export const ActivityAndSpeedView: React.FC<ActivityAndSpeedViewProps> = ({
-  settings,
-  logs,
-  onUpdateSettings,
-}) => {
-  return (
-    <div className="space-y-8">
-      <div className="space-y-4">
-        <div className="border-b border-[#2C2824] pb-3">
-          <h1 className="text-lg sm:text-xl font-bold text-[#F2EFE9] flex items-center gap-2">
-            <Gauge className="w-5 h-5 text-[#D97757]" />
-            Download Speed Control
-          </h1>
-          <p className="text-xs text-[#9E978E] mt-1">
-            Tap to choose how fast files download from your drive and shared links.
-          </p>
-        </div>
-
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-          {SPEED_OPTIONS.map((opt) => {
-            const active = settings.globalThrottleKbps === opt.value;
-            return (
-              <button
-                key={opt.label}
-                onClick={() => onUpdateSettings({ globalThrottleKbps: opt.value })}
-                className={`min-h-[68px] p-4 text-left border transition-colors cursor-pointer ${
-                  active
-                    ? 'bg-[#24211D] border-[#D97757]'
-                    : 'bg-[#1C1A17] border-[#2C2824] hover:border-[#D97757]'
-                }`}
-              >
-                <div className="text-sm font-bold text-[#F2EFE9] flex items-center justify-between">
-                  <span>{opt.label}</span>
-                  {active && <Check className="w-4 h-4 text-[#D97757]" />}
-                </div>
-                <div className="text-xs text-[#9E978E] mt-1">{opt.desc}</div>
-              </button>
-            );
-          })}
-        </div>
-      </div>
-
-      <div className="space-y-4">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-[#2C2824] pb-3">
-          <div>
-            <h2 className="text-lg font-bold text-[#F2EFE9] flex items-center gap-2">
-              <Clock className="w-5 h-5 text-[#D97757]" />
-              Recent Activity
-            </h2>
-            <p className="text-xs text-[#9E978E] mt-0.5">
-              A private timeline of your uploads, downloads, shared links, and plan updates.
-            </p>
-          </div>
-
-          <button
-            type="button"
-            onClick={() => {
-              const header = 'id,timestamp,userName,action,targetName,bytesTransferred\n';
-              const rows = logs
-                .map(
-                  (l) =>
-                    `"${l.id}","${l.timestamp}","${l.userName}","${l.action}","${l.targetName.replace(
-                      /"/g,
-                      '""'
-                    )}",${l.bytesTransferred}`
-                )
-                .join('\n');
-              const blob = new Blob([header + rows], { type: 'text/csv;charset=utf-8' });
-              const blobUrl = URL.createObjectURL(blob);
-              const a = document.createElement('a');
-              a.href = blobUrl;
-              a.download = 'unlimstorage-activity.csv';
-              document.body.appendChild(a);
-              a.click();
-              document.body.removeChild(a);
-              setTimeout(() => URL.revokeObjectURL(blobUrl), 3000);
-            }}
-            className="min-h-[44px] inline-flex items-center justify-center gap-1.5 px-4 py-2.5 text-xs font-semibold bg-[#1C1A17] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] cursor-pointer"
-          >
-            <Download className="w-4 h-4 text-[#D97757]" />
-            Download CSV
-          </button>
-        </div>
-
-        <div className="bg-[#1C1A17] border border-[#2C2824] divide-y divide-[#2C2824]">
-          {logs.slice(0, 25).map((log) => (
-            <div
-              key={log.id}
-              className="p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-1.5 hover:bg-[#24211D]"
-            >
-              <div className="space-y-0.5 min-w-0">
-                <div className="text-sm font-semibold text-[#F2EFE9] break-words">
-                  {friendlyActionLabel(log.action)} —{' '}
-                  <span className="text-[#D97757]">{log.targetName}</span>
-                </div>
-                <div className="text-xs text-[#9E978E]">
-                  By {log.userName}
-                  {log.bytesTransferred > 0 ? ` · ${formatBytes(log.bytesTransferred)}` : ''}
-                </div>
-              </div>
-              <div className="text-xs text-[#9E978E] tabular-nums shrink-0">
-                {formatShortDate(log.timestamp)}
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-    </div>
-  );
-};
-
-// ============================================================================
-// 4. ADMIN-ONLY STORAGE NODE CONFIGURATION (Hidden from Regular Users)
+// 3. ADMIN-ONLY STORAGE NODE CONFIGURATION (Main Account Private Channel Vault)
 // ============================================================================
 
 interface TelegramStorageViewProps {
   config: TelegramConfigState;
+  authHeaders?: (extra?: Record<string, string>) => Record<string, string>;
   onSaveConfig: (payload: {
+    authMode?: 'mtproto' | 'bot';
     botToken?: string;
     chatId?: string;
     autoSyncUploads?: boolean;
@@ -831,14 +674,13 @@ interface TelegramStorageViewProps {
 
 export const TelegramStorageView: React.FC<TelegramStorageViewProps> = ({
   config,
+  authHeaders,
   onSaveConfig,
   onSendMtprotoCode,
   onVerifyMtprotoCode,
   onDisconnectMtproto,
 }) => {
-  const [activeTab, setActiveTab] = useState<'mtproto' | 'bot'>(
-    config.authMode === 'bot' && !config.mtprotoConnected ? 'bot' : 'mtproto'
-  );
+  const [activeTab, setActiveTab] = useState<'mtproto' | 'bot'>('mtproto');
 
   // Bot API state
   const [botToken, setBotToken] = useState('');
@@ -851,19 +693,23 @@ export const TelegramStorageView: React.FC<TelegramStorageViewProps> = ({
   const [apiIdInput, setApiIdInput] = useState(config.apiId ? String(config.apiId) : '');
   const [apiHashInput, setApiHashInput] = useState('');
   const [phoneInput, setPhoneInput] = useState(config.phoneNumber || '');
-  const [mtprotoChatId, setMtprotoChatId] = useState(config.chatId || 'me');
+  const [mtprotoChatId, setMtprotoChatId] = useState(config.chatId || '');
   const [otpStep, setOtpStep] = useState<'request' | 'verify'>('request');
   const [otpCode, setOtpCode] = useState('');
   const [twoFaPassword, setTwoFaPassword] = useState('');
   const [mtprotoBusy, setMtprotoBusy] = useState(false);
   const [mtprotoError, setMtprotoError] = useState<string | null>(null);
   const [mtprotoSuccess, setMtprotoSuccess] = useState<string | null>(null);
+  const [availableChannels, setAvailableChannels] = useState<
+    Array<{ id: string; title: string; isChannel: boolean }>
+  >([]);
+  const [loadingChannels, setLoadingChannels] = useState(false);
 
   React.useEffect(() => {
     if (config.chatId && !chatId) {
       setChatId(config.chatId);
     }
-    if (config.chatId && mtprotoChatId === 'me') {
+    if (config.chatId && !mtprotoChatId) {
       setMtprotoChatId(config.chatId);
     }
     if (config.apiId && !apiIdInput) {
@@ -874,6 +720,55 @@ export const TelegramStorageView: React.FC<TelegramStorageViewProps> = ({
     }
   }, [config.chatId, config.apiId, config.phoneNumber, chatId, mtprotoChatId, apiIdInput, phoneInput]);
 
+  const fetchAccountChannels = React.useCallback(async () => {
+    if (!config.mtprotoConnected) return;
+    setLoadingChannels(true);
+    try {
+      const headers = authHeaders ? authHeaders() : {};
+      const res = await apiFetch('/api/telegram/mtproto/channels', { headers });
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data.channels)) {
+          setAvailableChannels(data.channels);
+        }
+      }
+    } catch {
+      // ignore
+    } finally {
+      setLoadingChannels(false);
+    }
+  }, [config.mtprotoConnected, authHeaders]);
+
+  React.useEffect(() => {
+    if (config.mtprotoConnected) {
+      fetchAccountChannels();
+    }
+  }, [config.mtprotoConnected, fetchAccountChannels]);
+
+  const handleUpdateMainAccountChannel = async (targetChannelId: string) => {
+    if (!targetChannelId.trim()) return;
+    setMtprotoBusy(true);
+    setMtprotoError(null);
+    setMtprotoSuccess(null);
+    try {
+      await onSaveConfig({
+        authMode: 'mtproto',
+        chatId: targetChannelId.trim(),
+        autoSyncUploads: true,
+      });
+      setMtprotoChatId(targetChannelId.trim());
+      setMtprotoSuccess(
+        `Target private channel updated to ${targetChannelId.trim()}! All uploads now store directly via your Main Account in 100% original quality.`
+      );
+    } catch (err: unknown) {
+      setMtprotoError(
+        err instanceof Error ? err.message : 'Could not update target private channel'
+      );
+    } finally {
+      setMtprotoBusy(false);
+    }
+  };
+
   const handleConnectBot = async (e: React.FormEvent) => {
     e.preventDefault();
     setSaving(true);
@@ -881,6 +776,7 @@ export const TelegramStorageView: React.FC<TelegramStorageViewProps> = ({
     setSuccessMsg(null);
     try {
       await onSaveConfig({
+        authMode: 'bot',
         botToken: botToken.trim() || undefined,
         chatId: chatId.trim(),
         autoSyncUploads: true,
@@ -952,8 +848,9 @@ export const TelegramStorageView: React.FC<TelegramStorageViewProps> = ({
       setTwoFaPassword('');
       setOtpStep('request');
       setMtprotoSuccess(
-        'Telegram User Account connected via MTProto! Direct uploads and streams up to 2 GB per file are now active.'
+        'Main Telegram Account connected via MTProto! All files now upload directly through your main account into your Private Channel in 100% original quality (up to 2 GB per file).'
       );
+      fetchAccountChannels();
     } catch (err: unknown) {
       setMtprotoError(
         err instanceof Error ? err.message : 'Failed to verify Telegram OTP code'
@@ -985,15 +882,16 @@ export const TelegramStorageView: React.FC<TelegramStorageViewProps> = ({
     <div className="max-w-2xl space-y-6">
       <div className="border-b border-[#2C2824] pb-4">
         <div className="text-[11px] font-bold uppercase tracking-wider text-[#D97757]">
-          Administrator Only — Strictly Hidden from Public Users
+          Administrator Only — Main Account Private Channel Vault
         </div>
         <h1 className="text-lg sm:text-xl font-bold text-[#F2EFE9] mt-0.5">
-          Global Telegram Cloud Storage Vault (2 GB MTProto &amp; Bot Node)
+          Main Telegram Account Storage Vault (2 GB MTProto &amp; Original Quality)
         </h1>
         <p className="text-xs text-[#9E978E] mt-1">
-          Sign in with your Telegram User Account via MTProto to unlock single-file uploads up to{' '}
-          <strong className="text-[#F2EFE9]">2 GB</strong> without 20 MB bot limits, or use a
-          standard Bot Token. Regular users never see this panel.
+          Store all uploaded files directly through your{' '}
+          <strong className="text-[#F2EFE9]">Main Telegram Account</strong> into your{' '}
+          <strong className="text-[#F2EFE9]">Private Telegram Channel</strong> as uncompressed
+          documents (100% original video &amp; image quality, up to 2 GB per file, zero bot usage).
         </p>
       </div>
 
@@ -1002,31 +900,27 @@ export const TelegramStorageView: React.FC<TelegramStorageViewProps> = ({
         <div className="flex items-start sm:items-center gap-3">
           <ShieldCheck
             className={`w-5 h-5 shrink-0 mt-0.5 sm:mt-0 ${
-              config.mtprotoConnected || config.connected ? 'text-[#2E9E6B]' : 'text-[#D99B26]'
+              config.mtprotoConnected ? 'text-[#2E9E6B]' : 'text-[#D99B26]'
             }`}
           />
           <div>
             <div className="text-sm font-bold text-[#F2EFE9]">
               {config.mtprotoConnected
-                ? `2 GB MTProto User Vault Active (${
+                ? `Main Account Vault Active (${
                     config.accountName ||
                     config.accountUsername ||
                     config.mtprotoUser ||
                     config.phoneNumber ||
                     'Connected'
                   })`
-                : config.connected
-                ? `Bot Storage Node Active (@${config.botUsername || 'Connected'})`
-                : 'Local Vault Active — Connect Telegram Account for 2 GB Cross-Device Sync'}
+                : 'Main Account Not Connected Yet — Log In Below to Store via Main Account'}
             </div>
             <div className="text-xs text-[#9E978E] mt-0.5">
               {config.mtprotoConnected
-                ? `Direct un-split file uploads up to 2,000 MB (2 GB) to target chat: ${
+                ? `Uploading 100% uncompressed original files via your Main Account to Private Channel: ${
                     config.chatId || 'me (Saved Messages)'
                   }`
-                : config.connected
-                ? `Auto-splitting & syncing files in 19 MB chunks to Channel ${config.chatId}`
-                : 'Log in with your Telegram phone number + OTP below to enable 2 GB direct uploads.'}
+                : 'Bot uploads are disabled. Sign in with your Telegram API ID, Hash & Phone OTP below so your main account stores all files in your private channel.'}
             </div>
           </div>
         </div>
@@ -1038,18 +932,81 @@ export const TelegramStorageView: React.FC<TelegramStorageViewProps> = ({
             onClick={handleDisconnectMtprotoClick}
             className="min-h-[40px] px-4 py-2 text-xs font-semibold text-[#D94848] border border-[#2C2824] hover:border-[#D94848] bg-[#141311] shrink-0 cursor-pointer"
           >
-            Disconnect 2 GB Vault
-          </button>
-        ) : config.connected ? (
-          <button
-            type="button"
-            onClick={() => onSaveConfig({ clearCredentials: true })}
-            className="min-h-[40px] px-4 py-2 text-xs font-medium text-[#D94848] border border-[#2C2824] bg-[#141311] shrink-0 cursor-pointer"
-          >
-            Disconnect Bot
+            Disconnect Main Account
           </button>
         ) : null}
       </div>
+
+      {/* Quick Private Channel Selector when Main Account is Connected */}
+      {config.mtprotoConnected && (
+        <div className="p-5 bg-[#1C1A17] border border-[#D97757] space-y-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+            <div>
+              <div className="text-sm font-bold text-[#F2EFE9]">
+                Target Private Channel for Main Account Uploads
+              </div>
+              <div className="text-xs text-[#9E978E]">
+                Select one of your private channels or enter your Private Channel ID (
+                <code className="text-[#D97757]">-100...</code>) where your main account will upload
+                files.
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={fetchAccountChannels}
+              disabled={loadingChannels}
+              className="min-h-[36px] px-3 py-1.5 text-xs font-semibold bg-[#24211D] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center gap-1.5 shrink-0 cursor-pointer"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${loadingChannels ? 'animate-spin' : ''}`} />
+              <span>Refresh My Channels</span>
+            </button>
+          </div>
+
+          {availableChannels.length > 0 && (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              {availableChannels.map((ch) => {
+                const isSelected = (mtprotoChatId || config.chatId) === ch.id;
+                return (
+                  <button
+                    key={ch.id}
+                    type="button"
+                    onClick={() => handleUpdateMainAccountChannel(ch.id)}
+                    className={`p-3 text-left border transition-colors flex items-center justify-between gap-2 cursor-pointer ${
+                      isSelected
+                        ? 'bg-[#24211D] border-[#D97757] text-[#F2EFE9]'
+                        : 'bg-[#141311] border-[#2C2824] text-[#9E978E] hover:border-[#D97757] hover:text-[#F2EFE9]'
+                    }`}
+                  >
+                    <div className="min-w-0">
+                      <div className="text-xs font-bold text-[#F2EFE9] truncate">{ch.title}</div>
+                      <div className="text-[11px] font-mono text-[#9E978E] truncate">{ch.id}</div>
+                    </div>
+                    {isSelected && <Check className="w-4 h-4 text-[#D97757] shrink-0" />}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+
+          <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 pt-2 border-t border-[#2C2824]">
+            <input
+              type="text"
+              value={mtprotoChatId}
+              onChange={(e) => setMtprotoChatId(e.target.value)}
+              placeholder="Private Channel ID (e.g. -1002198471092)"
+              className="flex-1 min-h-[42px] bg-[#141311] border border-[#2C2824] px-3.5 py-2 text-xs font-mono text-[#F2EFE9] focus:outline-none focus:border-[#D97757]"
+            />
+            <button
+              type="button"
+              disabled={mtprotoBusy}
+              onClick={() => handleUpdateMainAccountChannel(mtprotoChatId)}
+              className="min-h-[42px] px-4 py-2 text-xs font-bold bg-[#D97757] text-[#141311] hover:bg-[#E08568] cursor-pointer shrink-0"
+            >
+              {mtprotoBusy ? 'Saving...' : 'Save Private Channel'}
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Mode Switcher Tabs */}
       <div className="grid grid-cols-2 border border-[#2C2824] bg-[#141311] p-1 gap-1">
@@ -1063,7 +1020,7 @@ export const TelegramStorageView: React.FC<TelegramStorageViewProps> = ({
           }`}
         >
           <Smartphone className="w-4 h-4 shrink-0" />
-          <span>Telegram Account (2 GB MTProto)</span>
+          <span>Main Account (2 GB Private Channel)</span>
         </button>
         <button
           type="button"
@@ -1075,7 +1032,7 @@ export const TelegramStorageView: React.FC<TelegramStorageViewProps> = ({
           }`}
         >
           <KeyRound className="w-4 h-4 shrink-0" />
-          <span>Bot Token (20 MB Chunked)</span>
+          <span>Optional Bot Token</span>
         </button>
       </div>
 

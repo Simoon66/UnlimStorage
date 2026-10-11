@@ -94,7 +94,8 @@ interface ServerMediaInfoResponse {
 }
 
 const QUALITY_LABELS: Record<string, { title: string; badge?: string }> = {
-  Auto: { title: 'Auto (Fast Stream)', badge: 'AUTO' },
+  Original: { title: 'Original (100% Lossless)', badge: 'ORIG' },
+  Auto: { title: 'Auto (Original Quality)', badge: 'AUTO' },
   '1080p': { title: '1080p Full HD', badge: 'FHD' },
   '720p': { title: '720p HD', badge: 'HD' },
   '480p': { title: '480p Standard' },
@@ -356,15 +357,16 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
   // On-screen HUD feedback for keyboard / skip / volume actions
   const [hudBadgeText, setHudBadgeText] = useState<string | null>(null);
 
-  // Multi-Quality stream selector — defaults to 'Auto' for instant zero-buffer playback
+  // Multi-Quality stream selector — defaults to 'Original' for 100% lossless zero-downscale playback
   const [availableQualities, setAvailableQualities] = useState<string[]>([
+    'Original',
     'Auto',
     '1080p',
     '720p',
     '480p',
     '360p',
   ]);
-  const [selectedQuality, setSelectedQuality] = useState<string>('Auto');
+  const [selectedQuality, setSelectedQuality] = useState<string>('Original');
   const [showQualityMenu, setShowQualityMenu] = useState(false);
 
   // Multi-Audio tracks (only shown in UI if > 1 track exists on the video)

@@ -1,6 +1,6 @@
 {
-  "summary":  "Comprehensive implementation plan covering video playback resume, file explorer Grid/List toggle, Trash bin with restore, pause/resume chunked uploads, batch ZIP downloads, PIN-locked private folders, public folder gallery sharing with direct multi-quality video streaming, and installable PWA support.",
-  "updatedAt":  "2026-10-11T19:16:23.350880105Z",
+  "summary":  "Implementation plan for removing the Activity & Speed page, routing all file storage exclusively through the user's main Telegram account into their private channel, preserving 100% original video and image quality, adding a Google Drive-style mobile Plus (+) floating button with both instant upload and quick menu options, and enabling full-screen desktop drag-and-drop uploads.",
+  "updatedAt":  "2026-10-11T21:57:15.864622811Z",
   "requestFeedback":  true,
   "userFacing":  true
 }

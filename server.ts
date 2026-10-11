@@ -160,9 +160,8 @@ function createSeedDatabase(): DatabaseSchema {
   const seedFile2Hash = computeSha256(seedSvg);
   fs.writeFileSync(path.join(CHUNKS_DIR, 'file_diagram_02'), seedSvg);
 
-  const envBotToken =
-    process.env.TELEGRAM_BOT_TOKEN || '8552451944:AAGnsazvo2X2okXtKrAtAYGnuiizg_n8gkM';
-  const envChatId = process.env.TELEGRAM_CHAT_ID || '-5328657910';
+  const envBotToken = process.env.TELEGRAM_BOT_TOKEN || '';
+  const envChatId = process.env.TELEGRAM_CHAT_ID || '';
 
   return {
     users: [
@@ -336,6 +335,18 @@ try {
 } catch {
   db = createSeedDatabase();
   fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2));
+}
+
+// Never use the legacy demo bot token for uploading user files
+if (
+  db.telegramConfig &&
+  (db.telegramConfig.botToken === '8552451944:AAGnsazvo2X2okXtKrAtAYGnuiizg_n8gkM' ||
+    db.telegramConfig.botToken === '8730419442:AAHa333f3W2c58F5a744O-E31c8s8o0n2eU')
+) {
+  db.telegramConfig.botToken = '';
+  db.telegramConfig.botUsername = undefined;
+  db.telegramConfig.botFirstName = undefined;
+  db.telegramConfig.authMode = 'mtproto';
 }
 
 function saveDb() {
@@ -538,10 +549,61 @@ function resolveMtprotoPeer(rawChatId?: string): string | number {
   if (!clean || clean.toLowerCase() === 'me' || clean.toLowerCase() === 'saved') {
     return 'me';
   }
-  if (/^-?\d+$/.test(clean)) {
-    return clean;
-  }
   return clean;
+}
+
+async function resolveMtprotoEntityForClient(
+  client: TelegramClient,
+  rawChatId?: string
+): Promise<{ peer: any; peerKey: string }> {
+  const clean = String(rawChatId || '').trim();
+  if (!clean || clean.toLowerCase() === 'me' || clean.toLowerCase() === 'saved') {
+    return { peer: 'me', peerKey: 'me' };
+  }
+
+  // 1. Try direct entity lookup (works if username or already cached in session)
+  try {
+    const candidate = /^-?\d+$/.test(clean) ? (BigInt(clean) as any) : clean;
+    const entity = await client.getInputEntity(candidate);
+    if (entity) {
+      return { peer: entity, peerKey: clean };
+    }
+  } catch {
+    // Entity not cached in GramJS session yet — load user's dialogs/channels below
+  }
+
+  // 2. Populate GramJS entity cache by fetching the main account's dialogs (includes private channels)
+  try {
+    const dialogs = await client.getDialogs({ limit: 150 });
+    const strippedTarget = clean.replace(/^-100/, '').replace(/^-/, '');
+    for (const d of dialogs) {
+      const dialogIdStr = String(d.id ?? '');
+      const entityIdStr = String((d.entity as any)?.id ?? '');
+      const usernameStr = String((d.entity as any)?.username ?? '').toLowerCase();
+      if (
+        dialogIdStr === clean ||
+        entityIdStr === clean ||
+        (strippedTarget && (entityIdStr === strippedTarget || dialogIdStr.endsWith(strippedTarget))) ||
+        (usernameStr && clean.replace(/^@/, '').toLowerCase() === usernameStr)
+      ) {
+        return {
+          peer: d.inputEntity || d.entity || clean,
+          peerKey: dialogIdStr || clean,
+        };
+      }
+    }
+
+    // Retry getInputEntity after dialogs cache is warmed up
+    const candidate = /^-?\d+$/.test(clean) ? (BigInt(clean) as any) : clean;
+    const entity = await client.getInputEntity(candidate);
+    if (entity) {
+      return { peer: entity, peerKey: clean };
+    }
+  } catch (err) {
+    console.warn('[MTProto] Could not resolve channel peer, falling back to Saved Messages (me):', err);
+  }
+
+  return { peer: 'me', peerKey: 'me' };
 }
 
 async function pushDiskFileToTelegramMtproto(
@@ -550,21 +612,38 @@ async function pushDiskFileToTelegramMtproto(
   totalSize: number,
   chatId: string
 ): Promise<{ success: boolean; chunks: TelegramChunk[]; error?: string }> {
+  const safeBaseName =
+    path.basename(fileName || 'vault-file.bin').replace(/[/\\?%*:|"<>]/g, '_') || 'vault-file.bin';
+  const namedTempPath = path.join(
+    CHUNKS_DIR,
+    `mtproto_${Date.now()}_${Math.random().toString(36).slice(2, 6)}_${safeBaseName}`
+  );
+  let uploadSourcePath = filePath;
+
   try {
     const client = await getActiveMtprotoClient();
     if (!client) {
       return { success: false, chunks: [], error: 'MTProto client not connected' };
     }
 
-    const peer = resolveMtprotoPeer(chatId);
+    // Link or copy with the exact original filename so Telegram preserves the exact file name & extension
+    try {
+      fs.linkSync(filePath, namedTempPath);
+      uploadSourcePath = namedTempPath;
+    } catch {
+      uploadSourcePath = filePath;
+    }
+
+    const { peer, peerKey } = await resolveMtprotoEntityForClient(client, chatId);
     const partHash = computeFastFileSha256(filePath, totalSize);
 
     const sentMsg = await client.sendFile(peer, {
-      file: filePath,
-      caption: `[UnlimStorage 2GB Vault] ${fileName} | Size: ${formatBytesServer(
+      file: uploadSourcePath,
+      caption: `[UnlimStorage Main Account Vault] ${fileName} | Original Quality (${formatBytesServer(
         totalSize
-      )} | SHA256: ${partHash.slice(0, 16)}`,
+      )}) | SHA256: ${partHash.slice(0, 16)}`,
       forceDocument: true,
+      attributes: [new Api.DocumentAttributeFilename({ fileName: safeBaseName })],
       workers: 4,
     });
 
@@ -576,14 +655,13 @@ async function pushDiskFileToTelegramMtproto(
       };
     }
 
-    const peerStr = String(peer);
     return {
       success: true,
       chunks: [
         {
           partIndex: 0,
           messageId: sentMsg.id,
-          fileId: `mtproto:${peerStr}:${sentMsg.id}`,
+          fileId: `mtproto:${peerKey}:${sentMsg.id}`,
           sizeBytes: totalSize,
           sha256Part: partHash,
         },
@@ -595,6 +673,14 @@ async function pushDiskFileToTelegramMtproto(
       chunks: [],
       error: err instanceof Error ? err.message : 'MTProto 2GB upload failed',
     };
+  } finally {
+    if (uploadSourcePath === namedTempPath && fs.existsSync(namedTempPath)) {
+      try {
+        fs.unlinkSync(namedTempPath);
+      } catch {
+        // ignore
+      }
+    }
   }
 }
 
@@ -603,9 +689,11 @@ async function pushBufferToTelegramMtproto(
   fileName: string,
   chatId: string
 ): Promise<{ success: boolean; chunks: TelegramChunk[]; error?: string }> {
+  const safeBaseName =
+    path.basename(fileName || 'vault-file.bin').replace(/[/\\?%*:|"<>]/g, '_') || 'vault-file.bin';
   const tmpFile = path.join(
     CHUNKS_DIR,
-    `tmp_mtproto_${Date.now()}_${Math.random().toString(36).slice(2, 6)}_${path.basename(fileName)}`
+    `tmp_mtproto_${Date.now()}_${Math.random().toString(36).slice(2, 6)}_${safeBaseName}`
   );
   try {
     fs.writeFileSync(tmpFile, buffer);
@@ -629,13 +717,13 @@ async function fetchBufferFromTelegramMtprotoChunk(
     const client = await getActiveMtprotoClient();
     if (!client) return null;
 
-    let peer: string | number = resolveMtprotoPeer(fallbackChatId || db.telegramConfig.chatId);
+    let rawPeerTarget = fallbackChatId || db.telegramConfig.chatId || 'me';
     let msgId = chunk.messageId;
 
     if (chunk.fileId && chunk.fileId.startsWith('mtproto:')) {
       const parts = chunk.fileId.split(':');
       if (parts.length >= 3) {
-        peer = resolveMtprotoPeer(parts[1]);
+        rawPeerTarget = parts[1];
         const parsedId = Number(parts[2]);
         if (Number.isFinite(parsedId) && parsedId > 0) {
           msgId = parsedId;
@@ -644,6 +732,7 @@ async function fetchBufferFromTelegramMtprotoChunk(
     }
 
     if (!msgId || msgId <= 0) return null;
+    const { peer } = await resolveMtprotoEntityForClient(client, rawPeerTarget);
     const messages = await client.getMessages(peer, { ids: [msgId] });
     const msg = messages && messages[0];
     if (!msg) return null;
@@ -668,13 +757,16 @@ async function pushBufferToTelegram(
   botToken: string,
   chatId: string
 ): Promise<{ success: boolean; chunks: TelegramChunk[]; error?: string }> {
-  if (db.telegramConfig.mtprotoSession && db.telegramConfig.apiId && db.telegramConfig.apiHash) {
-    const mtRes = await pushBufferToTelegramMtproto(
+  const isMainAccountConfigured = Boolean(
+    (db.telegramConfig.mtprotoSession && db.telegramConfig.apiId && db.telegramConfig.apiHash) ||
+      db.telegramConfig.authMode === 'mtproto'
+  );
+  if (isMainAccountConfigured) {
+    return await pushBufferToTelegramMtproto(
       buffer,
       fileName,
       chatId || db.telegramConfig.chatId || 'me'
     );
-    if (mtRes.success) return mtRes;
   }
 
   if (!botToken || !chatId) {
@@ -752,15 +844,18 @@ async function pushDiskFileToTelegram(
       return { success: false, chunks: [], error: 'File empty or missing' };
     }
 
-    // 1. Prefer 2GB MTProto User Account direct upload if configured
-    if (db.telegramConfig.mtprotoSession && db.telegramConfig.apiId && db.telegramConfig.apiHash) {
-      const mtRes = await pushDiskFileToTelegramMtproto(
+    // 1. Exclusively use Main Telegram Account (MTProto) when configured — never fall back to Bot API
+    const isMainAccountConfigured = Boolean(
+      (db.telegramConfig.mtprotoSession && db.telegramConfig.apiId && db.telegramConfig.apiHash) ||
+        db.telegramConfig.authMode === 'mtproto'
+    );
+    if (isMainAccountConfigured) {
+      return await pushDiskFileToTelegramMtproto(
         filePath,
         fileName,
         totalSize,
         chatId || db.telegramConfig.chatId || 'me'
       );
-      if (mtRes.success) return mtRes;
     }
 
     if (!botToken || !chatId) {
@@ -1467,7 +1562,7 @@ async function probeMediaFileWithFfprobe(
           videoCodec === 'h264' && !pixFmt.includes('10') && !pixFmt.includes('12')
         );
 
-        const availableQualities: string[] = ['Auto'];
+        const availableQualities: string[] = ['Original', 'Auto'];
         if (height >= 1000 || height === 0) availableQualities.push('1080p');
         if (height >= 680 || height === 0) availableQualities.push('720p');
         if (height >= 440 || height === 0) availableQualities.push('480p');
@@ -1515,7 +1610,7 @@ async function streamTranscodedVideoWithFfmpeg(params: {
     botToken,
     audioTrackIndex,
     startSeconds,
-    quality = 'Auto',
+    quality = 'Original',
   } = params;
 
   // Kill any previously running FFmpeg video stream process so CPU is dedicated 100% to active stream
@@ -1530,17 +1625,18 @@ async function streamTranscodedVideoWithFfmpeg(params: {
     return;
   }
 
-  // Use cached media info if already probed (do NOT block video startup waiting for ffprobe!)
-  const cachedProbed = mediaProbeCache.get(fileId);
+  let cachedProbed = mediaProbeCache.get(fileId) || null;
   if (!cachedProbed) {
-    void probeMediaFileWithFfprobe(fileId, fileName, effectiveChunks, botToken).catch(() => null);
+    cachedProbed = await Promise.race([
+      probeMediaFileWithFfprobe(fileId, fileName, effectiveChunks, botToken).catch(() => null),
+      new Promise<ProbedMediaInfo | null>((resolve) => setTimeout(() => resolve(null), 1200)),
+    ]);
   }
   const canCopyVideo = Boolean(cachedProbed?.canCopyVideo);
+  const probedHeight = cachedProbed?.height && cachedProbed.height > 0 ? cachedProbed.height : 1080;
   const safeAudioIdx = Math.max(0, Math.floor(audioTrackIndex || 0));
   const safeStart = Math.max(0, Number.isFinite(startSeconds) ? startSeconds : 0);
 
-  // When starting at 0s and Chunk 0 is already on disk, read directly or disable HTTP end-of-file Cues seeking
-  // so FFmpeg emits the first frame in <200ms instead of making 5 round-trips to the end of the file!
   const inputSource = hasFullFileOnDisk
     ? fullPath
     : `http://127.0.0.1:${PORT}/api/internal/raw-range/${encodeURIComponent(
@@ -1567,7 +1663,6 @@ async function streamTranscodedVideoWithFfmpeg(params: {
   if (safeStart > 0) {
     args.push('-ss', safeStart.toFixed(3));
   } else if (!hasFullFileOnDisk) {
-    // At 0s, prevent Matroska demuxer from seeking to the end chunk over HTTP before starting playback!
     args.push('-seekable', '0');
   }
 
@@ -1577,53 +1672,78 @@ async function streamTranscodedVideoWithFfmpeg(params: {
 
   args.push('-i', inputSource, '-map', '0:v:0', '-map', `0:a:${safeAudioIdx}?`, '-sn', '-dn');
 
-  const normQuality = String(quality || 'auto').toLowerCase();
-  if (canCopyVideo && (normQuality === 'auto' || normQuality === '1080p' || normQuality === 'original')) {
-    args.push('-c:v', 'copy');
-  } else {
-    // Auto uses ultra-fast 360p/420p adaptive scaling so 10-bit HEVC transcodes at 8x real-time with ZERO buffering!
-    const targetHeight =
-      normQuality === '360p'
-        ? 360
-        : normQuality === 'auto'
-        ? 420
-        : normQuality === '480p'
-        ? 480
-        : normQuality === '1080p'
-        ? 1080
-        : 720;
-    const crf =
-      targetHeight <= 420
-        ? '28'
-        : targetHeight <= 480
-        ? '27'
-        : targetHeight <= 720
-        ? '26'
-        : '25';
-    const maxRate =
-      targetHeight <= 420
-        ? '950k'
-        : targetHeight <= 480
-        ? '1350k'
-        : targetHeight <= 720
-        ? '2400k'
-        : '4200k';
-    const bufSize =
-      targetHeight <= 420
-        ? '1900k'
-        : targetHeight <= 480
-        ? '2700k'
-        : targetHeight <= 720
-        ? '4800k'
-        : '8400k';
+  const normQuality = String(quality || 'original').toLowerCase();
+  const isOriginalOrHigh =
+    normQuality === 'original' || normQuality === 'auto' || normQuality === '1080p';
 
+  if (canCopyVideo && isOriginalOrHigh) {
+    // 100% lossless bit-for-bit original video stream copy without re-encoding
+    args.push('-c:v', 'copy');
+  } else if (normQuality === 'original' || normQuality === 'auto') {
+    // Preserve 100% of original source resolution & high-bitrate visual fidelity when transcoding 10-bit HEVC
     args.push(
-      '-vf',
-      `scale=-2:${targetHeight}:flags=neighbor`,
       '-c:v',
       'libx264',
       '-preset',
-      'ultrafast',
+      'veryfast',
+      '-tune',
+      'zerolatency',
+      '-crf',
+      '18',
+      '-maxrate',
+      probedHeight > 1080 ? '14000k' : '8500k',
+      '-bufsize',
+      probedHeight > 1080 ? '28000k' : '17000k',
+      '-pix_fmt',
+      'yuv420p',
+      '-g',
+      '48',
+      '-sc_threshold',
+      '0',
+      '-threads',
+      '0'
+    );
+  } else {
+    const targetHeight =
+      normQuality === '360p'
+        ? 360
+        : normQuality === '480p'
+        ? 480
+        : normQuality === '720p'
+        ? 720
+        : 1080;
+    const crf =
+      targetHeight <= 360
+        ? '25'
+        : targetHeight <= 480
+        ? '23'
+        : targetHeight <= 720
+        ? '21'
+        : '19';
+    const maxRate =
+      targetHeight <= 360
+        ? '1200k'
+        : targetHeight <= 480
+        ? '2200k'
+        : targetHeight <= 720
+        ? '4500k'
+        : '8000k';
+    const bufSize =
+      targetHeight <= 360
+        ? '2400k'
+        : targetHeight <= 480
+        ? '4400k'
+        : targetHeight <= 720
+        ? '9000k'
+        : '16000k';
+
+    args.push(
+      '-vf',
+      `scale=-2:${targetHeight}:flags=lanczos`,
+      '-c:v',
+      'libx264',
+      '-preset',
+      'veryfast',
       '-tune',
       'zerolatency',
       '-crf',
@@ -1647,11 +1767,11 @@ async function streamTranscodedVideoWithFfmpeg(params: {
     '-c:a',
     'aac',
     '-b:a',
-    '128k',
+    '192k',
     '-ac',
     '2',
     '-ar',
-    '44100',
+    '48000',
     '-movflags',
     'frag_keyframe+empty_moov+default_base_moof',
     '-frag_duration',
@@ -2412,23 +2532,37 @@ async function startServer() {
     };
 
     if (storageNodeConfig) {
-      if (storageNodeConfig.botToken && !db.telegramConfig.botToken) {
-        db.telegramConfig.botToken = String(storageNodeConfig.botToken).trim();
-      }
-      if (storageNodeConfig.chatId && !db.telegramConfig.chatId) {
-        db.telegramConfig.chatId = String(storageNodeConfig.chatId).trim();
-      }
-      if (storageNodeConfig.botUsername && !db.telegramConfig.botUsername) {
-        db.telegramConfig.botUsername = String(storageNodeConfig.botUsername).trim();
-      }
-      if (storageNodeConfig.mtprotoSession && !db.telegramConfig.mtprotoSession) {
+      if (storageNodeConfig.mtprotoSession && storageNodeConfig.apiId && storageNodeConfig.apiHash) {
         db.telegramConfig.authMode = 'mtproto';
-        db.telegramConfig.apiId = String(storageNodeConfig.apiId || '').trim();
-        db.telegramConfig.apiHash = String(storageNodeConfig.apiHash || '').trim();
-        db.telegramConfig.phoneNumber = String(storageNodeConfig.phoneNumber || '').trim();
+        db.telegramConfig.apiId = String(storageNodeConfig.apiId).trim();
+        db.telegramConfig.apiHash = String(storageNodeConfig.apiHash).trim();
+        if (storageNodeConfig.phoneNumber) {
+          db.telegramConfig.phoneNumber = String(storageNodeConfig.phoneNumber).trim();
+        }
         db.telegramConfig.mtprotoSession = String(storageNodeConfig.mtprotoSession).trim();
-        db.telegramConfig.accountName = String(storageNodeConfig.accountName || '').trim();
-        db.telegramConfig.accountUsername = String(storageNodeConfig.accountUsername || '').trim();
+        if (storageNodeConfig.accountName) {
+          db.telegramConfig.accountName = String(storageNodeConfig.accountName).trim();
+        }
+        if (storageNodeConfig.accountUsername) {
+          db.telegramConfig.accountUsername = String(storageNodeConfig.accountUsername).trim();
+        }
+        if (storageNodeConfig.chatId) {
+          db.telegramConfig.chatId = String(storageNodeConfig.chatId).trim();
+        }
+        // Clear legacy bot credentials when main account MTProto session is active
+        db.telegramConfig.botToken = '';
+        db.telegramConfig.botUsername = undefined;
+        db.telegramConfig.botFirstName = undefined;
+      } else {
+        if (storageNodeConfig.botToken && !db.telegramConfig.botToken && !db.telegramConfig.mtprotoSession) {
+          db.telegramConfig.botToken = String(storageNodeConfig.botToken).trim();
+        }
+        if (storageNodeConfig.chatId && !db.telegramConfig.chatId) {
+          db.telegramConfig.chatId = String(storageNodeConfig.chatId).trim();
+        }
+        if (storageNodeConfig.botUsername && !db.telegramConfig.botUsername && !db.telegramConfig.mtprotoSession) {
+          db.telegramConfig.botUsername = String(storageNodeConfig.botUsername).trim();
+        }
       }
       if (typeof storageNodeConfig.autoSyncUploads === 'boolean') {
         db.telegramConfig.autoSyncUploads = storageNodeConfig.autoSyncUploads;
@@ -4094,7 +4228,11 @@ async function startServer() {
 
     const transferId = `trf_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
     const hasLiveTelegram = Boolean(
-      syncToTelegram !== false && db.telegramConfig.botToken && db.telegramConfig.chatId
+      syncToTelegram !== false &&
+        ((db.telegramConfig.mtprotoSession &&
+          db.telegramConfig.apiId &&
+          db.telegramConfig.apiHash) ||
+          (db.telegramConfig.botToken && db.telegramConfig.chatId))
     );
 
     const job: TransferJob = {
@@ -5450,6 +5588,10 @@ async function startServer() {
       db.telegramConfig.chatId = targetChat;
       db.telegramConfig.autoSyncUploads = true;
       db.telegramConfig.lastVerifiedAt = new Date().toISOString();
+      // Deactivate any legacy bot token so all uploads route exclusively through the user's main account
+      db.telegramConfig.botToken = '';
+      db.telegramConfig.botUsername = undefined;
+      db.telegramConfig.botFirstName = undefined;
       saveDb();
 
       cachedMtprotoClient = client;
@@ -5467,6 +5609,7 @@ async function startServer() {
 
       res.json({
         ok: true,
+        mtprotoSession: sessionString,
         sessionString,
         accountName: fullName,
         accountUsername: username,
@@ -5479,6 +5622,62 @@ async function startServer() {
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Failed to verify Telegram OTP code';
       res.status(400).json({ error: msg });
+    }
+  });
+
+  app.post('/api/telegram/mtproto/disconnect', requireAuth, async (req, res) => {
+    const user = (req as Request & { user: StoredUser }).user;
+    if (user.email.toLowerCase() !== 'titumamma2425@gmail.com' || user.role !== 'admin') {
+      res.status(403).json({ error: 'Administrator access required.' });
+      return;
+    }
+
+    if (cachedMtprotoClient) {
+      await cachedMtprotoClient.disconnect().catch(() => null);
+      cachedMtprotoClient = null;
+      cachedMtprotoSessionKey = '';
+    }
+    db.telegramConfig.authMode = 'bot';
+    db.telegramConfig.mtprotoSession = undefined;
+    db.telegramConfig.accountName = undefined;
+    db.telegramConfig.accountUsername = undefined;
+    saveDb();
+    res.json({ ok: true, config: getTelegramState() });
+  });
+
+  app.get('/api/telegram/mtproto/channels', requireAuth, async (req, res) => {
+    const user = (req as Request & { user: StoredUser }).user;
+    if (user.email.toLowerCase() !== 'titumamma2425@gmail.com' || user.role !== 'admin') {
+      res.status(403).json({ error: 'Administrator access required.' });
+      return;
+    }
+
+    try {
+      const client = await getActiveMtprotoClient();
+      if (!client) {
+        res.json({ channels: [] });
+        return;
+      }
+      const dialogs = await client.getDialogs({ limit: 100 });
+      const channels: Array<{ id: string; title: string; isChannel: boolean }> = [
+        { id: 'me', title: 'Saved Messages (Personal Main Account)', isChannel: false },
+      ];
+      for (const d of dialogs) {
+        if (d.isChannel || d.isGroup) {
+          const idStr = String(d.id || '');
+          const title = String(d.title || 'Private Channel').trim();
+          if (idStr && !channels.some((c) => c.id === idStr)) {
+            channels.push({
+              id: idStr,
+              title,
+              isChannel: Boolean(d.isChannel),
+            });
+          }
+        }
+      }
+      res.json({ channels });
+    } catch {
+      res.json({ channels: [] });
     }
   });
 
