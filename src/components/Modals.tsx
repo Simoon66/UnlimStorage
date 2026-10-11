@@ -210,12 +210,15 @@ export const RemoteUploadModal: React.FC<RemoteUploadModalProps> = ({
 // ============================================================================
 
 interface CreateShareModalProps {
-  file: FileRecord;
+  file?: FileRecord | null;
+  folder?: FolderRecord | null;
   existingShare?: ShareLink;
   defaultThrottleKbps: number | null;
   onClose: () => void;
   onCreateShare: (payload: {
     fileId: string;
+    folderId?: string;
+    targetType?: 'file' | 'folder';
     customSlug?: string;
     password?: string;
     expiresInHours?: number | null;
@@ -236,6 +239,7 @@ interface CreateShareModalProps {
 
 export const CreateShareModal: React.FC<CreateShareModalProps> = ({
   file,
+  folder,
   existingShare,
   defaultThrottleKbps,
   onClose,
@@ -256,16 +260,26 @@ export const CreateShareModal: React.FC<CreateShareModalProps> = ({
   const [savedNotice, setSavedNotice] = useState<string | null>(null);
   const [createError, setCreateError] = useState<string | null>(null);
 
+  const targetName = folder ? folder.name : file?.name || 'Item';
+  const targetId = folder ? folder.id : file?.id || '';
+  const isFolderShare = Boolean(folder);
+
   const isVideoFile =
-    file.mimeType.startsWith('video/') ||
-    /\.(mp4|webm|mov|mkv|avi|m4v)$/i.test(file.name);
+    !isFolderShare &&
+    Boolean(
+      file &&
+        (file.mimeType.startsWith('video/') ||
+          /\.(mp4|webm|mov|mkv|avi|m4v)$/i.test(file.name))
+    );
 
   useEffect(() => {
     let active = true;
-    if (!existingShare) {
+    if (!existingShare && targetId) {
       setCreating(true);
       onCreateShare({
-        fileId: file.id,
+        fileId: targetId,
+        folderId: folder ? folder.id : undefined,
+        targetType: folder ? 'folder' : 'file',
         throttleKbps: defaultThrottleKbps,
       })
         .then((created) => {
@@ -276,7 +290,7 @@ export const CreateShareModal: React.FC<CreateShareModalProps> = ({
         })
         .catch((err: unknown) => {
           if (active) {
-            setCreateError(err instanceof Error ? err.message : 'Unable to share locked file');
+            setCreateError(err instanceof Error ? err.message : 'Unable to create share link');
           }
         })
         .finally(() => {
@@ -286,7 +300,7 @@ export const CreateShareModal: React.FC<CreateShareModalProps> = ({
     return () => {
       active = false;
     };
-  }, [existingShare, file.id, defaultThrottleKbps, onCreateShare]);
+  }, [existingShare, targetId, folder, defaultThrottleKbps, onCreateShare]);
 
   const shareUrl = share
     ? `${window.location.origin}/?share=${encodeURIComponent(share.token)}`
@@ -360,9 +374,15 @@ export const CreateShareModal: React.FC<CreateShareModalProps> = ({
       <div className="w-full sm:max-w-lg bg-[#1C1A17] border-t sm:border border-[#2C2824] max-h-[92vh] overflow-y-auto">
         <div className="flex items-center justify-between px-5 py-4 border-b border-[#2C2824] sticky top-0 bg-[#1C1A17] z-10">
           <div className="flex items-center gap-2.5 min-w-0">
-            <Link2 className="w-4 h-4 text-[#D97757] shrink-0" />
+            {isFolderShare ? (
+              <Folder className="w-4 h-4 text-[#D97757] shrink-0" />
+            ) : (
+              <Link2 className="w-4 h-4 text-[#D97757] shrink-0" />
+            )}
             <h2 className="text-base font-bold text-[#F2EFE9] truncate">
-              Share &ldquo;{file.name}&rdquo;
+              {isFolderShare
+                ? `Share Folder Gallery: “${targetName}”`
+                : `Share “${targetName}”`}
             </h2>
           </div>
           <button
@@ -386,13 +406,17 @@ export const CreateShareModal: React.FC<CreateShareModalProps> = ({
           </div>
         ) : creating || !share ? (
           <div className="p-8 text-center text-sm text-[#9E978E]">
-            Creating your direct download link...
+            {isFolderShare
+              ? 'Creating your public folder gallery link...'
+              : 'Creating your direct download link...'}
           </div>
         ) : (
           <div className="p-5 sm:p-6 space-y-5">
             <div className="space-y-2">
               <label className="block text-xs font-medium text-[#F2EFE9]">
-                Direct Download Link (Ready to Share)
+                {isFolderShare
+                  ? 'Public Folder Gallery Link (Grid/List View + Video Streaming + ZIP Download)'
+                  : 'Direct Download Link (Ready to Share)'}
               </label>
               <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
                 <input
@@ -1179,11 +1203,12 @@ export const MoveFileModal: React.FC<MoveFileModalProps> = ({
 // ============================================================================
 
 export interface DeleteTarget {
-  type: 'file' | 'folder' | 'batch-files';
+  type: 'file' | 'folder' | 'batch-files' | 'empty-trash';
   id: string;
   name: string;
   subtitle?: string;
   fileIds?: string[];
+  permanent?: boolean;
 }
 
 interface DeleteConfirmModalProps {
@@ -1198,6 +1223,7 @@ export const DeleteConfirmModal: React.FC<DeleteConfirmModalProps> = ({
   onConfirm,
 }) => {
   const [deleting, setDeleting] = useState(false);
+  const isPermanent = Boolean(target.permanent || target.type === 'empty-trash');
 
   const handleConfirm = async () => {
     setDeleting(true);
@@ -1211,18 +1237,36 @@ export const DeleteConfirmModal: React.FC<DeleteConfirmModalProps> = ({
 
   return (
     <div className="fixed inset-0 z-50 bg-black/80 flex items-end sm:items-center justify-center p-0 sm:p-4">
-      <div className="w-full sm:max-w-md bg-[#1C1A17] border-t sm:border border-[#D94848]">
+      <div
+        className={`w-full sm:max-w-md bg-[#1C1A17] border-t sm:border ${
+          isPermanent ? 'border-[#D94848]' : 'border-[#D97757]'
+        }`}
+      >
         <div className="flex items-center justify-between px-5 py-4 border-b border-[#2C2824]">
           <div className="flex items-center gap-2.5">
-            <AlertTriangle className="w-4 h-4 text-[#D94848]" />
+            {isPermanent ? (
+              <AlertTriangle className="w-4 h-4 text-[#D94848]" />
+            ) : (
+              <Trash2 className="w-4 h-4 text-[#D97757]" />
+            )}
             <h2 className="text-base font-bold text-[#F2EFE9]">
-              Confirm{' '}
-              {target.type === 'folder'
-                ? 'Folder'
-                : target.type === 'batch-files'
-                ? 'Batch File'
-                : 'File'}{' '}
-              Deletion
+              {target.type === 'empty-trash'
+                ? 'Empty Trash Bin Forever'
+                : isPermanent
+                ? `Permanently Delete ${
+                    target.type === 'folder'
+                      ? 'Folder'
+                      : target.type === 'batch-files'
+                      ? 'Selected Files'
+                      : 'File'
+                  }`
+                : `Move ${
+                    target.type === 'folder'
+                      ? 'Folder'
+                      : target.type === 'batch-files'
+                      ? 'Selected Files'
+                      : 'File'
+                  } to Trash Bin`}
             </h2>
           </div>
           <button
@@ -1235,8 +1279,23 @@ export const DeleteConfirmModal: React.FC<DeleteConfirmModalProps> = ({
 
         <div className="p-5 sm:p-6 space-y-4">
           <p className="text-xs sm:text-sm text-[#F2EFE9] leading-relaxed">
-            Are you sure you want to permanently delete{' '}
-            <strong className="text-[#D97757] break-all">&ldquo;{target.name}&rdquo;</strong>?
+            {target.type === 'empty-trash' ? (
+              <>
+                Are you sure you want to permanently purge{' '}
+                <strong className="text-[#D94848]">{target.name}</strong> from your Trash Bin?
+              </>
+            ) : isPermanent ? (
+              <>
+                Are you sure you want to permanently delete{' '}
+                <strong className="text-[#D94848] break-all">&ldquo;{target.name}&rdquo;</strong>?
+              </>
+            ) : (
+              <>
+                Move{' '}
+                <strong className="text-[#D97757] break-all">&ldquo;{target.name}&rdquo;</strong>{' '}
+                to the Trash Bin?
+              </>
+            )}
           </p>
           {target.subtitle && (
             <div className="p-3 bg-[#141311] border border-[#2C2824] text-xs text-[#9E978E]">
@@ -1244,11 +1303,13 @@ export const DeleteConfirmModal: React.FC<DeleteConfirmModalProps> = ({
             </div>
           )}
           <p className="text-xs text-[#9E978E]">
-            {target.type === 'folder'
-              ? 'This folder will be removed and any files inside will be moved safely to your main drive.'
-              : target.type === 'batch-files'
-              ? 'All selected files and any active shared download links pointing to them will be permanently removed across all devices.'
-              : 'This file and any active shared download links pointing to it will be permanently removed.'}
+            {isPermanent
+              ? target.type === 'empty-trash'
+                ? 'All items in your Trash Bin and their binary storage chunks will be permanently erased across all devices. This cannot be undone.'
+                : target.type === 'folder'
+                ? 'This folder will be permanently removed across all devices.'
+                : 'This item and any active shared download links pointing to it will be permanently erased across all devices.'
+              : 'You can restore items anytime from the Trash Bin tab before deleting them forever.'}
           </p>
 
           <div className="grid grid-cols-2 gap-3 pt-3 border-t border-[#2C2824]">
@@ -1264,10 +1325,20 @@ export const DeleteConfirmModal: React.FC<DeleteConfirmModalProps> = ({
               type="button"
               onClick={handleConfirm}
               disabled={deleting}
-              className="min-h-[44px] px-4 py-2.5 text-xs font-bold bg-[#D94848] text-[#F2EFE9] hover:bg-[#e05858] flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
+              className={`min-h-[44px] px-4 py-2.5 text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50 ${
+                isPermanent
+                  ? 'bg-[#D94848] text-[#F2EFE9] hover:bg-[#e05858]'
+                  : 'bg-[#D97757] text-[#141311] hover:bg-[#E08568]'
+              }`}
             >
               <Trash2 className="w-4 h-4" />
-              {deleting ? 'Deleting...' : 'Yes, Delete'}
+              {deleting
+                ? isPermanent
+                  ? 'Deleting...'
+                  : 'Moving...'
+                : isPermanent
+                ? 'Delete Forever'
+                : 'Move to Trash'}
             </button>
           </div>
         </div>
@@ -1921,6 +1992,295 @@ export const ManageTagsModal: React.FC<ManageTagsModalProps> = ({
             </button>
           </div>
         </div>
+      </div>
+    </div>
+  );
+};
+
+// ============================================================================
+// 8. FOLDER PIN LOCK & UNLOCK MODAL (4-6 Digit Numeric PIN Protection)
+// ============================================================================
+
+export interface FolderPinModalState {
+  folder: FolderRecord;
+  mode: 'unlock' | 'manage';
+}
+
+interface FolderPinModalProps {
+  state: FolderPinModalState;
+  onClose: () => void;
+  onUnlockSuccess: (folder: FolderRecord) => void;
+  onSavePin: (folder: FolderRecord, newPin: string | null) => Promise<void>;
+  verifyPinFn: (inputPin: string, storedHash?: string | null) => Promise<boolean>;
+}
+
+export const FolderPinModal: React.FC<FolderPinModalProps> = ({
+  state,
+  onClose,
+  onUnlockSuccess,
+  onSavePin,
+  verifyPinFn,
+}) => {
+  const { folder, mode } = state;
+  const hasExistingPin = Boolean(folder.isPinProtected && folder.pinHash);
+
+  const [currentPin, setCurrentPin] = useState('');
+  const [newPin, setNewPin] = useState('');
+  const [confirmPin, setConfirmPin] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleUnlockSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(null);
+    const clean = currentPin.trim();
+    if (!clean) {
+      setError('Please enter your folder PIN.');
+      return;
+    }
+    setBusy(true);
+    try {
+      const ok = await verifyPinFn(clean, folder.pinHash);
+      if (!ok) {
+        setError('Incorrect PIN code. Please try again.');
+        return;
+      }
+      onUnlockSuccess(folder);
+      onClose();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleSetPinSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(null);
+
+    if (hasExistingPin) {
+      const verified = await verifyPinFn(currentPin.trim(), folder.pinHash);
+      if (!verified) {
+        setError('Current PIN is incorrect.');
+        return;
+      }
+    }
+
+    const cleanNew = newPin.trim();
+    if (!/^\d{4,8}$/.test(cleanNew)) {
+      setError('PIN must be 4 to 8 digits (numbers only).');
+      return;
+    }
+    if (cleanNew !== confirmPin.trim()) {
+      setError('New PIN and confirmation do not match.');
+      return;
+    }
+
+    setBusy(true);
+    try {
+      await onSavePin(folder, cleanNew);
+      onClose();
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Failed to update folder PIN');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleRemovePin = async () => {
+    setError(null);
+    if (hasExistingPin) {
+      const verified = await verifyPinFn(currentPin.trim(), folder.pinHash);
+      if (!verified) {
+        setError('Enter the current folder PIN above before removing PIN lock.');
+        return;
+      }
+    }
+    setBusy(true);
+    try {
+      await onSavePin(folder, null);
+      onClose();
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Failed to remove folder PIN');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/80 flex items-end sm:items-center justify-center p-0 sm:p-4">
+      <div className="w-full sm:max-w-md bg-[#1C1A17] border-t sm:border border-[#D97757]">
+        <div className="flex items-center justify-between px-5 py-4 border-b border-[#2C2824]">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <Lock className="w-4 h-4 text-[#D97757] shrink-0" />
+            <h2 className="text-base font-bold text-[#F2EFE9] truncate">
+              {mode === 'unlock'
+                ? `Unlock "${folder.name}"`
+                : hasExistingPin
+                ? `Manage PIN Lock — "${folder.name}"`
+                : `Set PIN Lock — "${folder.name}"`}
+            </h2>
+          </div>
+          <button
+            onClick={onClose}
+            className="min-w-[44px] min-h-[44px] -mr-2 flex items-center justify-center text-[#9E978E] hover:text-[#F2EFE9] cursor-pointer"
+          >
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        {mode === 'unlock' ? (
+          <form onSubmit={handleUnlockSubmit} className="p-5 sm:p-6 space-y-4">
+            <p className="text-xs text-[#9E978E] leading-relaxed">
+              This private folder is protected with a PIN lock. Enter your numeric PIN below to open{' '}
+              <strong className="text-[#F2EFE9]">{folder.name}</strong>.
+            </p>
+            <div className="space-y-1.5">
+              <label className="block text-xs font-semibold text-[#F2EFE9]">
+                Folder PIN
+              </label>
+              <input
+                type="password"
+                inputMode="numeric"
+                pattern="[0-9]*"
+                maxLength={8}
+                autoFocus
+                required
+                value={currentPin}
+                onChange={(e) => setCurrentPin(e.target.value.replace(/\D/g, ''))}
+                placeholder="••••"
+                className="w-full min-h-[48px] bg-[#141311] border border-[#2C2824] px-4 py-2.5 text-center text-lg font-mono tracking-[0.4em] text-[#F2EFE9] focus:outline-none focus:border-[#D97757]"
+              />
+            </div>
+
+            {error && (
+              <div className="p-3 bg-[#141311] border border-[#D94848] text-xs text-[#D94848]">
+                {error}
+              </div>
+            )}
+
+            <div className="grid grid-cols-2 gap-3 pt-3 border-t border-[#2C2824]">
+              <button
+                type="button"
+                onClick={onClose}
+                className="min-h-[44px] px-4 py-2.5 text-xs font-semibold text-[#9E978E] bg-[#141311] border border-[#2C2824] hover:text-[#F2EFE9] cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={busy || currentPin.length < 4}
+                className="min-h-[44px] px-4 py-2.5 text-xs font-bold bg-[#D97757] text-[#141311] hover:bg-[#E08568] disabled:opacity-50 cursor-pointer"
+              >
+                {busy ? 'Verifying...' : 'Unlock Folder'}
+              </button>
+            </div>
+          </form>
+        ) : (
+          <form onSubmit={handleSetPinSubmit} className="p-5 sm:p-6 space-y-4">
+            <p className="text-xs text-[#9E978E] leading-relaxed">
+              Protect <strong className="text-[#F2EFE9]">{folder.name}</strong> with a 4 to 8 digit
+              numeric PIN. Visitors or sessions without the PIN will not be able to open this folder.
+            </p>
+
+            {hasExistingPin && (
+              <div className="space-y-1.5">
+                <label className="block text-xs font-semibold text-[#F2EFE9]">
+                  Current PIN (Required to change or remove)
+                </label>
+                <input
+                  type="password"
+                  inputMode="numeric"
+                  pattern="[0-9]*"
+                  maxLength={8}
+                  required
+                  value={currentPin}
+                  onChange={(e) => setCurrentPin(e.target.value.replace(/\D/g, ''))}
+                  placeholder="Enter current PIN..."
+                  className="w-full min-h-[44px] bg-[#141311] border border-[#2C2824] px-3.5 py-2 text-sm font-mono tracking-widest text-[#F2EFE9] focus:outline-none focus:border-[#D97757]"
+                />
+              </div>
+            )}
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div className="space-y-1.5">
+                <label className="block text-xs font-semibold text-[#F2EFE9]">
+                  {hasExistingPin ? 'New PIN (4-8 digits)' : 'Set PIN (4-8 digits)'}
+                </label>
+                <input
+                  type="password"
+                  inputMode="numeric"
+                  pattern="[0-9]*"
+                  maxLength={8}
+                  value={newPin}
+                  onChange={(e) => setNewPin(e.target.value.replace(/\D/g, ''))}
+                  placeholder="e.g. 2580"
+                  className="w-full min-h-[44px] bg-[#141311] border border-[#2C2824] px-3.5 py-2 text-sm font-mono tracking-widest text-[#F2EFE9] focus:outline-none focus:border-[#D97757]"
+                />
+              </div>
+
+              <div className="space-y-1.5">
+                <label className="block text-xs font-semibold text-[#F2EFE9]">
+                  Confirm PIN
+                </label>
+                <input
+                  type="password"
+                  inputMode="numeric"
+                  pattern="[0-9]*"
+                  maxLength={8}
+                  value={confirmPin}
+                  onChange={(e) => setConfirmPin(e.target.value.replace(/\D/g, ''))}
+                  placeholder="Repeat PIN"
+                  className="w-full min-h-[44px] bg-[#141311] border border-[#2C2824] px-3.5 py-2 text-sm font-mono tracking-widest text-[#F2EFE9] focus:outline-none focus:border-[#D97757]"
+                />
+              </div>
+            </div>
+
+            {error && (
+              <div className="p-3 bg-[#141311] border border-[#D94848] text-xs text-[#D94848]">
+                {error}
+              </div>
+            )}
+
+            <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2.5 pt-3 border-t border-[#2C2824]">
+              {hasExistingPin ? (
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={handleRemovePin}
+                  className="min-h-[44px] px-4 py-2 text-xs font-semibold text-[#D94848] bg-[#141311] border border-[#D94848] hover:bg-[#D94848] hover:text-[#F2EFE9] cursor-pointer"
+                >
+                  Remove PIN Lock
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={onClose}
+                  className="min-h-[44px] px-4 py-2 text-xs font-semibold text-[#9E978E] bg-[#141311] border border-[#2C2824] cursor-pointer"
+                >
+                  Cancel
+                </button>
+              )}
+
+              <div className="flex items-center gap-2">
+                {hasExistingPin && (
+                  <button
+                    type="button"
+                    onClick={onClose}
+                    className="min-h-[44px] px-4 py-2 text-xs font-semibold text-[#9E978E] bg-[#141311] border border-[#2C2824] cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                )}
+                <button
+                  type="submit"
+                  disabled={busy || newPin.length < 4}
+                  className="flex-1 sm:flex-initial min-h-[44px] px-5 py-2 text-xs font-bold bg-[#D97757] text-[#141311] hover:bg-[#E08568] disabled:opacity-50 cursor-pointer"
+                >
+                  {busy ? 'Saving...' : hasExistingPin ? 'Update PIN' : 'Enable PIN Lock'}
+                </button>
+              </div>
+            </div>
+          </form>
+        )}
       </div>
     </div>
   );

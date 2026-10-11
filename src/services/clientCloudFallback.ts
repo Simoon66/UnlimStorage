@@ -1010,7 +1010,32 @@ async function handleClientApi(urlStr: string, init?: RequestInit): Promise<Resp
     const tok = decodeURIComponent(path.slice('/api/public/share/'.length));
     const share = await resolveShareByToken(tok);
     if (!share) return jsonResponse({ error: 'Share link not found or disabled' }, 404);
-    return jsonResponse({ share });
+    const isFolderShare = share.targetType === 'folder' || Boolean(share.folderId);
+    let sharedFiles = Array.isArray(share.sharedFiles) ? share.sharedFiles : undefined;
+    if (isFolderShare && (!sharedFiles || sharedFiles.length === 0) && share.folderId) {
+      sharedFiles = db.files
+        .filter((f) => f.folderId === share.folderId && !f.trashed && !f.lockedOverQuota)
+        .map((f) => ({
+          id: f.id,
+          name: f.name,
+          sizeBytes: f.sizeBytes,
+          mimeType: f.mimeType,
+          sha256: f.sha256,
+          createdAt: f.createdAt,
+          previewText: f.previewText,
+          previewDataUrl: f.previewDataUrl,
+          storageDriver: f.storageDriver,
+          telegramChatId: f.telegramChatId,
+          telegramChunks: f.telegramChunks,
+        }));
+    }
+    return jsonResponse({
+      share: {
+        ...share,
+        targetType: isFolderShare ? 'folder' : 'file',
+        sharedFiles: isFolderShare ? sharedFiles || [] : undefined,
+      },
+    });
   }
 
   if (path.startsWith('/api/public/share/') && path.endsWith('/verify') && method === 'POST') {
@@ -1038,30 +1063,61 @@ async function handleClientApi(urlStr: string, init?: RequestInit): Promise<Resp
     share.downloadCount += 1;
     saveClientDb(db);
 
-    const fileMeta = db.files.find((f) => f.id === share.fileId);
-    const binaryBlob = await getClientBinaryBlob(share.fileId, fileMeta);
+    const requestedFileId = (parsed.searchParams.get('fileId') || '').trim();
+    const targetFileId = requestedFileId || share.fileId;
+    const sharedSubFile =
+      requestedFileId && Array.isArray(share.sharedFiles)
+        ? share.sharedFiles.find((sf) => sf.id === requestedFileId)
+        : null;
+
+    const fileMeta =
+      db.files.find((f) => f.id === targetFileId) ||
+      (sharedSubFile
+        ? ({
+            id: sharedSubFile.id,
+            name: sharedSubFile.name,
+            folderId: share.folderId || null,
+            ownerId: share.creatorId,
+            ownerName: share.creatorName,
+            sizeBytes: sharedSubFile.sizeBytes,
+            mimeType: sharedSubFile.mimeType,
+            sha256: sharedSubFile.sha256,
+            storageDriver: sharedSubFile.storageDriver || 'local_vault',
+            telegramChatId: sharedSubFile.telegramChatId || share.telegramChatId,
+            telegramChunks: sharedSubFile.telegramChunks || [],
+            starred: false,
+            downloadCount: 0,
+            createdAt: share.createdAt,
+            updatedAt: share.createdAt,
+          } as FileRecord)
+        : undefined);
+
+    const targetFileName = sharedSubFile?.name || fileMeta?.name || share.fileName;
+    const targetFileMime = sharedSubFile?.mimeType || fileMeta?.mimeType || share.fileMimeType;
+
+    const binaryBlob = await getClientBinaryBlob(targetFileId, fileMeta);
     if (binaryBlob) {
       return new Response(binaryBlob, {
         status: 200,
         headers: {
-          'Content-Type': resolveClientMimeType(share.fileName, share.fileMimeType),
+          'Content-Type': resolveClientMimeType(targetFileName, targetFileMime),
           'Content-Length': String(binaryBlob.size),
         },
       });
     }
 
-    if (share.cloudChunkCount && share.cloudChunkCount > 0) {
+    if (share.cloudChunkCount && share.cloudChunkCount > 0 && targetFileId === share.fileId) {
       const fsBlob = await fetchPublicShareBinaryChunksFromFirestore(
         share.fileId,
         share.cloudChunkCount,
-        resolveClientMimeType(share.fileName, share.fileMimeType)
+        resolveClientMimeType(targetFileName, targetFileMime)
       );
       if (fsBlob && fsBlob.size > 0) {
         await storeClientBinaryBlob(share.fileId, fsBlob);
         return new Response(fsBlob, {
           status: 200,
           headers: {
-            'Content-Type': resolveClientMimeType(share.fileName, share.fileMimeType),
+            'Content-Type': resolveClientMimeType(targetFileName, targetFileMime),
             'Content-Length': String(fsBlob.size),
           },
         });
@@ -1070,13 +1126,14 @@ async function handleClientApi(urlStr: string, init?: RequestInit): Promise<Resp
 
     const blobs = getBlobStore();
     const content =
-      blobs[share.fileId] ||
+      blobs[targetFileId] ||
+      sharedSubFile?.previewText ||
       share.previewText ||
       fileMeta?.previewText ||
-      `Shared file: ${share.fileName}`;
+      `Shared file: ${targetFileName}`;
     return new Response(content, {
       status: 200,
-      headers: { 'Content-Type': share.fileMimeType || 'application/octet-stream' },
+      headers: { 'Content-Type': targetFileMime || 'application/octet-stream' },
     });
   }
 
@@ -1380,10 +1437,53 @@ async function handleClientApi(urlStr: string, init?: RequestInit): Promise<Resp
       ownerId: currentUser.id,
       ownerName: currentUser.name,
       createdAt: new Date().toISOString(),
+      trashed: false,
+      trashedAt: null,
+      isPinProtected: Boolean(body.pinHash),
+      pinHash: body.pinHash || null,
     };
     db.folders.push(folder);
     saveClientDb(db);
     return jsonResponse({ folder });
+  }
+
+  if (path.startsWith('/api/folders/') && method === 'PATCH') {
+    const folderId = decodeURIComponent(path.slice('/api/folders/'.length));
+    const folder = db.folders.find((f) => f.id === folderId && f.ownerId === currentUser.id);
+    if (!folder) return jsonResponse({ error: 'Folder not found' }, 404);
+    const body = await parseBody();
+    if (typeof body.name === 'string' && body.name.trim()) {
+      folder.name = body.name.trim();
+    }
+    if (body.parentId !== undefined) {
+      if (body.parentId === folder.id) {
+        return jsonResponse({ error: 'Cannot move a folder into itself' }, 400);
+      }
+      folder.parentId = body.parentId || null;
+    }
+    if (typeof body.trashed === 'boolean') {
+      folder.trashed = body.trashed;
+      folder.trashedAt = body.trashed ? body.trashedAt || new Date().toISOString() : null;
+      db.files.forEach((f) => {
+        if (f.ownerId === currentUser.id && f.folderId === folder.id) {
+          f.trashed = body.trashed;
+          f.trashedAt = folder.trashedAt;
+        }
+      });
+    }
+    if (body.pinHash !== undefined) {
+      folder.pinHash = body.pinHash || null;
+      folder.isPinProtected = Boolean(body.pinHash);
+    }
+    if (typeof body.isPinProtected === 'boolean' && !body.isPinProtected) {
+      folder.isPinProtected = false;
+      folder.pinHash = null;
+    }
+    saveClientDb(db);
+    return jsonResponse({
+      folder,
+      files: db.files.filter((f) => f.ownerId === currentUser.id),
+    });
   }
 
   if (path.startsWith('/api/folders/') && method === 'DELETE') {
@@ -1398,6 +1498,46 @@ async function handleClientApi(urlStr: string, init?: RequestInit): Promise<Resp
     db.folders = db.folders.filter((f) => !(f.id === folderId && f.ownerId === currentUser.id));
     saveClientDb(db);
     return jsonResponse({ ok: true });
+  }
+
+  if (path === '/api/trash/empty' && method === 'POST') {
+    const trashedFiles = db.files.filter((f) => f.ownerId === currentUser.id && f.trashed);
+    const trashedFolders = db.folders.filter((f) => f.ownerId === currentUser.id && f.trashed);
+    const trashedFileIds = trashedFiles.map((f) => f.id);
+    const trashedFolderIds = trashedFolders.map((f) => f.id);
+
+    for (const fid of trashedFileIds) {
+      markCloudFileDeletedTombstone(fid);
+      await deleteClientBinaryBlob(fid);
+    }
+    for (const flid of trashedFolderIds) {
+      markCloudFolderDeletedTombstone(flid);
+    }
+
+    const blobs = getBlobStore();
+    for (const fid of trashedFileIds) {
+      delete blobs[fid];
+    }
+    saveBlobStore(blobs);
+
+    const trashedFileIdSet = new Set(trashedFileIds);
+    const trashedFolderIdSet = new Set(trashedFolderIds);
+    db.files = db.files.filter((f) => !(f.ownerId === currentUser.id && f.trashed));
+    db.folders = db.folders.filter((f) => !(f.ownerId === currentUser.id && f.trashed));
+    db.shares = db.shares.filter(
+      (s) =>
+        !trashedFileIdSet.has(s.fileId) &&
+        !(s.folderId && trashedFolderIdSet.has(s.folderId))
+    );
+
+    evaluateClientQuotaAndLocks(db, currentUser);
+    saveClientDb(db);
+    return jsonResponse({
+      ok: true,
+      deletedFileIds: trashedFileIds,
+      deletedFolderIds: trashedFolderIds,
+      user: currentUser,
+    });
   }
 
   if (path === '/api/files/upload' && method === 'POST') {
@@ -1620,6 +1760,10 @@ async function handleClientApi(urlStr: string, init?: RequestInit): Promise<Resp
     if (typeof body.starred === 'boolean') file.starred = body.starred;
     if (typeof body.name === 'string' && body.name.trim()) file.name = body.name.trim();
     if (body.folderId !== undefined) file.folderId = body.folderId;
+    if (typeof body.trashed === 'boolean') {
+      file.trashed = body.trashed;
+      file.trashedAt = body.trashed ? body.trashedAt || new Date().toISOString() : null;
+    }
     if (Array.isArray(body.tags)) {
       const seen = new Set<string>();
       const cleanTags: string[] = [];
@@ -1745,6 +1889,75 @@ async function handleClientApi(urlStr: string, init?: RequestInit): Promise<Resp
 
   if (path === '/api/shares' && method === 'POST') {
     const body = await parseBody();
+    const isFolderShare = body.targetType === 'folder' || Boolean(body.folderId);
+
+    if (isFolderShare) {
+      const folder = db.folders.find((f) => f.id === body.folderId && f.ownerId === currentUser.id);
+      if (!folder) return jsonResponse({ error: 'Folder not found' }, 404);
+
+      const folderFiles = db.files.filter(
+        (f) => f.ownerId === currentUser.id && f.folderId === folder.id && !f.trashed && !f.lockedOverQuota
+      );
+      const totalFolderSize = folderFiles.reduce((acc, f) => acc + f.sizeBytes, 0);
+      const sharedFilesSnapshot = folderFiles.map((f) => ({
+        id: f.id,
+        name: f.name,
+        sizeBytes: f.sizeBytes,
+        mimeType: f.mimeType,
+        sha256: f.sha256,
+        createdAt: f.createdAt,
+        previewText: f.previewText,
+        previewDataUrl: f.previewDataUrl,
+        storageDriver: f.storageDriver,
+        telegramChatId: f.telegramChatId,
+        telegramChunks: f.telegramChunks,
+      }));
+
+      const token = body.customSlug || `fld-${Math.random().toString(36).slice(2, 8)}`;
+      const hasPw = Boolean(body.password && String(body.password).trim());
+
+      const folderShare: ClientStoredShare = {
+        id: `shr_${Date.now().toString(36)}`,
+        token,
+        targetType: 'folder',
+        folderId: folder.id,
+        sharedFiles: sharedFilesSnapshot,
+        fileId: folder.id,
+        fileName: folder.name,
+        fileSizeBytes: totalFolderSize,
+        fileMimeType: 'inode/directory',
+        fileSha256: simpleHash(folder.id + folder.name),
+        creatorId: currentUser.id,
+        creatorName: currentUser.name,
+        hasPassword: hasPw,
+        passwordHash: hasPw ? simpleHash(String(body.password).trim()) : null,
+        expiresAt: body.expiresInHours
+          ? new Date(Date.now() + Number(body.expiresInHours) * 3600000).toISOString()
+          : null,
+        maxDownloads: body.maxDownloads ? Number(body.maxDownloads) : null,
+        downloadCount: 0,
+        throttleKbps:
+          body.throttleKbps !== undefined
+            ? body.throttleKbps
+            : db.bandwidthSettings.defaultShareThrottleKbps,
+        bandwidthCapBytes: body.bandwidthCapMb ? Number(body.bandwidthCapMb) * 1024 * 1024 : null,
+        bandwidthUsedBytes: 0,
+        active: true,
+        createdAt: new Date().toISOString(),
+        lastAccessedAt: null,
+        storageDriver: 'local_vault',
+      };
+
+      db.shares.unshift(folderShare);
+      saveClientDb(db);
+      void syncPublicShareToFirestore({
+        share: folderShare,
+        passwordHash: folderShare.passwordHash,
+        cloudChunkCount: 0,
+      }).catch(() => null);
+      return jsonResponse({ share: folderShare });
+    }
+
     const file = db.files.find((f) => f.id === body.fileId && f.ownerId === currentUser.id);
     if (!file) return jsonResponse({ error: 'File not found' }, 404);
     if (file.lockedOverQuota) {
@@ -1783,6 +1996,7 @@ async function handleClientApi(urlStr: string, init?: RequestInit): Promise<Resp
     const share: ClientStoredShare = {
       id: `shr_${Date.now().toString(36)}`,
       token,
+      targetType: 'file',
       fileId: file.id,
       fileName: file.name,
       fileSizeBytes: file.sizeBytes,
@@ -2167,11 +2381,24 @@ function sendBinaryChunkWithXhr(params: {
  * using 4 MB chunked binary HTTP streaming on the Express backend, and real binary slice
  * stream processing into IndexedDB / Telegram when running on static hosts.
  */
+export interface UploadPauseController {
+  isPaused: () => boolean;
+  waitForResumeOrCancel: () => Promise<'resumed' | 'cancelled'>;
+  getChunkAbortSignal?: () => AbortSignal | undefined;
+}
+
+/**
+ * Uploads files with 100% real byte-by-byte progress (0% -> 100%, transferredBytes, speedBps)
+ * using 24 MB chunked binary HTTP streaming on the Express backend, and real binary slice
+ * stream processing into IndexedDB / Telegram when running on static hosts.
+ * Supports instant mid-chunk Pause & Resume without losing already transferred chunks.
+ */
 export async function uploadFilesWithProgress(params: {
   files: File[];
   folderId: string | null;
   headers: Record<string, string>;
   signal?: AbortSignal;
+  pauseController?: UploadPauseController;
   onProgress: (info: {
     percent: number;
     loadedBytes: number;
@@ -2286,6 +2513,36 @@ export async function uploadFilesWithProgress(params: {
           };
         }
 
+        // Check if upload is paused before sending chunk
+        if (params.pauseController?.isPaused()) {
+          await originalFetch('/api/files/upload/pause', {
+            method: 'POST',
+            headers: { ...params.headers, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ uploadId, transferId, paused: true }),
+          }).catch(() => null);
+
+          const resumeOutcome = await params.pauseController.waitForResumeOrCancel();
+          if (resumeOutcome === 'cancelled' || params.signal?.aborted) {
+            await originalFetch('/api/files/upload/cancel', {
+              method: 'POST',
+              headers: { ...params.headers, 'Content-Type': 'application/json' },
+              body: JSON.stringify({ uploadId, transferId }),
+            }).catch(() => null);
+            return {
+              ok: false,
+              cancelled: true,
+              status: 0,
+              data: { error: 'Upload cancelled by user' },
+            };
+          }
+
+          await originalFetch('/api/files/upload/pause', {
+            method: 'POST',
+            headers: { ...params.headers, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ uploadId, transferId, paused: false }),
+          }).catch(() => null);
+        }
+
         const end = Math.min(file.size, offset + CHUNK_SIZE);
         const chunkBlob = file.slice(offset, end);
         const currentOffset = offset;
@@ -2301,12 +2558,16 @@ export async function uploadFilesWithProgress(params: {
           currentOffset + chunkBlob.size
         }&speedBps=${currentSpeed}`;
 
+        // Combine cancel signal with optional per-chunk pause signal
+        const chunkSignal = params.pauseController?.getChunkAbortSignal?.() || params.signal;
+
         const chunkResult = await sendBinaryChunkWithXhr({
           url: chunkUrl,
           chunkBlob,
           headers: params.headers,
-          signal: params.signal,
+          signal: chunkSignal,
           onChunkProgress: (loadedInChunk) => {
+            if (params.pauseController?.isPaused()) return;
             const totalLoadedNow = Math.min(
               totalBatchBytes,
               completedFilesBytes + currentOffset + loadedInChunk
@@ -2325,6 +2586,11 @@ export async function uploadFilesWithProgress(params: {
             });
           },
         });
+
+        // If aborted due to Pause (and not full Cancel), wait for Resume and retry this chunk from `offset`!
+        if (chunkResult.cancelled && !params.signal?.aborted && params.pauseController?.isPaused()) {
+          continue;
+        }
 
         if (chunkResult.cancelled || params.signal?.aborted) {
           await originalFetch('/api/files/upload/cancel', {
@@ -2430,6 +2696,17 @@ export async function uploadFilesWithProgress(params: {
           status: 0,
           data: { error: 'Upload cancelled by user' },
         };
+      }
+      if (params.pauseController?.isPaused()) {
+        const resumeOutcome = await params.pauseController.waitForResumeOrCancel();
+        if (resumeOutcome === 'cancelled' || params.signal?.aborted) {
+          return {
+            ok: false,
+            cancelled: true,
+            status: 0,
+            data: { error: 'Upload cancelled by user' },
+          };
+        }
       }
       const end = Math.min(file.size, offset + STATIC_STEP_SIZE);
       // Verify first 64 bytes of slice to confirm readable disk handle without loading GBs into RAM
@@ -2618,6 +2895,10 @@ export async function syncClientDbWithFirestoreDrive(params: {
         ...db.folders[existingIdx],
         name: cf.name,
         parentId: cf.parentId,
+        trashed: cf.trashed ?? db.folders[existingIdx].trashed ?? false,
+        trashedAt: cf.trashedAt !== undefined ? cf.trashedAt : db.folders[existingIdx].trashedAt,
+        isPinProtected: cf.isPinProtected ?? db.folders[existingIdx].isPinProtected ?? false,
+        pinHash: cf.pinHash !== undefined ? cf.pinHash : db.folders[existingIdx].pinHash,
       };
     }
   }
@@ -2681,6 +2962,8 @@ export async function syncClientDbWithFirestoreDrive(params: {
         name: cf.name || local.name,
         folderId: cf.folderId,
         starred: cf.starred,
+        trashed: cf.trashed ?? local.trashed ?? false,
+        trashedAt: cf.trashedAt !== undefined ? cf.trashedAt : local.trashedAt,
         downloadCount: Math.max(local.downloadCount || 0, cf.downloadCount || 0),
         storageDriver:
           cf.telegramChunks && cf.telegramChunks.length > 0
@@ -2856,6 +3139,10 @@ export async function applyCloudDriveRealtimeSnapshot(params: {
           ...db.folders[idx],
           name: cf.name,
           parentId: cf.parentId,
+          trashed: cf.trashed ?? db.folders[idx].trashed ?? false,
+          trashedAt: cf.trashedAt !== undefined ? cf.trashedAt : db.folders[idx].trashedAt,
+          isPinProtected: cf.isPinProtected ?? db.folders[idx].isPinProtected ?? false,
+          pinHash: cf.pinHash !== undefined ? cf.pinHash : db.folders[idx].pinHash,
         };
       }
     }
@@ -2922,6 +3209,8 @@ export async function applyCloudDriveRealtimeSnapshot(params: {
           name: cf.name || local.name,
           folderId: cf.folderId,
           starred: cf.starred,
+          trashed: cf.trashed ?? local.trashed ?? false,
+          trashedAt: cf.trashedAt !== undefined ? cf.trashedAt : local.trashedAt,
           downloadCount: Math.max(local.downloadCount || 0, cf.downloadCount || 0),
           storageDriver:
             cf.telegramChunks && cf.telegramChunks.length > 0

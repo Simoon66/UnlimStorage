@@ -96,7 +96,11 @@ export const SharedLinksView: React.FC<SharedLinksViewProps> = ({
               <div className="space-y-3">
                 <div className="flex items-start justify-between gap-3">
                   <div className="w-11 h-11 bg-[#24211D] border border-[#2C2824] flex items-center justify-center shrink-0">
-                    <FileText className="w-5 h-5 text-[#D97757]" />
+                    {s.targetType === 'folder' || s.fileMimeType === 'inode/directory' ? (
+                      <HardDrive className="w-5 h-5 text-[#D97757]" />
+                    ) : (
+                      <FileText className="w-5 h-5 text-[#D97757]" />
+                    )}
                   </div>
                   <button
                     onClick={() => onDeleteShare(s.id)}
@@ -108,11 +112,24 @@ export const SharedLinksView: React.FC<SharedLinksViewProps> = ({
                 </div>
 
                 <div>
-                  <h3 className="text-sm font-bold text-[#F2EFE9] truncate" title={s.fileName}>
-                    {s.fileName}
-                  </h3>
+                  <div className="flex items-center gap-2">
+                    <h3 className="text-sm font-bold text-[#F2EFE9] truncate" title={s.fileName}>
+                      {s.fileName}
+                    </h3>
+                    {(s.targetType === 'folder' || s.fileMimeType === 'inode/directory') && (
+                      <span className="px-1.5 py-0.5 text-[10px] font-bold bg-[#24211D] border border-[#D97757] text-[#D97757] shrink-0">
+                        FOLDER GALLERY
+                      </span>
+                    )}
+                  </div>
                   <div className="flex flex-wrap items-center gap-1.5 text-xs text-[#9E978E] mt-1 tabular-nums">
                     <span>{formatBytes(s.fileSizeBytes)}</span>
+                    {Array.isArray(s.sharedFiles) && s.sharedFiles.length > 0 && (
+                      <>
+                        <span aria-hidden="true">·</span>
+                        <span>{s.sharedFiles.length} items</span>
+                      </>
+                    )}
                     <span aria-hidden="true">·</span>
                     <span>{s.downloadCount} downloads</span>
                     <span aria-hidden="true">·</span>

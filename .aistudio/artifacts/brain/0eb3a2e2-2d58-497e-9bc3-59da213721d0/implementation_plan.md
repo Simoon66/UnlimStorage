@@ -1,118 +1,149 @@
-# UnlimStorage — 2GB Telegram MTProto User Account Vault, Minimal JW Player Iframe & Real-Time Cross-Device Deletion Sync
+# UnlimStorage Cloud Drive & Media Suite Upgrades
 
-This upgrade replaces the 20 MB Bot API limitation with a Global Admin Telegram User Account (MTProto) connection supporting up to 2 GB single-file uploads via direct Phone Number + OTP authentication in the Admin panel, streamlines the video embed into a clean JW Player-style interface with playback speed and fullscreen controls, and enforces real-time cross-device deletion synchronization so deleted files disappear immediately on all logged-in devices.
+This plan delivers a comprehensive upgrade across media playback, cloud file management, public sharing, folder privacy, and installable Progressive Web App (PWA) support based on your selected priorities.
 
-### User Review & Critical Decisions
+## User Review & Critical Decisions
 
 > [!IMPORTANT]
-> The following architectural and UX choices have been confirmed from your answers and will govern the implementation:
+> All feature areas below directly reflect your confirmed selections from our planning questionnaire. Review the architectural flow and click **Proceed** when ready to build.
 
-- **Confirmed Decision 1 — Global Admin Telegram Account (2 GB MTProto Storage)**: A single Global Admin Telegram User Account powers the storage vault for the entire platform, allowing files up to **2 GB** (or 4 GB with Telegram Premium) to be transferred using Telegram's MTProto protocol (`GramJS`) into the Admin's private storage channel or Saved Messages without hitting the 20 MB Bot API wall.
-- **Confirmed Decision 2 — Direct Phone Number & OTP Login in Admin Panel**: The Admin panel includes a dedicated **Telegram MTProto Account Login** wizard where the administrator enters their Telegram API ID, API Hash, and Phone Number, receives the 5-digit Telegram login OTP (plus optional 2FA password), and saves the persistent `StringSession` to the server and Firestore.
-- **Confirmed Decision 3 — Minimal JW Player Style Iframe Video Player**: Both the in-app video preview and public `/embed` iframe use a clean, distraction-free **JW Player-style** dark player featuring only a smooth timeline scrubber, Play/Pause, Volume, Playback Speed selector (`0.5x` – `2x`), and Fullscreen toggle—removing extra headers, badges, and surrounding chrome.
-- **Confirmed Decision 4 — Real-Time Multi-Device File Deletion Sync (`onSnapshot` + Tombstones)**: Live Firestore `onSnapshot` listeners on `cloudFiles` and `cloudFolders`, paired with a persistent deleted-ID tombstone registry, guarantee that deleting a file or folder on Device A immediately purges it from Device B's state, localStorage, and IndexedDB cache without ever re-uploading it back.
-
----
-
-### 1. Overview & Core Concept
-
-- **What It Does**:
-  1. **2 GB Telegram User Account (MTProto) Engine**: Connects the administrator's real Telegram account via MTProto (`GramJS`) so large videos and archives up to 2 GB stream directly in high-speed 512 KB MTProto parts without 20 MB Bot API limits, while retaining automatic fallback to chunked storage when needed.
-  2. **In-Dashboard Phone + OTP Authentication**: Allows the admin (`titumamma2425@gmail.com`) to sign into Telegram directly inside the **Storage Node** view using Phone Number -> OTP Code -> optional 2FA Password, generating a reusable encrypted MTProto session string.
-  3. **Simple JW Player Iframe Experience**: Replaces cluttered embed frames with a sleek, zero-distraction JW Player-inspired video canvas containing a responsive center play indicator, fluid red/terracotta progress bar, time display, playback speed menu, and fullscreen button.
-  4. **Instant Cross-Device Deletion & Sync**: Subscribes every logged-in browser/device to real-time Firestore change streams (`docChanges()`) so file creations, renames, folder changes, and deletions propagate live across all active sessions within milliseconds.
-- **Target Audience / Persona**: An administrator and authorized cloud vault users managing large multi-hundred-megabyte and multi-gigabyte media files across multiple devices who need fast uploads, clean embeddable video playback, and reliable multi-device state consistency.
-- **Key Value**: Unlocks up to 2 GB file transfers via Telegram MTProto, eliminates stale deleted files reappearing on secondary devices, and delivers a fast, distraction-free JW Player embed experience.
+- **Confirmed Media Upgrade**: Automatic **Resume Playback** from the last watched timestamp for every video, with a non-intrusive resume toast and one-click "Start Over" option.
+- **Confirmed Explorer & Storage Upgrades**:
+  - **Trash Bin & Restore Workflow**: Soft-deleting files and folders to a dedicated Trash view before permanent deletion.
+  - **Pause & Resume Large File Uploads**: Chunk-level upload state tracking allowing in-flight uploads to be paused and resumed without losing progress.
+  - **Batch ZIP Download**: Selecting multiple files in the explorer and downloading them together as a single `.zip` archive with live progress.
+  - **Grid & List Layout Toggle**: Switching seamlessly between the high-density tabular List view and a visual Grid card layout with media previews.
+- **Confirmed Sharing, Security & Platform Upgrades**:
+  - **Direct Multi-Quality Video Streaming on Public Share Pages**: Full `Auto`, `1080p`, `720p`, `480p`, and `360p` streaming, multi-audio track switching, and subtitle support on public share links (including `.mkv` files).
+  - **Public Folder Sharing with Gallery View**: Sharing entire folders via public links with grid/list browsing, inline video streaming, and single-click folder download.
+  - **PIN Lock Protection for Private Folders**: Securing sensitive folders behind a 4–6 digit PIN prompt.
+  - **Installable Mobile & Desktop PWA**: Full Web App Manifest, service worker caching, in-app install button (with iOS Safari instructions), and offline status indicator.
 
 ---
 
-### 2. User Experience & Visual Design
+## 1. Overview & Core Concept
 
-- **Key User Flows**:
-  1. **Admin Telegram Account Login (Phone + OTP)**:
-     - The Admin opens **Storage Node** in the left sidebar and switches to **Telegram Account (2 GB MTProto)**.
-     - Enters **API ID** & **API Hash** (from `my.telegram.org`) and **Phone Number** (e.g., `+8801...`), then clicks **Send OTP Code**.
-     - Enters the **OTP Code** received in the Telegram app (and 2FA password if enabled) -> clicks **Verify & Connect 2 GB Vault**.
-     - The connected Telegram account name, phone number, and active `MTProto 2 GB Ready` status appear immediately and persist across restarts.
-  2. **High-Speed Large File Upload & Processing Screen**:
-     - When uploading large files (up to 2 GB), the user sees a clean, high-speed progress bar for the upload phase followed by a smooth **"Finalizing your file for instant streaming..."** processing screen (hiding all underlying chunking/MTProto encoding mechanics from end users).
-  3. **Minimal JW Player Style Video Playback**:
-     - Opening a video or loading an `/embed/{token}` iframe renders a full-bleed black video viewport.
-     - Moving the pointer reveals a minimal bottom control bar inspired by JW Player: Play/Pause, 10s Skip, Volume slider, tabular current/total time (`04:12 / 24:50`), Playback Speed selector (`0.5x`, `0.75x`, `1x`, `1.25x`, `1.5x`, `2x`), and Fullscreen toggle.
-  4. **Deleting a File While Logged In on Two Devices**:
-     - When the user deletes a file on Device 1, it is immediately deleted from the server, Firestore `cloudFiles/{fileId}`, and local IndexedDB, while recording a deletion tombstone.
-     - Device 2 (logged into the same account) receives the real-time `removed` event from Firestore `onSnapshot`, immediately removes the file from the UI table, and purges its local cache so the deleted file never lingers or re-syncs.
-- **Visual Identity & Theme**:
-  - *Aesthetic Direction*: Utilitarian Enterprise SaaS Dashboard (`UnlimStorage`) paired with a minimalist cinema-black JW Player media viewport.
-  - *Color Palette & Mood* (60-30-10 Discipline):
-    - **60% Dominant Neutral Canvas**: Deep Obsidian (`#141311`) and Charcoal Workspace Surface (`#1C1A17`).
-    - **30% Structural Surfaces**: Hairline Slate Borders (`#2C2824`), Muted Stone Metadata (`#9E978E`), Crisp Alabaster Primary Text (`#F2EFE9`).
-    - **10% Accent Budget**: Terracotta Primary Accent (`#D97757`), Semantic Emerald (`#16A34A`) for connected MTProto status, Amber (`#D97706`) for OTP verification state, Crimson (`#DC2626`) for destructive actions.
-  - *Typography & Hierarchy*:
-    - Display & Workspace Navigation: `Plus Jakarta Sans` (600–700 weight, tight tracking).
-    - Dense Table & Control Copy: `DM Sans` (400–500 weight, 13px–14px, single-line `whitespace-nowrap`).
-    - File Sizes, Timestamps, Speed Multipliers & OTP Inputs: `JetBrains Mono` with strict `font-variant-numeric: tabular-nums`.
-  - *Component Styling & Layout*:
-    - Full 1440px desktop SaaS layout with a 256px sidebar, single-row contextual top header, compact 40px–44px table rows, and flat 1px structural borders (`border border-[#2C2824]`, zero nested card sandwiches or decorative pulsing dots).
-- **Interactive Feedback & Motion**:
-  - Routine control transitions settle within `150ms` (`cubic-bezier(0.16, 1, 0.3, 1)`) using compositor-only `transform` and `opacity`.
-  - Video player controls auto-hide after 2.5 seconds of pointer inactivity during playback for an unobstructed viewing frame.
+- **What It Does**: Elevates UnlimStorage into an installable, full-featured cloud drive and streaming platform where users can organize files in Grid or List views, protect private folders with a PIN, recover accidentally deleted items from the Trash, pause and resume large uploads, download multi-file ZIP archives, and share both individual videos and entire folders with direct multi-quality streaming.
+- **Target Audience / Persona**: Desktop and mobile power users storing, organizing, and streaming large video libraries (including multi-audio MKV files) and personal cloud archives backed by Telegram storage nodes.
+- **Key Value**: Eliminates data loss from accidental deletions or interrupted uploads, saves time with batch ZIP downloads and automatic video playback resume, and makes public sharing and mobile installation effortless.
 
 ---
 
-### 3. Key Product Decisions & Trade-Offs
+## 2. User Experience & Visual Design
 
-- **Decision 1 — Server + Client Coordinated Telegram MTProto (`GramJS`) with StringSession Persistence**:
-  - *Chosen Approach*: Authenticate the Admin's Telegram User Account via MTProto (`telegram` / GramJS) using Phone Number + OTP, and persist the authorized `StringSession` in the server database and `systemConfig/storageNode` in Firestore.
-  - *Why*: Standard Telegram Bot API (`api.telegram.org/bot...`) enforces a hard 20 MB download limit (`getFile`) and 50 MB upload limit per request. A real Telegram User Account using MTProto supports single-file documents up to **2 GB** (and 4 GB for Premium accounts) with parallel worker connections.
-  - *Alternatives Considered*: Per-user Telegram login was rejected so regular users don't have to connect their personal Telegram accounts; the Global Admin account handles all storage transparently behind the scenes.
-- **Decision 2 — Real-Time Firestore `onSnapshot` + Deletion Tombstone Registry**:
-  - *Chosen Approach*: Replace one-time startup fetches with continuous `onSnapshot` listeners on `cloudFiles` and `cloudFolders`, and track deleted file/folder IDs in a tombstone set (`deletedCloudIds`) before running any local-to-cloud reconciliation.
-  - *Why*: Previously, when Device A deleted a file, Device B still held that file in its `localStorage` fallback state and would either keep showing it or re-upload its metadata back to Firestore on refresh. Real-time `onSnapshot` `removed` events + tombstones prevent stale local copies from ever resurrecting deleted files.
-- **Decision 3 — Streamlined JW Player Style Iframe**:
-  - *Chosen Approach*: Strip away multi-tab debug overlays, top metadata ribbons, and complex filter panels inside the video player in favor of a clean JW Player control bar (Play/Pause, Seek bar, Volume, Speed selector, Fullscreen).
-  - *Why*: Matches the user's request for a fast, lightweight, familiar JW Player embed that loads immediately on any site or share page.
+### Key User Flows
+
+1. **Resume Video Playback Flow**:
+   - As a video plays, the player saves the current timestamp every 2 seconds (keyed by file ID or share token).
+   - Re-opening a partially watched video (between 5% and 95% progress) automatically seeks to the saved position and displays a quiet top-left overlay badge (`Resumed at 14:28 · Start Over`) for 5 seconds.
+   - Explorer Grid and List views also display a subtle progress bar underneath partially watched video items.
+
+2. **Trash Bin & Recovery Flow**:
+   - Clicking **Delete** on files or folders moves them to the **Trash** section in the sidebar rather than erasing them immediately.
+   - Inside the **Trash** view, users can select items to **Restore** back to their original folder or **Delete Permanently**, or click **Empty Trash** to purge all trashed items at once.
+
+3. **Pause & Resume Upload Flow**:
+   - Uploading large files slices the payload into sequential chunks and shows each active transfer in the upload panel with **Pause**, **Resume**, and **Cancel** controls.
+   - Pausing halts the current chunk upload immediately while retaining all completed parts on the server/client session; clicking **Resume** continues from the exact byte offset where it paused.
+
+4. **Explorer Grid / List Toggle & Batch ZIP Download**:
+   - The explorer toolbar includes a segmented **List | Grid** toggle persisted in user preferences.
+   - Selecting multiple files reveals a **Download ZIP** button in the bulk action bar that streams and packages the selected files into a single `.zip` download with percentage feedback.
+
+5. **PIN-Locked Folders**:
+   - Folder actions include **Lock with PIN** (4–6 digits). Locked folders display a lock indicator in the explorer and require entering the PIN in a verification modal before opening, moving, sharing, or deleting.
+
+6. **Public Folder Gallery & Direct Video Share Streaming**:
+   - Users can click **Share Folder** on any folder to generate a public link (`/?share=<token>`).
+   - Visitors opening a shared folder see a clean gallery portal (Grid/List toggle) where they can stream any video inside the folder using the full multi-quality (`Auto` / `1080p` / `720p` / `480p` / `360p`), multi-audio, and subtitle-enabled player, or download individual files / the full folder as a ZIP.
+
+7. **Installable PWA & Offline Indicator**:
+   - An **Install App** button appears in the navigation sidebar/header whenever the browser supports PWA installation (or shows a guided "Add to Home Screen" modal on iOS Safari), hiding automatically when already running in standalone mode.
+
+### Visual Identity & Theme
+
+- **Aesthetic Direction**: Warm industrial dark studio interface matching the existing obsidian and terracotta palette (`#141311` canvas, `#1C1A17` structural surfaces, `#2C2824` hairline borders, `#D97757` primary accent).
+- **Color Palette & Mood**:
+  - Dominant 60% Canvas: Deep Warm Obsidian (`#141311`)
+  - Structural 30% Surfaces: Charcoal Slate (`#1C1A17` and `#24211D`) with crisp `1px solid #2C2824` hairline dividers
+  - Accent 10% Budget: Warm Terracotta (`#D97757`), Semantic Emerald (`#2E9E6B`), Amber (`#D99B26`), and Crimson (`#D94848`)
+- **Typography & Hierarchy**: Clean sans-serif interface hierarchy paired with `tabular-nums` monospace alignment for byte sizes, upload speeds, PIN inputs, and video timestamps.
+- **Zero-Pill Metadata Discipline**: File sizes, dates, watch progress, and folder item counts render as clean unboxed text separated by middle dots (`·`).
 
 ---
 
-### 4. Technical Architecture & Data Strategy *(Technical Reference)*
+## 3. Key Product Decisions & Trade-Offs
 
-- **Architecture & Component Diagram**:
+- **Decision 1: Chunked Upload Session State for Pause/Resume**
+  - *Chosen Approach*: Track resumable upload sessions using deterministic upload IDs so completed chunks are retained in temporary storage while paused, and assembled into the final file record once the final chunk finishes.
+  - *Why*: Allows multi-hundred-megabyte or multi-gigabyte video uploads to pause and resume reliably without re-sending already transferred data.
+- **Decision 2: Soft-Delete Trash Architecture**
+  - *Chosen Approach*: Use `trashed: true` and `trashedAt` metadata on file and folder records in both the backend/client database and Firestore, filtering trashed items out of the main Explorer and Shared views into a dedicated Trash view.
+  - *Why*: Prevents accidental permanent loss of large Telegram-backed media files and syncs cleanly across devices via Firestore.
+- **Decision 3: Unified Streaming Pipeline for Public Shares**
+  - *Chosen Approach*: Connect public share tokens (both single-file video shares and files inside shared folders) to the same zero-buffer FFmpeg transcoding, audio-track probing, and subtitle extraction pipeline used in the authenticated drive.
+  - *Why*: Ensures `.mkv` videos and multi-audio streams play with instant startup, quality selection (`Auto`, `1080p`, `720p`, `480p`, `360p`), and working timeline scrubbing on public share pages.
+
+---
+
+## 4. Technical Architecture & Data Strategy
+
+### Architecture & Component Diagram
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│                        UnlimStorage Client Workspace                         │
-│                                                                              │
-│  ┌──────────────────────────┐  ┌──────────────────────┐  ┌────────────────┐  │
-│  │   Drive Explorer View    │  │  Admin MTProto Panel │  │ JW Player      │  │
-│  │  • Fast Upload + Hidden  │  │  • API ID & API Hash │  │ Iframe Embed   │  │
-│  │    Processing Loader     │  │  • Phone -> OTP Code │  │ • Clean Video  │  │
-│  │  • Real-Time File Table  │  │  • 2FA Password Step │  │ • Speed Menu   │  │
-│  │  • Instant Delete Action │  │  • Session Status    │  │ • Fullscreen   │  │
-│  └────────────┬─────────────┘  └──────────┬───────────┘  └────────┬───────┘  │
-└───────────────┼───────────────────────────┼───────────────────────┼──────────┘
-                │                           │                       │
-                ▼                           ▼                       ▼
-┌───────────────────────────────┐  ┌───────────────────────────────────────────┐
-│   Firebase Cloud Firestore    │  │    Backend & Telegram MTProto Engine      │
-│ • Real-Time onSnapshot Sync   │  │ • GramJS TelegramClient (StringSession)   │
-│ • /cloudFiles/{fileId}        │  │ • /api/telegram/mtproto/send-code         │
-│ • /cloudFolders/{folderId}    │  │ • /api/telegram/mtproto/verify-code       │
-│ • Deletion Tombstone Guard    │  │ • Up to 2 GB Direct MTProto File Upload   │
-│ • /systemConfig/storageNode   │  │ • HTTP Range Stream Proxy for JW Player   │
-└───────────────────────────────┘  └───────────────────────────────────────────┘
+│                        UnlimStorage PWA Shell (Vite + SW)                    │
+│  ┌────────────────────┐  ┌────────────────────────────────────────────────┐  │
+│  │ Sidebar Navigation │  │ Main Explorer / Trash / Public Portal Viewport │  │
+│  │ - My Files         │  │ ┌────────────────────────────────────────────┐ │  │
+│  │ - Trash Bin (New)  │  │ │ Toolbar: Search · Grid/List · Batch ZIP    │ │  │
+│  │ - Shared Links     │  │ └────────────────────────────────────────────┘ │  │
+│  │ - Storage & Speed  │  │ ┌────────────────────┐ ┌─────────────────────┐ │  │
+│  │ - Install PWA Btn  │  │ │ File/Folder Grid & │ │ PIN Lock & Share    │ │  │
+│  └────────────────────┘  │ │ List Views         │ │ Modals              │ │  │
+│                          │ └────────────────────┘ └─────────────────────┘ │  │
+│  ┌───────────────────────┴────────────────────────────────────────────────┐  │
+│  │ Resumable Upload Queue Bar (Pause / Resume / Cancel Chunked Transfers) │  │
+│  └────────────────────────────────────────────────────────────────────────┘  │
+└──────────────────────────────────────┬───────────────────────────────────────┘
+                                       │
+                                       ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                 Video Streaming & Public Share Portal Engine                 │
+│  ┌───────────────────────────────────┐  ┌─────────────────────────────────┐  │
+│  │ Custom Cinema Video Player        │  │ Public Share Portal             │  │
+│  │ - Auto Resume Playback Timestamp  │  │ - Single Video Direct Stream    │  │
+│  │ - Auto/1080p/720p/480p/360p       │  │ - Shared Folder Gallery View    │  │
+│  │ - Multi-Audio & Windowed VTT CC   │  │ - Folder Batch ZIP Download     │  │
+│  └───────────────────────────────────┘  └─────────────────────────────────┘  │
+└──────────────────────────────────────┬───────────────────────────────────────┘
+                                       │
+                                       ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                Express Backend & Firestore / Telegram Storage                │
+│  - Resumable Chunk Upload Endpoints (/api/files/upload-chunk, /complete)     │
+│  - Batch ZIP Streamer (/api/files/batch-zip & /api/public/share/:token/zip)  │
+│  - Public Share Media Probe & FFmpeg Transcode Streamer                      │
+│  - Firestore Sync (cloudFiles, cloudFolders, publicShares + security rules)  │
+└──────────────────────────────────────────────────────────────────────────────┘
 ```
 
-- **Data Model & State**:
-  - **`systemConfig/storageNode`**: Extended to store `mode` (`mtproto` | `bot`), `apiId`, `apiHash`, `phoneNumber`, `mtprotoSession` (encrypted/persisted `StringSession`), `accountName`, `accountUsername`, alongside existing `botToken` and `chatId` fallback fields.
-  - **`cloudFiles/{fileId}` & `cloudFolders/{folderId}`**: Synchronized in real time via Firestore `onSnapshot`. Includes storage driver metadata (`mtproto` | `telegram` | `local_vault`), message/document identifiers, and file size up to 2 GB+.
-  - **Deletion Tombstone Registry**: Local + cloud-synced set of deleted file and folder IDs ensuring that once an item is deleted on any device, no other open tab or device can re-insert it from local cache.
-- **Interactive Component & State Mapping**:
-  - **Admin MTProto OTP Flow**:
-    1. `Step 1 (Credentials & Phone)`: Admin inputs `apiId`, `apiHash`, `phoneNumber`, and target `chatId` (defaulting to `me` / Saved Messages or private storage channel) -> triggers `/api/telegram/mtproto/send-code` -> transitions UI to `Step 2 (OTP Input)`.
-    2. `Step 2 (OTP & Optional 2FA)`: Admin inputs the Telegram login code (and 2FA cloud password if prompted) -> triggers `/api/telegram/mtproto/verify-code` -> receives authorized `StringSession` -> saves to backend and Firestore `systemConfig/storageNode` -> transitions UI to `Connected (2 GB MTProto Active)`.
-  - **Real-Time Multi-Device Sync & Delete**:
-    - An active `subscribeToUserCloudDrive(uid, callbacks)` listener in Firestore watches `cloudFiles` and `cloudFolders` where `ownerId == uid`.
-    - When `change.type === 'removed'` fires on any device, the client immediately purges the file/folder from React state, removes it from `localStorage` fallback DB, deletes its binary from IndexedDB, and adds the ID to the tombstone list.
-  - **JW Player Style Embed Component**:
-    - Renders a clean `<iframe>` housing a dark HTML5 video surface with pointer-activity auto-hide controls, smooth scrub bar with hover time preview, Play/Pause, Mute/Volume slider, Speed popover (`0.5x`, `0.75x`, `1x`, `1.25x`, `1.5x`, `2x`), and Fullscreen button.
+### Data Model & State Extensions
+
+- **FileRecord & FolderRecord**:
+  - `trashed?: boolean` and `trashedAt?: string | null` for Trash bin management.
+  - `pinHash?: string | null` and `isPinProtected?: boolean` on `FolderRecord` for PIN-locked private folders.
+- **ShareLink**:
+  - `targetType?: 'file' | 'folder'` and `folderId?: string | null` so a public share link can represent either a single file or a shared folder gallery.
+- **Playback Resume Store**:
+  - Persisted map (`unlim_video_progress_v1`) storing `{ currentTime, duration, updatedAt }` per `fileId` / share token.
+- **Resumable Upload State**:
+  - Extended `TransferJob` status with `'paused'`, tracking `uploadedBytes`, `chunkIndex`, and `AbortController` per active upload job so clicking Pause aborts only the current in-flight chunk and clicking Resume continues from the next unuploaded chunk.
+
+### Interactive Component & State Mapping
+
+- **Explorer View Switcher & Grid Cards**: Toggles between dense table rows and responsive media cards showing video watch progress bars, folder PIN lock badges, and quick action buttons.
+- **Trash View**: Lists all trashed files and folders with individual **Restore** and **Delete Permanently** buttons plus a header **Empty Trash** action.
+- **PIN Lock Modal**: Supports setting, changing, removing, and verifying a 4–6 digit folder PIN during session navigation.
+- **Batch ZIP Generator**: Streams selected files (or shared folder files) into a standards-compliant `.zip` archive download with real-time progress reporting.
+- **PWA Integration**: Configures `vite-plugin-pwa` with precaching, generates compliant `192x192`, `512x512`, and `apple-touch-icon.png` icons, and mounts the `PWAInstallButton` and `OfflineIndicator` components.

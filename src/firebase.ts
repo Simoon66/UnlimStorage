@@ -133,7 +133,7 @@ function sanitizeFileTags(rawTags: unknown): string[] {
   const out: string[] = [];
   for (const item of rawTags) {
     const cleaned = String(item || '').trim().slice(0, 32);
-    if (!cleaned) continue;
+    if (!cleaned || cleaned.startsWith('__')) continue;
     const key = cleaned.toLowerCase();
     if (!seen.has(key)) {
       seen.add(key);
@@ -144,17 +144,91 @@ function sanitizeFileTags(rawTags: unknown): string[] {
   return out;
 }
 
-function parseTagsJson(raw: unknown): string[] {
-  if (Array.isArray(raw)) return sanitizeFileTags(raw);
-  if (typeof raw === 'string' && raw.trim()) {
+function parseTagsAndTrashFromJson(raw: unknown): { tags: string[]; trashed: boolean } {
+  let rawArr: unknown[] = [];
+  if (Array.isArray(raw)) {
+    rawArr = raw;
+  } else if (typeof raw === 'string' && raw.trim()) {
     try {
       const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) return sanitizeFileTags(parsed);
+      if (Array.isArray(parsed)) rawArr = parsed;
     } catch {
-      return sanitizeFileTags(raw.split(','));
+      rawArr = raw.split(',');
     }
   }
-  return [];
+  const trashed = rawArr.some((item) => String(item || '').trim() === '__trashed');
+  return {
+    tags: sanitizeFileTags(rawArr),
+    trashed,
+  };
+}
+
+function encodeFolderParentIdForFirestore(folder: FolderRecord): string {
+  const baseParent = sanitizeId(folder.parentId || 'root').slice(0, 72);
+  const isTrashed = Boolean(folder.trashed);
+  const pinClean = String(folder.pinHash || '').replace(/[^a-zA-Z0-9_]/g, '').slice(0, 32);
+  if (!isTrashed && !pinClean) {
+    return baseParent;
+  }
+  return sanitizeId(`m_${isTrashed ? 'T1' : 'T0'}_${pinClean || 'n'}__${baseParent}`);
+}
+
+function decodeFolderParentIdFromFirestore(rawParentId: string): {
+  parentId: string | null;
+  trashed: boolean;
+  isPinProtected: boolean;
+  pinHash: string | null;
+} {
+  const raw = String(rawParentId || 'root');
+  if (raw.startsWith('m_T')) {
+    const splitIdx = raw.indexOf('__');
+    if (splitIdx > 0) {
+      const header = raw.slice(2, splitIdx); // e.g. T1_pin_xxx or T0_n
+      const baseParent = raw.slice(splitIdx + 2) || 'root';
+      const trashed = header.startsWith('T1_');
+      const pinPart = header.slice(3);
+      const hasPin = Boolean(pinPart && pinPart !== 'n');
+      return {
+        parentId: baseParent === 'root' ? null : baseParent,
+        trashed,
+        isPinProtected: hasPin,
+        pinHash: hasPin ? pinPart : null,
+      };
+    }
+  }
+  return {
+    parentId: raw === 'root' ? null : raw,
+    trashed: false,
+    isPinProtected: false,
+    pinHash: null,
+  };
+}
+
+const FOLDER_SHARE_MANIFEST_PREFIX = '__UNLIM_FOLDER_SHARE_V1__:';
+
+function decodeShareFolderManifest(rawPreviewText?: string): {
+  isFolderShare: boolean;
+  folderId?: string | null;
+  sharedFiles?: ShareLink['sharedFiles'];
+  cleanPreviewText?: string;
+} {
+  if (!rawPreviewText) return { isFolderShare: false };
+  if (rawPreviewText.startsWith(FOLDER_SHARE_MANIFEST_PREFIX)) {
+    try {
+      const parsed = JSON.parse(rawPreviewText.slice(FOLDER_SHARE_MANIFEST_PREFIX.length));
+      if (parsed && typeof parsed === 'object') {
+        return {
+          isFolderShare: true,
+          folderId: parsed.folderId || null,
+          sharedFiles: Array.isArray(parsed.sharedFiles) ? parsed.sharedFiles : [],
+          cleanPreviewText: undefined,
+        };
+      }
+    } catch {
+      // ignore
+    }
+  }
+  return { isFolderShare: false, cleanPreviewText: rawPreviewText };
 }
 
 export async function signInWithGooglePopup(): Promise<FirebaseUser> {
@@ -358,74 +432,142 @@ function isStarterSeedFile(fileId: string): boolean {
   );
 }
 
+const inFlightDocSyncs = new Map<string, Promise<void>>();
+
+function runSerializedDocSync(key: string, fn: () => Promise<void>): Promise<void> {
+  const prev = inFlightDocSyncs.get(key) || Promise.resolve();
+  const next = prev
+    .catch(() => undefined)
+    .then(fn)
+    .finally(() => {
+      if (inFlightDocSyncs.get(key) === next) {
+        inFlightDocSyncs.delete(key);
+      }
+    });
+  inFlightDocSyncs.set(key, next);
+  return next;
+}
+
 export async function syncCloudFileToFirestore(
   file: FileRecord,
-  isUpdate = false
+  _isUpdate = false
 ): Promise<void> {
   const fbUser = auth.currentUser;
   if (!fbUser || !fbUser.emailVerified) return;
   if (isStarterSeedFile(file.id)) return;
 
-  await ensureFirestoreUserProfile(fbUser);
-  const safeUid = sanitizeId(fbUser.uid);
   const safeFileId = sanitizeId(file.id);
   const path = `cloudFiles/${safeFileId}`;
-  const ref = doc(db, 'cloudFiles', safeFileId);
 
-  const chunksJson = JSON.stringify(file.telegramChunks || []).slice(0, 130000);
-  const storageDriver: StorageDriver =
-    file.storageDriver === 'telegram' ? 'telegram' : 'local_vault';
-  const safeSha256 = (file.sha256 || '').slice(0, 128);
-  const safeChatId = (file.telegramChatId || '').slice(0, 64);
-  const safePreviewText = (file.previewText || '').slice(0, 28000);
-  const safePreviewDataUrl =
-    file.previewDataUrl && file.previewDataUrl.length <= 500000 ? file.previewDataUrl : '';
-  const safeTagsJson = JSON.stringify(sanitizeFileTags(file.tags)).slice(0, 1024);
+  return runSerializedDocSync(path, async () => {
+    const currentFbUser = auth.currentUser;
+    if (!currentFbUser || !currentFbUser.emailVerified) return;
 
-  try {
-    await updateDoc(ref, {
-      name: truncateString(file.name, 255, 'file.bin'),
-      folderId: sanitizeId(file.folderId || 'root'),
-      starred: Boolean(file.starred),
-      downloadCount: Math.max(0, Math.min(100000000, Math.floor(file.downloadCount || 0))),
-      sha256: safeSha256,
-      storageDriver,
-      telegramChatId: safeChatId,
-      telegramChunksJson: chunksJson,
-      previewText: safePreviewText,
-      previewDataUrl: safePreviewDataUrl,
-      tagsJson: safeTagsJson,
-      updatedAt: serverTimestamp(),
-    });
-    return;
-  } catch {
-    // Document does not exist yet on Firestore; proceed to setDoc creation below
-  }
+    await ensureFirestoreUserProfile(currentFbUser);
+    const safeUid = sanitizeId(currentFbUser.uid);
+    const ref = doc(db, 'cloudFiles', safeFileId);
 
-  try {
-    await setDoc(ref, {
-      id: safeFileId,
-      ownerId: safeUid,
-      ownerName: truncateString(file.ownerName || fbUser.displayName || 'User', 120),
-      folderId: sanitizeId(file.folderId || 'root'),
-      name: truncateString(file.name, 255, 'file.bin'),
-      sizeBytes: Math.max(0, Math.min(54975581388800, Math.floor(file.sizeBytes))),
-      mimeType: truncateString(file.mimeType || 'application/octet-stream', 128),
-      starred: Boolean(file.starred),
-      downloadCount: Math.max(0, Math.min(100000000, Math.floor(file.downloadCount || 0))),
-      sha256: safeSha256,
-      storageDriver,
-      telegramChatId: safeChatId,
-      telegramChunksJson: chunksJson,
-      previewText: safePreviewText,
-      previewDataUrl: safePreviewDataUrl,
-      tagsJson: safeTagsJson,
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp(),
-    });
-  } catch (error) {
-    handleFirestoreError(error, OperationType.CREATE, path);
-  }
+    const chunksJson = JSON.stringify(file.telegramChunks || []).slice(0, 130000);
+    const storageDriver: StorageDriver =
+      file.storageDriver === 'telegram' || (file.telegramChunks && file.telegramChunks.length > 0)
+        ? 'telegram'
+        : 'local_vault';
+    const safeName = truncateString(file.name, 255, 'file.bin');
+    const safeFolderId = sanitizeId(file.folderId || 'root');
+    const safeStarred = Boolean(file.starred);
+    const safeDownloadCount = Math.max(0, Math.min(100000000, Math.floor(file.downloadCount || 0)));
+    const safeSha256 = (file.sha256 || '').slice(0, 128);
+    const safeChatId = (file.telegramChatId || '').slice(0, 64);
+    const safePreviewText = (file.previewText || '').slice(0, 28000);
+    const safePreviewDataUrl =
+      file.previewDataUrl && file.previewDataUrl.length <= 500000 ? file.previewDataUrl : '';
+    const serializedTags = sanitizeFileTags(file.tags);
+    if (file.trashed) {
+      serializedTags.push('__trashed');
+    }
+    const safeTagsJson = JSON.stringify(serializedTags).slice(0, 1024);
+
+    let existsOnServer = false;
+    let existingData: Record<string, unknown> | null = null;
+    try {
+      const snap = await getDoc(ref);
+      if (snap.exists()) {
+        existsOnServer = true;
+        existingData = snap.data() as Record<string, unknown>;
+      }
+    } catch {
+      existsOnServer = false;
+    }
+
+    if (existsOnServer && existingData) {
+      // Skip write if nothing changed
+      const existingChunks = String(existingData.telegramChunksJson || '[]');
+      const needsChunkUpgrade = existingChunks === '[]' && chunksJson !== '[]';
+      const isUnchanged =
+        !needsChunkUpgrade &&
+        existingData.name === safeName &&
+        existingData.folderId === safeFolderId &&
+        Boolean(existingData.starred) === safeStarred &&
+        existingData.storageDriver === storageDriver &&
+        String(existingData.tagsJson || '[]') === safeTagsJson;
+
+      if (isUnchanged) {
+        return;
+      }
+
+      try {
+        await updateDoc(ref, {
+          name: safeName,
+          folderId: safeFolderId,
+          starred: safeStarred,
+          downloadCount: safeDownloadCount,
+          sha256: safeSha256,
+          storageDriver,
+          telegramChatId: safeChatId,
+          telegramChunksJson: chunksJson !== '[]' ? chunksJson : existingChunks,
+          previewText: safePreviewText,
+          previewDataUrl: safePreviewDataUrl,
+          tagsJson: safeTagsJson,
+          updatedAt: serverTimestamp(),
+        });
+      } catch (error) {
+        handleFirestoreError(error, OperationType.UPDATE, path);
+      }
+      return;
+    }
+
+    try {
+      await setDoc(ref, {
+        id: safeFileId,
+        ownerId: safeUid,
+        ownerName: truncateString(file.ownerName || currentFbUser.displayName || 'User', 120),
+        folderId: safeFolderId,
+        name: safeName,
+        sizeBytes: Math.max(0, Math.min(54975581388800, Math.floor(file.sizeBytes))),
+        mimeType: truncateString(file.mimeType || 'application/octet-stream', 128),
+        starred: safeStarred,
+        downloadCount: safeDownloadCount,
+        sha256: safeSha256,
+        storageDriver,
+        telegramChatId: safeChatId,
+        telegramChunksJson: chunksJson,
+        previewText: safePreviewText,
+        previewDataUrl: safePreviewDataUrl,
+        tagsJson: safeTagsJson,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+    } catch (error) {
+      // If a concurrent tab created the document milliseconds ago, treat as benign
+      try {
+        const checkSnap = await getDoc(ref);
+        if (checkSnap.exists()) return;
+      } catch {
+        // ignore
+      }
+      handleFirestoreError(error, OperationType.CREATE, path);
+    }
+  });
 }
 
 export async function deleteCloudFileFromFirestore(fileId: string): Promise<void> {
@@ -449,36 +591,67 @@ export async function syncCloudFolderToFirestore(folder: FolderRecord): Promise<
   const fbUser = auth.currentUser;
   if (!fbUser || !fbUser.emailVerified) return;
 
-  await ensureFirestoreUserProfile(fbUser);
-  const safeUid = sanitizeId(fbUser.uid);
   const safeFolderId = sanitizeId(folder.id);
   const path = `cloudFolders/${safeFolderId}`;
-  const ref = doc(db, 'cloudFolders', safeFolderId);
 
-  try {
-    await updateDoc(ref, {
-      name: truncateString(folder.name, 255, 'Folder'),
-      parentId: sanitizeId(folder.parentId || 'root'),
-      updatedAt: serverTimestamp(),
-    });
-    return;
-  } catch {
-    // Proceed to create if document does not exist
-  }
+  return runSerializedDocSync(path, async () => {
+    const currentFbUser = auth.currentUser;
+    if (!currentFbUser || !currentFbUser.emailVerified) return;
 
-  try {
-    await setDoc(ref, {
-      id: safeFolderId,
-      ownerId: safeUid,
-      ownerName: truncateString(folder.ownerName || fbUser.displayName || 'User', 120),
-      parentId: sanitizeId(folder.parentId || 'root'),
-      name: truncateString(folder.name, 255, 'Folder'),
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp(),
-    });
-  } catch (error) {
-    handleFirestoreError(error, OperationType.CREATE, path);
-  }
+    await ensureFirestoreUserProfile(currentFbUser);
+    const safeUid = sanitizeId(currentFbUser.uid);
+    const ref = doc(db, 'cloudFolders', safeFolderId);
+    const safeName = truncateString(folder.name, 255, 'Folder');
+    const safeParentId = encodeFolderParentIdForFirestore(folder);
+
+    let existsOnServer = false;
+    let existingData: Record<string, unknown> | null = null;
+    try {
+      const snap = await getDoc(ref);
+      if (snap.exists()) {
+        existsOnServer = true;
+        existingData = snap.data() as Record<string, unknown>;
+      }
+    } catch {
+      existsOnServer = false;
+    }
+
+    if (existsOnServer && existingData) {
+      if (existingData.name === safeName && existingData.parentId === safeParentId) {
+        return;
+      }
+      try {
+        await updateDoc(ref, {
+          name: safeName,
+          parentId: safeParentId,
+          updatedAt: serverTimestamp(),
+        });
+      } catch (error) {
+        handleFirestoreError(error, OperationType.UPDATE, path);
+      }
+      return;
+    }
+
+    try {
+      await setDoc(ref, {
+        id: safeFolderId,
+        ownerId: safeUid,
+        ownerName: truncateString(folder.ownerName || currentFbUser.displayName || 'User', 120),
+        parentId: safeParentId,
+        name: safeName,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+    } catch (error) {
+      try {
+        const checkSnap = await getDoc(ref);
+        if (checkSnap.exists()) return;
+      } catch {
+        // ignore
+      }
+      handleFirestoreError(error, OperationType.CREATE, path);
+    }
+  });
 }
 
 export async function deleteCloudFolderFromFirestore(folderId: string): Promise<void> {
@@ -550,6 +723,7 @@ export async function fetchUserCloudDriveFromFirestore(
         }
       }
       const rawFolderId = String(d.folderId || 'root');
+      const parsedMeta = parseTagsAndTrashFromJson(d.tagsJson);
       files.push({
         id: String(d.id || docSnap.id),
         name: String(d.name || 'file.bin'),
@@ -564,13 +738,14 @@ export async function fetchUserCloudDriveFromFirestore(
         telegramChatId: d.telegramChatId ? String(d.telegramChatId) : undefined,
         telegramChunks: parsedChunks,
         starred: Boolean(d.starred),
+        trashed: parsedMeta.trashed,
         downloadCount: typeof d.downloadCount === 'number' ? d.downloadCount : 0,
         createdAt: toIsoDateString(d.createdAt),
         updatedAt: toIsoDateString(d.updatedAt),
         previewText: d.previewText ? String(d.previewText) : undefined,
         previewDataUrl: d.previewDataUrl ? String(d.previewDataUrl) : undefined,
         lockedOverQuota: false,
-        tags: parseTagsJson(d.tagsJson),
+        tags: parsedMeta.tags,
       });
     });
   } catch (err) {
@@ -582,14 +757,17 @@ export async function fetchUserCloudDriveFromFirestore(
     const foldersSnap = await getDocs(foldersQuery);
     foldersSnap.forEach((docSnap) => {
       const d = docSnap.data();
-      const rawParentId = String(d.parentId || 'root');
+      const decodedParent = decodeFolderParentIdFromFirestore(String(d.parentId || 'root'));
       folders.push({
         id: String(d.id || docSnap.id),
         name: String(d.name || 'Folder'),
-        parentId: rawParentId === 'root' ? null : rawParentId,
+        parentId: decodedParent.parentId,
         ownerId: String(d.ownerId || safeUid),
         ownerName: String(d.ownerName || fbUser.displayName || 'Cloud User'),
         createdAt: toIsoDateString(d.createdAt),
+        trashed: decodedParent.trashed,
+        isPinProtected: decodedParent.isPinProtected,
+        pinHash: decodedParent.pinHash,
       });
     });
   } catch (err) {
@@ -610,9 +788,18 @@ export async function fetchUserCloudDriveFromFirestore(
           parsedChunks = [];
         }
       }
+      const folderManifest = decodeShareFolderManifest(
+        d.previewText ? String(d.previewText) : undefined
+      );
       shares.push({
         id: String(d.id || `shr_${docSnap.id}`),
         token: String(d.token || docSnap.id),
+        targetType:
+          folderManifest.isFolderShare || d.fileMimeType === 'application/x-unlim-folder'
+            ? 'folder'
+            : 'file',
+        folderId: folderManifest.folderId || null,
+        sharedFiles: folderManifest.sharedFiles,
         fileId: String(d.fileId || ''),
         fileName: String(d.fileName || 'Shared-File.bin'),
         fileSizeBytes: typeof d.fileSizeBytes === 'number' ? d.fileSizeBytes : 0,
@@ -637,7 +824,7 @@ export async function fetchUserCloudDriveFromFirestore(
         telegramChatId: d.telegramChatId ? String(d.telegramChatId) : undefined,
         telegramChunks: parsedChunks,
         cloudChunkCount: typeof d.cloudChunkCount === 'number' ? d.cloudChunkCount : 0,
-        previewText: d.previewText ? String(d.previewText) : undefined,
+        previewText: folderManifest.cleanPreviewText,
         previewDataUrl: d.previewDataUrl ? String(d.previewDataUrl) : undefined,
       });
     });
@@ -665,103 +852,179 @@ export async function syncPublicShareToFirestore(params: {
   const fbUser = auth.currentUser;
   if (!fbUser || !fbUser.emailVerified) return;
 
-  await ensureFirestoreUserProfile(fbUser);
-  const safeUid = sanitizeId(fbUser.uid);
   const safeToken = sanitizeId(params.share.token);
-  const safeShareId = sanitizeId(params.share.id || `shr_${safeToken}`);
-  const safeFileId = sanitizeId(params.share.fileId || params.file?.id || 'file_shared');
   const path = `publicShares/${safeToken}`;
-  const ref = doc(db, 'publicShares', safeToken);
 
-  const tgChunks = params.file?.telegramChunks || [];
-  const chunksJson = JSON.stringify(tgChunks).slice(0, 130000);
-  const storageDriver: StorageDriver =
-    params.file?.storageDriver === 'telegram' || tgChunks.length > 0 ? 'telegram' : 'local_vault';
-  const safeChatId = String(params.file?.telegramChatId || '').slice(0, 64);
-  const safePreviewText = String(params.file?.previewText || '').slice(0, 28000);
-  const safePreviewDataUrl =
-    params.file?.previewDataUrl && params.file.previewDataUrl.length <= 500000
-      ? params.file.previewDataUrl
-      : '';
-  const safePasswordHash = String(params.passwordHash || '').slice(0, 128);
-  const safeThrottle =
-    typeof params.share.throttleKbps === 'number' && params.share.throttleKbps > 0
-      ? Math.min(10000000, Math.floor(params.share.throttleKbps))
-      : 0;
-  const safeCloudChunkCount = Math.max(
-    0,
-    Math.min(100, Math.floor(params.cloudChunkCount || 0))
-  );
+  return runSerializedDocSync(path, async () => {
+    const currentFbUser = auth.currentUser;
+    if (!currentFbUser || !currentFbUser.emailVerified) return;
 
-  // Try updateDoc first in case the share document already exists
-  try {
-    const updatePayload: Record<string, unknown> = {
-      fileName: truncateString(params.share.fileName || params.file?.name || 'file.bin', 255),
-      hasPassword: Boolean(params.share.hasPassword),
-      passwordHash: safePasswordHash,
-      active: params.share.active !== false,
-      downloadCount: Math.max(
-        0,
-        Math.min(100000000, Math.floor(params.share.downloadCount || 0))
-      ),
-      throttleKbps: safeThrottle,
-      storageDriver,
-      telegramChatId: safeChatId,
-      telegramChunksJson: chunksJson,
-      cloudChunkCount: safeCloudChunkCount,
-      previewText: safePreviewText,
-      previewDataUrl: safePreviewDataUrl,
-      updatedAt: serverTimestamp(),
+    await ensureFirestoreUserProfile(currentFbUser);
+    const safeUid = sanitizeId(currentFbUser.uid);
+    const safeShareId = sanitizeId(params.share.id || `shr_${safeToken}`);
+    const safeFileId = sanitizeId(params.share.fileId || params.file?.id || 'file_shared');
+    const ref = doc(db, 'publicShares', safeToken);
+
+    const shareExt = params.share as ShareLink & {
+      telegramChunks?: TelegramChunk[];
+      storageDriver?: StorageDriver;
+      telegramChatId?: string;
+      previewText?: string;
+      previewDataUrl?: string;
+      passwordHash?: string | null;
+      cloudChunkCount?: number;
     };
-    await updateDoc(ref, updatePayload);
-    return;
-  } catch {
-    // Document does not exist yet; create it below
-  }
 
-  try {
-    await setDoc(ref, {
-      id: safeShareId,
-      token: safeToken,
-      fileId: safeFileId,
-      fileName: truncateString(params.share.fileName || params.file?.name || 'file.bin', 255),
-      fileSizeBytes: Math.max(
-        0,
-        Math.min(
-          54975581388800,
-          Math.floor(params.share.fileSizeBytes || params.file?.sizeBytes || 0)
-        )
-      ),
-      fileMimeType: truncateString(
-        params.share.fileMimeType || params.file?.mimeType || 'application/octet-stream',
-        128
-      ),
-      fileSha256: String(params.share.fileSha256 || params.file?.sha256 || '').slice(0, 128),
-      creatorId: safeUid,
-      creatorName: truncateString(
-        params.share.creatorName || fbUser.displayName || 'Cloud User',
-        120
-      ),
-      hasPassword: Boolean(params.share.hasPassword),
-      passwordHash: safePasswordHash,
-      active: params.share.active !== false,
-      downloadCount: Math.max(
-        0,
-        Math.min(100000000, Math.floor(params.share.downloadCount || 0))
-      ),
-      throttleKbps: safeThrottle,
-      storageDriver,
-      telegramChatId: safeChatId,
-      telegramChunksJson: chunksJson,
-      cloudChunkCount: safeCloudChunkCount,
-      previewText: safePreviewText,
-      previewDataUrl: safePreviewDataUrl,
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp(),
-    });
-  } catch (error) {
-    handleFirestoreError(error, OperationType.CREATE, path);
-  }
+    const tgChunks =
+      params.file?.telegramChunks && params.file.telegramChunks.length > 0
+        ? params.file.telegramChunks
+        : shareExt.telegramChunks || [];
+    const chunksJson = JSON.stringify(tgChunks).slice(0, 130000);
+    const storageDriver: StorageDriver =
+      params.file?.storageDriver === 'telegram' ||
+      shareExt.storageDriver === 'telegram' ||
+      tgChunks.length > 0
+        ? 'telegram'
+        : 'local_vault';
+    const safeChatId = String(params.file?.telegramChatId || shareExt.telegramChatId || '').slice(
+      0,
+      64
+    );
+    const rawPreviewText =
+      params.share.targetType === 'folder' && Array.isArray(params.share.sharedFiles)
+        ? `${FOLDER_SHARE_MANIFEST_PREFIX}${JSON.stringify({
+            folderId: params.share.folderId || params.share.fileId,
+            sharedFiles: params.share.sharedFiles,
+          })}`
+        : String(params.file?.previewText || shareExt.previewText || '');
+    const safePreviewText = rawPreviewText.slice(0, 28000);
+    const rawPreviewDataUrl = params.file?.previewDataUrl || shareExt.previewDataUrl || '';
+    const safePreviewDataUrl = rawPreviewDataUrl.length <= 500000 ? rawPreviewDataUrl : '';
+    const safePasswordHash = String(
+      params.passwordHash !== undefined ? params.passwordHash || '' : shareExt.passwordHash || ''
+    ).slice(0, 128);
+    const safeThrottle =
+      typeof params.share.throttleKbps === 'number' && params.share.throttleKbps > 0
+        ? Math.min(10000000, Math.floor(params.share.throttleKbps))
+        : 0;
+    const safeCloudChunkCount = Math.max(
+      0,
+      Math.min(100, Math.floor(params.cloudChunkCount ?? shareExt.cloudChunkCount ?? 0))
+    );
+    const safeFileName = truncateString(
+      params.share.fileName || params.file?.name || 'file.bin',
+      255
+    );
+    const safeHasPassword = Boolean(params.share.hasPassword);
+    const safeActive = params.share.active !== false;
+    const safeDownloadCount = Math.max(
+      0,
+      Math.min(100000000, Math.floor(params.share.downloadCount || 0))
+    );
+
+    let existsOnServer = false;
+    let existingData: Record<string, unknown> | null = null;
+    try {
+      const snap = await getDoc(ref);
+      if (snap.exists()) {
+        existsOnServer = true;
+        existingData = snap.data() as Record<string, unknown>;
+      }
+    } catch {
+      existsOnServer = false;
+    }
+
+    if (existsOnServer && existingData) {
+      const existingChunks = String(existingData.telegramChunksJson || '[]');
+      const effectiveChunksJson = chunksJson !== '[]' ? chunksJson : existingChunks;
+      const effectiveDriver: StorageDriver =
+        effectiveChunksJson !== '[]' ? 'telegram' : storageDriver;
+      const effectivePasswordHash =
+        safePasswordHash || String(existingData.passwordHash || '');
+
+      const isUnchanged =
+        existingData.fileName === safeFileName &&
+        Boolean(existingData.hasPassword) === safeHasPassword &&
+        String(existingData.passwordHash || '') === effectivePasswordHash &&
+        Boolean(existingData.active) === safeActive &&
+        existingData.throttleKbps === safeThrottle &&
+        existingData.storageDriver === effectiveDriver &&
+        existingChunks === effectiveChunksJson &&
+        existingData.cloudChunkCount === safeCloudChunkCount;
+
+      if (isUnchanged) {
+        return;
+      }
+
+      try {
+        await updateDoc(ref, {
+          fileName: safeFileName,
+          hasPassword: safeHasPassword,
+          passwordHash: effectivePasswordHash,
+          active: safeActive,
+          downloadCount: safeDownloadCount,
+          throttleKbps: safeThrottle,
+          storageDriver: effectiveDriver,
+          telegramChatId: safeChatId || String(existingData.telegramChatId || ''),
+          telegramChunksJson: effectiveChunksJson,
+          cloudChunkCount: safeCloudChunkCount,
+          previewText: safePreviewText,
+          previewDataUrl: safePreviewDataUrl,
+          updatedAt: serverTimestamp(),
+        });
+      } catch (error) {
+        handleFirestoreError(error, OperationType.UPDATE, path);
+      }
+      return;
+    }
+
+    try {
+      await setDoc(ref, {
+        id: safeShareId,
+        token: safeToken,
+        fileId: safeFileId,
+        fileName: safeFileName,
+        fileSizeBytes: Math.max(
+          0,
+          Math.min(
+            54975581388800,
+            Math.floor(params.share.fileSizeBytes || params.file?.sizeBytes || 0)
+          )
+        ),
+        fileMimeType: truncateString(
+          params.share.fileMimeType || params.file?.mimeType || 'application/octet-stream',
+          128
+        ),
+        fileSha256: String(params.share.fileSha256 || params.file?.sha256 || '').slice(0, 128),
+        creatorId: safeUid,
+        creatorName: truncateString(
+          params.share.creatorName || currentFbUser.displayName || 'Cloud User',
+          120
+        ),
+        hasPassword: safeHasPassword,
+        passwordHash: safePasswordHash,
+        active: safeActive,
+        downloadCount: safeDownloadCount,
+        throttleKbps: safeThrottle,
+        storageDriver,
+        telegramChatId: safeChatId,
+        telegramChunksJson: chunksJson,
+        cloudChunkCount: safeCloudChunkCount,
+        previewText: safePreviewText,
+        previewDataUrl: safePreviewDataUrl,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+    } catch (error) {
+      try {
+        const checkSnap = await getDoc(ref);
+        if (checkSnap.exists()) return;
+      } catch {
+        // ignore
+      }
+      handleFirestoreError(error, OperationType.CREATE, path);
+    }
+  });
 }
 
 export async function deletePublicShareFromFirestore(token: string): Promise<void> {
@@ -803,9 +1066,19 @@ export async function fetchPublicShareByTokenFromFirestore(
       }
     }
 
+    const folderManifest = decodeShareFolderManifest(
+      d.previewText ? String(d.previewText) : undefined
+    );
+
     return {
       id: String(d.id || `shr_${safeToken}`),
       token: String(d.token || safeToken),
+      targetType:
+        folderManifest.isFolderShare || d.fileMimeType === 'application/x-unlim-folder'
+          ? 'folder'
+          : 'file',
+      folderId: folderManifest.folderId || null,
+      sharedFiles: folderManifest.sharedFiles,
       fileId: String(d.fileId || ''),
       fileName: String(d.fileName || 'Shared-File.bin'),
       fileSizeBytes: typeof d.fileSizeBytes === 'number' ? d.fileSizeBytes : 0,
@@ -830,7 +1103,7 @@ export async function fetchPublicShareByTokenFromFirestore(
       telegramChatId: d.telegramChatId ? String(d.telegramChatId) : undefined,
       telegramChunks: parsedChunks,
       cloudChunkCount: typeof d.cloudChunkCount === 'number' ? d.cloudChunkCount : 0,
-      previewText: d.previewText ? String(d.previewText) : undefined,
+      previewText: folderManifest.cleanPreviewText,
       previewDataUrl: d.previewDataUrl ? String(d.previewDataUrl) : undefined,
     };
   } catch {
@@ -1046,6 +1319,7 @@ function parseCloudFileSnapshotDoc(
     }
   }
   const rawFolderId = String(d.folderId || 'root');
+  const parsedMeta = parseTagsAndTrashFromJson(d.tagsJson);
   return {
     id: String(d.id || docId),
     name: String(d.name || 'file.bin'),
@@ -1060,13 +1334,14 @@ function parseCloudFileSnapshotDoc(
     telegramChatId: d.telegramChatId ? String(d.telegramChatId) : undefined,
     telegramChunks: parsedChunks,
     starred: Boolean(d.starred),
+    trashed: parsedMeta.trashed,
     downloadCount: typeof d.downloadCount === 'number' ? d.downloadCount : 0,
     createdAt: toIsoDateString(d.createdAt),
     updatedAt: toIsoDateString(d.updatedAt),
     previewText: d.previewText ? String(d.previewText) : undefined,
     previewDataUrl: d.previewDataUrl ? String(d.previewDataUrl) : undefined,
     lockedOverQuota: false,
-    tags: parseTagsJson(d.tagsJson),
+    tags: parsedMeta.tags,
   };
 }
 
@@ -1140,14 +1415,17 @@ export function subscribeToUserCloudDrive(
       const folders: FolderRecord[] = [];
       snapshot.forEach((docSnap) => {
         const d = docSnap.data();
-        const rawParentId = String(d.parentId || 'root');
+        const decodedParent = decodeFolderParentIdFromFirestore(String(d.parentId || 'root'));
         folders.push({
           id: String(d.id || docSnap.id),
           name: String(d.name || 'Folder'),
-          parentId: rawParentId === 'root' ? null : rawParentId,
+          parentId: decodedParent.parentId,
           ownerId: String(d.ownerId || safeUid),
           ownerName: String(d.ownerName || fallbackName),
           createdAt: toIsoDateString(d.createdAt),
+          trashed: decodedParent.trashed,
+          isPinProtected: decodedParent.isPinProtected,
+          pinHash: decodedParent.pinHash,
         });
       });
 
@@ -1185,9 +1463,18 @@ export function subscribeToUserCloudDrive(
               parsedChunks = [];
             }
           }
+          const folderManifest = decodeShareFolderManifest(
+            d.previewText ? String(d.previewText) : undefined
+          );
           shares.push({
             id: String(d.id || `shr_${docSnap.id}`),
             token: String(d.token || docSnap.id),
+            targetType:
+              folderManifest.isFolderShare || d.fileMimeType === 'application/x-unlim-folder'
+                ? 'folder'
+                : 'file',
+            folderId: folderManifest.folderId || null,
+            sharedFiles: folderManifest.sharedFiles,
             fileId: String(d.fileId || ''),
             fileName: String(d.fileName || 'Shared-File.bin'),
             fileSizeBytes: typeof d.fileSizeBytes === 'number' ? d.fileSizeBytes : 0,
@@ -1212,7 +1499,7 @@ export function subscribeToUserCloudDrive(
             telegramChatId: d.telegramChatId ? String(d.telegramChatId) : undefined,
             telegramChunks: parsedChunks,
             cloudChunkCount: typeof d.cloudChunkCount === 'number' ? d.cloudChunkCount : 0,
-            previewText: d.previewText ? String(d.previewText) : undefined,
+            previewText: folderManifest.cleanPreviewText,
             previewDataUrl: d.previewDataUrl ? String(d.previewDataUrl) : undefined,
           });
         });

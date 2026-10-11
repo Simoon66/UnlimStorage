@@ -1861,12 +1861,25 @@ function seedStarterFilesForNewUser(user: StoredUser) {
 async function startServer() {
   const app = express();
   const server = http.createServer(app);
-  const wss = new WebSocketServer({ server, path: '/ws' });
+  const wss = new WebSocketServer({ noServer: true });
+
+  server.on('upgrade', (request, socket, head) => {
+    const pathname = request.url ? request.url.split('?')[0] : '/';
+    if (pathname === '/ws' || request.headers['sec-websocket-protocol'] === 'vite-hmr') {
+      wss.handleUpgrade(request, socket, head, (ws) => {
+        wss.emit('connection', ws, request);
+      });
+    }
+  });
 
   app.use(express.json({ limit: '50mb' }));
 
   const clients = new Set<WebSocket>();
-  wss.on('connection', (ws) => {
+  wss.on('connection', (ws, req) => {
+    if (req?.headers['sec-websocket-protocol'] === 'vite-hmr') {
+      ws.send(JSON.stringify({ type: 'connected' }));
+      return;
+    }
     clients.add(ws);
     ws.send(
       JSON.stringify({
@@ -2593,6 +2606,90 @@ async function startServer() {
     res.json({ folder });
   });
 
+  app.patch('/api/folders/:id', requireAuth, (req, res) => {
+    const user = (req as Request & { user: StoredUser }).user;
+    const folder = db.folders.find((f) => f.id === req.params.id && f.ownerId === user.id);
+    if (!folder) {
+      res.status(404).json({ error: 'Folder not found' });
+      return;
+    }
+    const { name, parentId, trashed, pinHash, isPinProtected } = req.body as {
+      name?: string;
+      parentId?: string | null;
+      trashed?: boolean;
+      pinHash?: string | null;
+      isPinProtected?: boolean;
+    };
+    if (typeof name === 'string' && name.trim()) {
+      folder.name = name.trim();
+    }
+    if (parentId !== undefined) {
+      folder.parentId = parentId;
+    }
+    if (typeof trashed === 'boolean') {
+      folder.trashed = trashed;
+      folder.trashedAt = trashed ? new Date().toISOString() : null;
+      // Also mark direct child files as trashed/restored together with the folder
+      db.files.forEach((f) => {
+        if (f.ownerId === user.id && f.folderId === folder.id) {
+          f.trashed = trashed;
+          f.trashedAt = trashed ? new Date().toISOString() : null;
+        }
+      });
+    }
+    if (pinHash !== undefined) {
+      folder.pinHash = pinHash || null;
+      folder.isPinProtected = Boolean(pinHash);
+    } else if (typeof isPinProtected === 'boolean') {
+      folder.isPinProtected = isPinProtected;
+      if (!isPinProtected) folder.pinHash = null;
+    }
+    saveDb();
+    res.json({
+      folder,
+      files: db.files.filter((f) => f.ownerId === user.id),
+    });
+  });
+
+  app.post('/api/trash/empty', requireAuth, (req, res) => {
+    const user = (req as Request & { user: StoredUser }).user;
+    const trashedFiles = db.files.filter((f) => f.ownerId === user.id && f.trashed);
+    const trashedFileIds = new Set(trashedFiles.map((f) => f.id));
+    const trashedFolderIds = new Set(
+      db.folders.filter((fl) => fl.ownerId === user.id && fl.trashed).map((fl) => fl.id)
+    );
+
+    for (const file of trashedFiles) {
+      const chunkPath = path.join(CHUNKS_DIR, file.id);
+      if (fs.existsSync(chunkPath)) {
+        try {
+          fs.unlinkSync(chunkPath);
+        } catch {
+          // ignore
+        }
+      }
+    }
+
+    db.files = db.files.filter((f) => !(f.ownerId === user.id && f.trashed));
+    db.folders = db.folders.filter((fl) => !(fl.ownerId === user.id && fl.trashed));
+    db.shares = db.shares.filter(
+      (s) =>
+        !(
+          s.creatorId === user.id &&
+          (trashedFileIds.has(s.fileId) || (s.folderId && trashedFolderIds.has(s.folderId)))
+        )
+    );
+
+    evaluateUserQuotaAndLocks(user);
+    saveDb();
+    res.json({
+      ok: true,
+      deletedFileIds: Array.from(trashedFileIds),
+      deletedFolderIds: Array.from(trashedFolderIds),
+      user: sanitizeUser(user),
+    });
+  });
+
   app.delete('/api/folders/:id', requireAuth, (req, res) => {
     const user = (req as Request & { user: StoredUser }).user;
     const folderId = req.params.id;
@@ -3184,6 +3281,20 @@ async function startServer() {
     res.json({ ok: true });
   });
 
+  app.post('/api/files/upload/pause', requireAuth, (req, res) => {
+    const user = (req as Request & { user: StoredUser }).user;
+    const { transferId } = req.body as { transferId?: string };
+    if (transferId) {
+      const job = db.transfers.find((t) => t.id === transferId && t.userId === user.id);
+      if (job && job.status !== 'completed') {
+        job.status = 'paused';
+        job.speedBps = 0;
+        saveDb();
+      }
+    }
+    res.json({ ok: true });
+  });
+
   app.patch('/api/files/:id', requireAuth, (req, res) => {
     const user = (req as Request & { user: StoredUser }).user;
     const file = db.files.find((f) => f.id === req.params.id && f.ownerId === user.id);
@@ -3191,10 +3302,11 @@ async function startServer() {
       res.status(404).json({ error: 'File not found' });
       return;
     }
-    const { name, folderId, starred, tags } = req.body as {
+    const { name, folderId, starred, trashed, tags } = req.body as {
       name?: string;
       folderId?: string | null;
       starred?: boolean;
+      trashed?: boolean;
       tags?: string[];
     };
     if (typeof name === 'string' && name.trim()) {
@@ -3205,6 +3317,10 @@ async function startServer() {
     }
     if (typeof starred === 'boolean') {
       file.starred = starred;
+    }
+    if (typeof trashed === 'boolean') {
+      file.trashed = trashed;
+      file.trashedAt = trashed ? new Date().toISOString() : null;
     }
     if (Array.isArray(tags)) {
       const seen = new Set<string>();
@@ -3432,7 +3548,7 @@ async function startServer() {
             servedFromDisk = true;
             await new Promise<void>((resolve) => {
               const rs = fs.createReadStream(partPath, { start: sliceStart, end: sliceEnd });
-              rs.on('data', (chunk: Buffer) => {
+              rs.on('data', (chunk: Buffer | string) => {
                 if (!clientClosed && !res.writableEnded) {
                   res.write(chunk);
                 } else {
@@ -4209,6 +4325,8 @@ async function startServer() {
 
     const {
       fileId,
+      folderId,
+      targetType,
       customSlug,
       password,
       expiresInHours,
@@ -4217,6 +4335,8 @@ async function startServer() {
       bandwidthCapMb,
     } = req.body as {
       fileId?: string;
+      folderId?: string;
+      targetType?: 'file' | 'folder';
       customSlug?: string;
       password?: string;
       expiresInHours?: number | null;
@@ -4225,19 +4345,7 @@ async function startServer() {
       bandwidthCapMb?: number | null;
     };
 
-    const file = db.files.find((f) => f.id === fileId && f.ownerId === user.id);
-    if (!file) {
-      res.status(404).json({ error: 'Target file not found' });
-      return;
-    }
-
-    if (file.lockedOverQuota) {
-      res.status(403).json({
-        error:
-          'This file is locked because it exceeds your 25 GB Free limit. Renew your storage plan to share this file.',
-      });
-      return;
-    }
+    const isFolderRequest = Boolean(targetType === 'folder' || (folderId && !fileId));
 
     const cleanSlug =
       customSlug && customSlug.trim()
@@ -4258,9 +4366,99 @@ async function startServer() {
         ? new Date(Date.now() + expiresInHours * 3600_000).toISOString()
         : null;
 
+    if (isFolderRequest) {
+      const targetFolderId = folderId || fileId || '';
+      const folder = db.folders.find((fl) => fl.id === targetFolderId && fl.ownerId === user.id);
+      if (!folder) {
+        res.status(404).json({ error: 'Target folder not found' });
+        return;
+      }
+
+      const folderFiles = db.files.filter(
+        (f) => f.ownerId === user.id && f.folderId === folder.id && !f.trashed
+      );
+      const totalBytes = folderFiles.reduce((acc, f) => acc + (f.sizeBytes || 0), 0);
+      const sharedFiles = folderFiles.map((f) => ({
+        id: f.id,
+        name: f.name,
+        sizeBytes: f.sizeBytes,
+        mimeType: f.mimeType,
+        sha256: f.sha256,
+        storageDriver: f.storageDriver,
+        telegramChatId: f.telegramChatId,
+        telegramChunks: f.telegramChunks,
+        previewText: f.previewText,
+        previewDataUrl: f.previewDataUrl,
+      }));
+
+      const newFolderShare: StoredShareLink = {
+        id: `shr_${Date.now().toString(36)}`,
+        token: cleanSlug,
+        targetType: 'folder',
+        folderId: folder.id,
+        sharedFiles,
+        fileId: folder.id,
+        fileName: folder.name,
+        fileSizeBytes: totalBytes,
+        fileMimeType: 'application/x-unlim-folder',
+        fileSha256: computeSha256(Buffer.from(folder.id, 'utf-8')),
+        creatorId: user.id,
+        creatorName: user.name,
+        hasPassword: hasPw,
+        passwordHash: hasPw && password ? hashPassword(password.trim()) : null,
+        expiresAt,
+        maxDownloads: maxDownloads && maxDownloads > 0 ? maxDownloads : null,
+        downloadCount: 0,
+        throttleKbps:
+          throttleKbps !== undefined
+            ? throttleKbps
+            : db.bandwidthSettings.defaultShareThrottleKbps,
+        bandwidthCapBytes:
+          bandwidthCapMb && bandwidthCapMb > 0 ? bandwidthCapMb * 1024 * 1024 : null,
+        bandwidthUsedBytes: 0,
+        active: true,
+        createdAt: new Date().toISOString(),
+        lastAccessedAt: null,
+      };
+
+      db.shares.unshift(newFolderShare);
+      saveDb();
+
+      recordAuditLog({
+        userId: user.id,
+        userName: user.name,
+        action: 'SHARE_CREATED',
+        targetName: `Folder: ${folder.name} (/s/${newFolderShare.token})`,
+        bytesTransferred: 0,
+        integrityHash: newFolderShare.fileSha256.slice(0, 16),
+        status: 'success',
+        details: `Public folder gallery link created (${sharedFiles.length} files)`,
+      });
+
+      res.json({
+        share: { ...sanitizeShare(newFolderShare), passwordHash: newFolderShare.passwordHash },
+      });
+      return;
+    }
+
+    const file = db.files.find((f) => f.id === fileId && f.ownerId === user.id);
+    if (!file) {
+      res.status(404).json({ error: 'Target file not found' });
+      return;
+    }
+
+    if (file.lockedOverQuota) {
+      res.status(403).json({
+        error:
+          'This file is locked because it exceeds your 25 GB Free limit. Renew your storage plan to share this file.',
+      });
+      return;
+    }
+
     const newShare: StoredShareLink = {
       id: `shr_${Date.now().toString(36)}`,
       token: cleanSlug,
+      targetType: 'file',
       fileId: file.id,
       fileName: file.name,
       fileSizeBytes: file.sizeBytes,
@@ -4399,9 +4597,36 @@ async function startServer() {
       const creatorName = str('creatorName', 'UnlimStorage User');
       const createdAt = f.createdAt?.timestampValue || new Date().toISOString();
 
+      const rawPreviewText = str('previewText', '');
+      let folderShareManifest: {
+        isFolderShare: boolean;
+        folderId?: string | null;
+        sharedFiles?: ShareLink['sharedFiles'];
+      } = { isFolderShare: false };
+      if (rawPreviewText.startsWith('__UNLIM_FOLDER_SHARE_V1__:')) {
+        try {
+          const parsed = JSON.parse(rawPreviewText.slice('__UNLIM_FOLDER_SHARE_V1__:'.length));
+          if (parsed && typeof parsed === 'object') {
+            folderShareManifest = {
+              isFolderShare: true,
+              folderId: parsed.folderId || fileId,
+              sharedFiles: Array.isArray(parsed.sharedFiles) ? parsed.sharedFiles : [],
+            };
+          }
+        } catch {
+          // ignore
+        }
+      }
+
       const restoredShare: StoredShareLink = {
         id: str('id', `shr_${safeToken}`),
         token: str('token', safeToken),
+        targetType:
+          folderShareManifest.isFolderShare || fileMimeType === 'application/x-unlim-folder'
+            ? 'folder'
+            : 'file',
+        folderId: folderShareManifest.folderId || null,
+        sharedFiles: folderShareManifest.sharedFiles,
         fileId,
         fileName,
         fileSizeBytes,
@@ -4424,35 +4649,68 @@ async function startServer() {
 
       db.shares.unshift(restoredShare);
 
-      // Ensure corresponding file record & Telegram chunks exist in db.files
-      const existingFile = db.files.find((fl) => fl.id === fileId);
-      if (!existingFile) {
-        db.files.unshift({
-          id: fileId,
-          name: fileName,
-          folderId: null,
-          ownerId: creatorId,
-          ownerName: creatorName,
-          sizeBytes: fileSizeBytes,
-          mimeType: fileMimeType,
-          sha256: fileSha256,
-          storageDriver:
-            str('storageDriver') === 'telegram' || telegramChunks.length > 0
-              ? 'telegram'
-              : 'local_vault',
-          telegramChatId: str('telegramChatId') || undefined,
-          telegramChunks,
-          starred: false,
-          downloadCount: restoredShare.downloadCount,
-          createdAt,
-          updatedAt: createdAt,
-          previewText: str('previewText') || undefined,
-          previewDataUrl: str('previewDataUrl') || undefined,
-          lockedOverQuota: false,
-        });
-      } else if (telegramChunks.length > 0 && existingFile.telegramChunks.length === 0) {
-        existingFile.telegramChunks = telegramChunks;
-        existingFile.storageDriver = 'telegram';
+      if (folderShareManifest.isFolderShare && Array.isArray(folderShareManifest.sharedFiles)) {
+        for (const sf of folderShareManifest.sharedFiles) {
+          if (!sf || !sf.id) continue;
+          const existingSf = db.files.find((fl) => fl.id === sf.id);
+          if (!existingSf) {
+            db.files.unshift({
+              id: sf.id,
+              name: sf.name || 'file.bin',
+              folderId: folderShareManifest.folderId || null,
+              ownerId: creatorId,
+              ownerName: creatorName,
+              sizeBytes: sf.sizeBytes || 0,
+              mimeType: sf.mimeType || 'application/octet-stream',
+              sha256: sf.sha256 || '',
+              storageDriver:
+                sf.storageDriver === 'telegram' ||
+                (Array.isArray(sf.telegramChunks) && sf.telegramChunks.length > 0)
+                  ? 'telegram'
+                  : 'local_vault',
+              telegramChatId: sf.telegramChatId,
+              telegramChunks: Array.isArray(sf.telegramChunks) ? sf.telegramChunks : [],
+              starred: false,
+              downloadCount: 0,
+              createdAt,
+              updatedAt: createdAt,
+              previewText: sf.previewText,
+              previewDataUrl: sf.previewDataUrl,
+              lockedOverQuota: false,
+            });
+          }
+        }
+      } else {
+        // Ensure corresponding file record & Telegram chunks exist in db.files
+        const existingFile = db.files.find((fl) => fl.id === fileId);
+        if (!existingFile) {
+          db.files.unshift({
+            id: fileId,
+            name: fileName,
+            folderId: null,
+            ownerId: creatorId,
+            ownerName: creatorName,
+            sizeBytes: fileSizeBytes,
+            mimeType: fileMimeType,
+            sha256: fileSha256,
+            storageDriver:
+              str('storageDriver') === 'telegram' || telegramChunks.length > 0
+                ? 'telegram'
+                : 'local_vault',
+            telegramChatId: str('telegramChatId') || undefined,
+            telegramChunks,
+            starred: false,
+            downloadCount: restoredShare.downloadCount,
+            createdAt,
+            updatedAt: createdAt,
+            previewText: rawPreviewText || undefined,
+            previewDataUrl: str('previewDataUrl') || undefined,
+            lockedOverQuota: false,
+          });
+        } else if (telegramChunks.length > 0 && existingFile.telegramChunks.length === 0) {
+          existingFile.telegramChunks = telegramChunks;
+          existingFile.storageDriver = 'telegram';
+        }
       }
 
       saveDb();
@@ -4525,6 +4783,38 @@ async function startServer() {
     }
   });
 
+  function resolveTargetShareFile(share: StoredShareLink, queryFileId?: string) {
+    if (
+      (share.targetType === 'folder' || share.fileMimeType === 'application/x-unlim-folder') &&
+      queryFileId
+    ) {
+      const sharedEntry = share.sharedFiles?.find((sf) => sf.id === queryFileId);
+      const dbEntry = db.files.find((f) => f.id === queryFileId);
+      if (sharedEntry || dbEntry) {
+        return {
+          fileId: queryFileId,
+          fileName: sharedEntry?.name || dbEntry?.name || 'file.bin',
+          fileMimeType: sharedEntry?.mimeType || dbEntry?.mimeType || 'application/octet-stream',
+          fileSizeBytes: sharedEntry?.sizeBytes || dbEntry?.sizeBytes || 0,
+          telegramChunks:
+            (sharedEntry?.telegramChunks && sharedEntry.telegramChunks.length > 0
+              ? sharedEntry.telegramChunks
+              : dbEntry?.telegramChunks) || [],
+          previewText: sharedEntry?.previewText || dbEntry?.previewText,
+        };
+      }
+    }
+    const dbFile = db.files.find((f) => f.id === share.fileId);
+    return {
+      fileId: share.fileId,
+      fileName: share.fileName,
+      fileMimeType: share.fileMimeType,
+      fileSizeBytes: share.fileSizeBytes || dbFile?.sizeBytes || 0,
+      telegramChunks: dbFile?.telegramChunks || [],
+      previewText: dbFile?.previewText,
+    };
+  }
+
   // PUBLIC SHARE PORTAL ENDPOINTS
   app.get('/api/public/share/:token', async (req, res) => {
     const share = await resolveShareFromLocalOrFirestore(req.params.token);
@@ -4543,9 +4833,35 @@ async function startServer() {
       return;
     }
 
+    // If folder share and sharedFiles not populated on local record, populate dynamically from db.files
+    let sharedFiles = share.sharedFiles;
+    if (
+      (share.targetType === 'folder' || share.fileMimeType === 'application/x-unlim-folder') &&
+      (!Array.isArray(sharedFiles) || sharedFiles.length === 0)
+    ) {
+      const folderId = share.folderId || share.fileId;
+      sharedFiles = db.files
+        .filter((f) => f.folderId === folderId && !f.trashed)
+        .map((f) => ({
+          id: f.id,
+          name: f.name,
+          sizeBytes: f.sizeBytes,
+          mimeType: f.mimeType,
+          sha256: f.sha256,
+          storageDriver: f.storageDriver,
+          telegramChatId: f.telegramChatId,
+          telegramChunks: f.telegramChunks,
+          previewText: f.previewText,
+          previewDataUrl: f.previewDataUrl,
+        }));
+    }
+
     res.json({
       share: {
         token: share.token,
+        targetType: share.targetType || (share.fileMimeType === 'application/x-unlim-folder' ? 'folder' : 'file'),
+        folderId: share.folderId || null,
+        sharedFiles,
         fileId: share.fileId,
         fileName: share.fileName,
         fileSizeBytes: share.fileSizeBytes,
@@ -4613,16 +4929,17 @@ async function startServer() {
       }
     }
 
-    const file = db.files.find((f) => f.id === share.fileId);
-    const chunkPath = path.join(CHUNKS_DIR, share.fileId);
+    const target = resolveTargetShareFile(share, String(req.query.fileId || '').trim());
+    const file = db.files.find((f) => f.id === target.fileId);
+    const chunkPath = path.join(CHUNKS_DIR, target.fileId);
     const isInline = req.query.inline === '1';
     const isMkv =
-      share.fileName.toLowerCase().endsWith('.mkv') ||
-      share.fileMimeType === 'video/x-matroska';
+      target.fileName.toLowerCase().endsWith('.mkv') ||
+      target.fileMimeType === 'video/x-matroska';
     const contentType =
       isInline && isMkv
         ? 'video/webm'
-        : resolveEffectiveMimeType(share.fileName, share.fileMimeType);
+        : resolveEffectiveMimeType(target.fileName, target.fileMimeType);
     const effectiveThrottle =
       share.throttleKbps || db.bandwidthSettings.globalThrottleKbps || null;
 
@@ -4635,7 +4952,7 @@ async function startServer() {
       res.setHeader('Content-Type', contentType);
       res.setHeader(
         'Content-Disposition',
-        `${isInline ? 'inline' : 'attachment'}; filename="${encodeURIComponent(share.fileName)}"`
+        `${isInline ? 'inline' : 'attachment'}; filename="${encodeURIComponent(target.fileName)}"`
       );
 
       if (rangeHeader) {
@@ -4678,19 +4995,18 @@ async function startServer() {
 
     // Fast Chunk-Aware Range Streaming for Public Share Videos
     if (
-      file &&
-      file.telegramChunks &&
-      file.telegramChunks.length > 0 &&
+      target.telegramChunks &&
+      target.telegramChunks.length > 0 &&
       (isInline || Boolean(req.headers.range))
     ) {
       const servedRange = await serveTelegramChunksFastRange({
         req,
         res,
-        fileId: share.fileId,
-        fileName: share.fileName,
+        fileId: target.fileId,
+        fileName: target.fileName,
         contentType,
-        totalSizeHint: share.fileSizeBytes || file.sizeBytes,
-        chunks: file.telegramChunks,
+        totalSizeHint: target.fileSizeBytes,
+        chunks: target.telegramChunks,
         botToken: db.telegramConfig.botToken || DEFAULT_FALLBACK_BOT_TOKEN,
         isInline,
       });
@@ -4700,11 +5016,11 @@ async function startServer() {
     }
 
     let buffer: Buffer | null = null;
-    if (file && file.telegramChunks && file.telegramChunks.length > 0) {
+    if (target.telegramChunks && target.telegramChunks.length > 0) {
       buffer = await fetchBufferFromTelegramChunks(
-        file.telegramChunks,
+        target.telegramChunks,
         db.telegramConfig.botToken || DEFAULT_FALLBACK_BOT_TOKEN,
-        share.fileId
+        target.fileId
       );
       if (buffer && buffer.length > 0) {
         try {
@@ -4715,8 +5031,8 @@ async function startServer() {
       }
     }
 
-    if (!buffer && file?.previewText) {
-      buffer = Buffer.from(file.previewText, 'utf-8');
+    if (!buffer && target.previewText) {
+      buffer = Buffer.from(target.previewText, 'utf-8');
     }
 
     if (!buffer) {
@@ -4734,11 +5050,11 @@ async function startServer() {
 
     res.setHeader(
       'Content-Type',
-      resolveEffectiveMimeType(share.fileName, share.fileMimeType)
+      resolveEffectiveMimeType(target.fileName, target.fileMimeType)
     );
     res.setHeader(
       'Content-Disposition',
-      `attachment; filename="${encodeURIComponent(share.fileName)}"`
+      `attachment; filename="${encodeURIComponent(target.fileName)}"`
     );
     res.setHeader('Content-Length', String(buffer.length));
 
@@ -4757,12 +5073,12 @@ async function startServer() {
       res.status(404).json({ ok: false });
       return;
     }
-    const file = db.files.find((f) => f.id === share.fileId);
+    const target = resolveTargetShareFile(share, String(req.query.fileId || '').trim());
     const botToken = db.telegramConfig.botToken || DEFAULT_FALLBACK_BOT_TOKEN;
     const info = await probeMediaFileWithFfprobe(
-      share.fileId,
-      share.fileName,
-      file?.telegramChunks || [],
+      target.fileId,
+      target.fileName,
+      target.telegramChunks,
       botToken
     );
     if (!info) {
@@ -4800,7 +5116,7 @@ async function startServer() {
         return;
       }
     }
-    const file = db.files.find((f) => f.id === share.fileId);
+    const target = resolveTargetShareFile(share, String(req.query.fileId || '').trim());
     const audioTrackIndex = parseInt(String(req.query.audio || '0'), 10) || 0;
     const startSeconds = parseFloat(String(req.query.start || '0')) || 0;
     const quality = String(req.query.quality || '720p');
@@ -4809,9 +5125,9 @@ async function startServer() {
     await streamTranscodedVideoWithFfmpeg({
       req,
       res,
-      fileId: share.fileId,
-      fileName: share.fileName,
-      chunks: file?.telegramChunks || [],
+      fileId: target.fileId,
+      fileName: target.fileName,
+      chunks: target.telegramChunks,
       botToken,
       audioTrackIndex,
       startSeconds,
@@ -4825,7 +5141,7 @@ async function startServer() {
       res.status(404).send('WEBVTT\n\n');
       return;
     }
-    const file = db.files.find((f) => f.id === share.fileId);
+    const target = resolveTargetShareFile(share, String(req.query.fileId || '').trim());
     const subIndex = parseInt(String(req.query.subIndex || '0'), 10) || 0;
     const startSeconds = parseFloat(String(req.query.start || '0')) || 0;
     const botToken = db.telegramConfig.botToken || DEFAULT_FALLBACK_BOT_TOKEN;
@@ -4833,9 +5149,9 @@ async function startServer() {
     await extractEmbeddedSubtitleToVtt({
       req,
       res,
-      fileId: share.fileId,
-      fileName: share.fileName,
-      chunks: file?.telegramChunks || [],
+      fileId: target.fileId,
+      fileName: target.fileName,
+      chunks: target.telegramChunks,
       botToken,
       subIndex,
       startSeconds,
@@ -5294,7 +5610,7 @@ async function startServer() {
 
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: { middlewareMode: true, hmr: false, watch: null },
       appType: 'spa',
     });
     app.use(vite.middlewares);

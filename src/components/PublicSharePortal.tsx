@@ -12,13 +12,25 @@ import {
   Loader2,
   Code2,
   Check,
+  Folder,
+  LayoutGrid,
+  List as ListIcon,
+  Play,
+  Archive,
 } from 'lucide-react';
 import { formatBytes, formatShortDate } from '../utils/format';
 import { apiFetch } from '../services/clientCloudFallback';
 import { YouTubeIframePlayer } from './YouTubeIframePlayer';
+import { SharedFolderFileEntry } from '../types';
+import { buildZipBlob, getWatchPercentage } from '../utils/mediaProgressAndZip';
+import { PWAInstallButton } from './PWAInstallButton';
 
 interface PublicShareMetadata {
   token: string;
+  targetType?: 'file' | 'folder';
+  folderId?: string | null;
+  sharedFiles?: SharedFolderFileEntry[];
+  fileId?: string;
   fileName: string;
   fileSizeBytes: number;
   fileMimeType: string;
@@ -41,11 +53,19 @@ interface DownloadProgressState {
   totalBytes: number;
   chunkIndex?: number;
   totalChunks?: number;
+  statusLabel?: string;
 }
 
 interface PublicSharePortalProps {
   token: string;
   onExitPublicPortal: () => void;
+}
+
+function isMediaVideoFile(name: string, mimeType: string): boolean {
+  return (
+    (mimeType || '').startsWith('video/') ||
+    /\.(mp4|webm|mov|mkv|avi|m4v)$/i.test(name || '')
+  );
 }
 
 export const PublicSharePortal: React.FC<PublicSharePortalProps> = ({
@@ -65,6 +85,7 @@ export const PublicSharePortal: React.FC<PublicSharePortalProps> = ({
   const [authError, setAuthError] = useState<string | null>(null);
   const [verifying, setVerifying] = useState(false);
   const [downloading, setDownloading] = useState(false);
+  const [downloadingItemId, setDownloadingItemId] = useState<string | null>(null);
   const [downloadError, setDownloadError] = useState<string | null>(null);
   const [downloadProgress, setDownloadProgress] = useState<DownloadProgressState | null>(null);
 
@@ -73,13 +94,23 @@ export const PublicSharePortal: React.FC<PublicSharePortalProps> = ({
   const [loadingVideoStream, setLoadingVideoStream] = useState(false);
   const [copiedEmbedCode, setCopiedEmbedCode] = useState(false);
 
-  const isVideoShare = React.useMemo(() => {
+  // Shared Folder Gallery state
+  const [folderLayout, setFolderLayout] = useState<'grid' | 'list'>('grid');
+  const [activeFolderVideo, setActiveFolderVideo] = useState<SharedFolderFileEntry | null>(null);
+
+  const isFolderShare = React.useMemo(() => {
     if (!share) return false;
     return (
-      share.fileMimeType.startsWith('video/') ||
-      /\.(mp4|webm|mov|mkv|avi|m4v)$/i.test(share.fileName)
+      share.targetType === 'folder' ||
+      share.fileMimeType === 'application/x-unlim-folder' ||
+      (Array.isArray(share.sharedFiles) && share.sharedFiles.length > 0)
     );
   }, [share]);
+
+  const isVideoShare = React.useMemo(() => {
+    if (!share || isFolderShare) return false;
+    return isMediaVideoFile(share.fileName, share.fileMimeType);
+  }, [share, isFolderShare]);
 
   useEffect(() => {
     let active = true;
@@ -92,9 +123,21 @@ export const PublicSharePortal: React.FC<PublicSharePortalProps> = ({
           throw new Error(data.error || 'Failed to load shared file');
         }
         if (active) {
-          setShare(data.share);
-          if (!data.share.hasPassword) {
+          const shareData = data.share as PublicShareMetadata;
+          setShare(shareData);
+          if (!shareData.hasPassword) {
             setUnlockedKey('open');
+          }
+          if (
+            Array.isArray(shareData.sharedFiles) &&
+            shareData.sharedFiles.length > 0
+          ) {
+            const firstVid = shareData.sharedFiles.find((f) =>
+              isMediaVideoFile(f.name, f.mimeType)
+            );
+            if (firstVid) {
+              setActiveFolderVideo(firstVid);
+            }
           }
         }
       })
@@ -114,7 +157,23 @@ export const PublicSharePortal: React.FC<PublicSharePortalProps> = ({
 
   // Immediately assign direct HTTP 206 Range video stream URL when unlocked (0ms wait)
   useEffect(() => {
-    if (!share || !unlockedKey || !isVideoShare) return;
+    if (!share || !unlockedKey) return;
+    if (isFolderShare) {
+      if (activeFolderVideo) {
+        const folderVideoUrl = `/api/public/share/${encodeURIComponent(
+          share.token
+        )}/download?inline=1&fileId=${encodeURIComponent(
+          activeFolderVideo.id
+        )}&name=${encodeURIComponent(activeFolderVideo.name)}&key=${encodeURIComponent(
+          unlockedKey
+        )}&password=${encodeURIComponent(passwordInput)}`;
+        setVideoStreamUrl(folderVideoUrl);
+      } else {
+        setVideoStreamUrl(null);
+      }
+      return;
+    }
+    if (!isVideoShare) return;
     setLoadingVideoStream(false);
     const directInlineUrl = `/api/public/share/${encodeURIComponent(
       share.token
@@ -122,58 +181,65 @@ export const PublicSharePortal: React.FC<PublicSharePortalProps> = ({
       passwordInput
     )}`;
     setVideoStreamUrl(directInlineUrl);
-  }, [share, unlockedKey, isVideoShare, passwordInput]);
+  }, [share, unlockedKey, isVideoShare, isFolderShare, activeFolderVideo, passwordInput]);
 
   const handlePublicVideoFallback = React.useCallback(async () => {
     if (!share || !unlockedKey || !videoStreamUrl || videoStreamUrl.startsWith('blob:')) return;
     try {
+      const targetFileIdParam =
+        isFolderShare && activeFolderVideo
+          ? `&fileId=${encodeURIComponent(activeFolderVideo.id)}`
+          : '';
       const streamEndpoint = `/api/public/share/${encodeURIComponent(
         share.token
       )}/download?key=${encodeURIComponent(unlockedKey)}&password=${encodeURIComponent(
         passwordInput
-      )}`;
+      )}${targetFileIdParam}`;
       const res = await apiFetch(streamEndpoint);
       if (!res.ok) return;
       const rawBlob = await res.blob();
       if (rawBlob.size <= 64) return;
+      const targetName =
+        isFolderShare && activeFolderVideo ? activeFolderVideo.name : share.fileName;
+      const targetMime =
+        isFolderShare && activeFolderVideo ? activeFolderVideo.mimeType : share.fileMimeType;
       const normalizedMime =
-        share.fileName.toLowerCase().endsWith('.mkv') ||
-        share.fileMimeType === 'video/x-matroska'
+        targetName.toLowerCase().endsWith('.mkv') || targetMime === 'video/x-matroska'
           ? 'video/webm'
-          : share.fileMimeType.startsWith('video/')
-          ? share.fileMimeType
-          : 'video/mp4';
-      const videoBlob = new Blob([rawBlob], { type: normalizedMime });
-      setVideoStreamUrl(URL.createObjectURL(videoBlob));
+          : targetMime || 'video/mp4';
+      const playableBlob = new Blob([rawBlob], { type: normalizedMime });
+      const blobUrl = URL.createObjectURL(playableBlob);
+      setVideoStreamUrl(blobUrl);
     } catch {
       // ignore fallback error
     }
-  }, [share, unlockedKey, videoStreamUrl, passwordInput]);
+  }, [share, unlockedKey, videoStreamUrl, passwordInput, isFolderShare, activeFolderVideo]);
 
   useEffect(() => {
-    const handleProgress = (event: Event) => {
-      const customEvent = event as CustomEvent<{
+    const handleProgressEvent = (ev: Event) => {
+      const custom = ev as CustomEvent<{
         token: string;
         loadedBytes: number;
         totalBytes: number;
-        percent: number;
-        chunkIndex?: number;
-        totalChunks?: number;
+        chunkIndex: number;
+        totalChunks: number;
       }>;
-      if (customEvent.detail && customEvent.detail.token === token) {
-        setDownloadProgress({
-          percent: customEvent.detail.percent,
-          loadedBytes: customEvent.detail.loadedBytes,
-          totalBytes: customEvent.detail.totalBytes,
-          chunkIndex: customEvent.detail.chunkIndex,
-          totalChunks: customEvent.detail.totalChunks,
-        });
-      }
+      if (!custom.detail || custom.detail.token !== token) return;
+      const { loadedBytes, totalBytes, chunkIndex, totalChunks } = custom.detail;
+      const pct =
+        totalBytes > 0 ? Math.min(99, Math.round((loadedBytes / totalBytes) * 100)) : 0;
+      setDownloadProgress({
+        percent: pct,
+        loadedBytes,
+        totalBytes,
+        chunkIndex,
+        totalChunks,
+      });
     };
 
-    window.addEventListener('unlimcloud:public-share-progress', handleProgress);
+    window.addEventListener('unlim:share-download-progress', handleProgressEvent);
     return () => {
-      window.removeEventListener('unlimcloud:public-share-progress', handleProgress);
+      window.removeEventListener('unlim:share-download-progress', handleProgressEvent);
     };
   }, [token]);
 
@@ -182,7 +248,6 @@ export const PublicSharePortal: React.FC<PublicSharePortalProps> = ({
     if (!passwordInput.trim()) return;
     setVerifying(true);
     setAuthError(null);
-
     try {
       const res = await apiFetch(`/api/public/share/${encodeURIComponent(token)}/verify`, {
         method: 'POST',
@@ -191,19 +256,132 @@ export const PublicSharePortal: React.FC<PublicSharePortalProps> = ({
       });
       const data = await res.json();
       if (!res.ok) {
-        setAuthError(data.error || 'Incorrect password. Please try again.');
+        setAuthError(data.error || 'Incorrect password');
       } else {
-        setUnlockedKey(data.accessKey || 'open');
+        setUnlockedKey(data.accessKey || 'unlocked');
       }
     } catch {
-      setAuthError('Could not verify password. Please try again.');
+      setAuthError('Could not verify password');
     } finally {
       setVerifying(false);
     }
   };
 
+  const handleDownloadSingleFolderItem = async (item: SharedFolderFileEntry) => {
+    if (!share || !unlockedKey || downloading) return;
+    setDownloadingItemId(item.id);
+    setDownloadError(null);
+    try {
+      const downloadUrl = `/api/public/share/${encodeURIComponent(
+        share.token
+      )}/download?fileId=${encodeURIComponent(item.id)}&key=${encodeURIComponent(
+        unlockedKey
+      )}&password=${encodeURIComponent(passwordInput)}`;
+      const res = await apiFetch(downloadUrl);
+      if (!res.ok) {
+        throw new Error('Could not download file from shared folder.');
+      }
+      const blob = await res.blob();
+      const blobUrl = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = blobUrl;
+      a.download = item.name;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
+    } catch (err: unknown) {
+      setDownloadError(err instanceof Error ? err.message : 'Download failed');
+    } finally {
+      setDownloadingItemId(null);
+    }
+  };
+
+  const handleDownloadFolderZip = async () => {
+    if (!share || !unlockedKey || downloading) return;
+    const items = share.sharedFiles || [];
+    if (items.length === 0) return;
+
+    setDownloading(true);
+    setDownloadError(null);
+    const totalBytes = items.reduce((acc, f) => acc + (f.sizeBytes || 0), 0);
+    let loadedBytes = 0;
+
+    setDownloadProgress({
+      percent: 1,
+      loadedBytes: 0,
+      totalBytes,
+      statusLabel: `Preparing ${items.length} files for ZIP archive...`,
+    });
+
+    try {
+      const zipEntries: { name: string; data: Uint8Array }[] = [];
+      for (let i = 0; i < items.length; i++) {
+        const item = items[i];
+        setDownloadProgress({
+          percent: Math.min(95, Math.round(((i + 0.2) / items.length) * 100)),
+          loadedBytes,
+          totalBytes,
+          statusLabel: `Packaging ${i + 1}/${items.length}: ${item.name}`,
+        });
+
+        const itemUrl = `/api/public/share/${encodeURIComponent(
+          share.token
+        )}/download?fileId=${encodeURIComponent(item.id)}&key=${encodeURIComponent(
+          unlockedKey
+        )}&password=${encodeURIComponent(passwordInput)}`;
+        const res = await apiFetch(itemUrl);
+        if (!res.ok) continue;
+        const arrBuf = await res.arrayBuffer();
+        const bytes = new Uint8Array(arrBuf);
+        zipEntries.push({ name: item.name, data: bytes });
+        loadedBytes += bytes.byteLength;
+
+        setDownloadProgress({
+          percent: Math.min(98, Math.round(((i + 1) / items.length) * 100)),
+          loadedBytes,
+          totalBytes,
+          statusLabel: `Packaged ${i + 1}/${items.length}: ${item.name}`,
+        });
+      }
+
+      if (zipEntries.length === 0) {
+        throw new Error('No downloadable files were found in this shared folder.');
+      }
+
+      const zipBlob = buildZipBlob(zipEntries);
+      setDownloadProgress({
+        percent: 100,
+        loadedBytes: zipBlob.size,
+        totalBytes: zipBlob.size,
+        statusLabel: 'ZIP Archive Ready!',
+      });
+
+      const blobUrl = URL.createObjectURL(zipBlob);
+      const a = document.createElement('a');
+      a.href = blobUrl;
+      const baseFolderName = (share.fileName || 'Shared-Folder').replace(/\.zip$/i, '');
+      a.download = `${baseFolderName}.zip`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
+    } catch (err: unknown) {
+      setDownloadError(
+        err instanceof Error ? err.message : 'Failed to build folder ZIP archive.'
+      );
+    } finally {
+      setDownloading(false);
+      setTimeout(() => setDownloadProgress(null), 2500);
+    }
+  };
+
   const handleStartDownload = async () => {
-    if (!share) return;
+    if (!share || !unlockedKey || downloading) return;
+    if (isFolderShare) {
+      await handleDownloadFolderZip();
+      return;
+    }
     setDownloading(true);
     setDownloadError(null);
     setDownloadProgress({
@@ -211,11 +389,10 @@ export const PublicSharePortal: React.FC<PublicSharePortalProps> = ({
       loadedBytes: 0,
       totalBytes: share.fileSizeBytes || 0,
     });
-
     try {
       const downloadUrl = `/api/public/share/${encodeURIComponent(
         share.token
-      )}/download?key=${encodeURIComponent(unlockedKey || '')}&password=${encodeURIComponent(
+      )}/download?key=${encodeURIComponent(unlockedKey)}&password=${encodeURIComponent(
         passwordInput
       )}`;
       const res = await apiFetch(downloadUrl);
@@ -295,23 +472,24 @@ export const PublicSharePortal: React.FC<PublicSharePortalProps> = ({
     }
   };
 
-  const renderShareFileIcon = () => {
-    if (!share) return <FileText className="w-5 h-5 sm:w-6 sm:h-6 text-[#D97757]" />;
-    if (
-      share.fileMimeType.startsWith('video/') ||
-      /\.(mp4|webm|mov|mkv)$/i.test(share.fileName)
-    ) {
+  const renderShareFileIcon = (name?: string, mime?: string) => {
+    const targetName = name || share?.fileName || '';
+    const targetMime = mime || share?.fileMimeType || '';
+    if (!name && isFolderShare) {
+      return <Folder className="w-5 h-5 sm:w-6 sm:h-6 text-[#D97757]" />;
+    }
+    if (isMediaVideoFile(targetName, targetMime)) {
       return <Film className="w-5 h-5 sm:w-6 sm:h-6 text-[#D97757]" />;
     }
     if (
-      share.fileMimeType.startsWith('image/') ||
-      /\.(png|jpg|jpeg|gif|webp|svg|bmp)$/i.test(share.fileName)
+      targetMime.startsWith('image/') ||
+      /\.(png|jpg|jpeg|gif|webp|svg|bmp)$/i.test(targetName)
     ) {
       return <ImageIcon className="w-5 h-5 sm:w-6 sm:h-6 text-[#D97757]" />;
     }
     if (
-      share.fileMimeType.startsWith('audio/') ||
-      /\.(mp3|wav|ogg|flac|m4a)$/i.test(share.fileName)
+      targetMime.startsWith('audio/') ||
+      /\.(mp3|wav|ogg|flac|m4a)$/i.test(targetName)
     ) {
       return <Music className="w-5 h-5 sm:w-6 sm:h-6 text-[#D97757]" />;
     }
@@ -377,14 +555,18 @@ export const PublicSharePortal: React.FC<PublicSharePortalProps> = ({
     }
 
     if (videoStreamUrl) {
+      const targetName =
+        isFolderShare && activeFolderVideo ? activeFolderVideo.name : share.fileName;
+      const targetId =
+        isFolderShare && activeFolderVideo ? activeFolderVideo.id : share.fileId || share.token;
       return (
         <div className="w-screen h-screen bg-black overflow-hidden">
           <YouTubeIframePlayer
-            fileId={share.token}
-            fileName={share.fileName}
+            fileId={targetId}
+            fileName={targetName}
             srcUrl={videoStreamUrl}
             rawBlob={null}
-            isMkv={share.fileName.toLowerCase().endsWith('.mkv')}
+            isMkv={targetName.toLowerCase().endsWith('.mkv')}
             fullViewport={true}
             onFallbackContainer={handlePublicVideoFallback}
           />
@@ -418,10 +600,13 @@ export const PublicSharePortal: React.FC<PublicSharePortalProps> = ({
         </button>
 
         <nav className="hidden md:flex items-center gap-4 text-sm text-[#9E978E]">
-          <span className="whitespace-nowrap shrink-0">Shared File Download</span>
+          <span className="whitespace-nowrap shrink-0">
+            {isFolderShare ? 'Shared Folder Gallery & Direct Streaming' : 'Shared File Download & Streaming'}
+          </span>
         </nav>
 
-        <div className="flex items-center shrink-0">
+        <div className="flex items-center gap-2.5 shrink-0">
+          <PWAInstallButton compact />
           <button
             onClick={onExitPublicPortal}
             className="min-h-[40px] flex items-center gap-2 px-3.5 sm:px-4 py-2 text-xs font-medium text-[#F2EFE9] bg-[#24211D] border border-[#2C2824] hover:border-[#D97757] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
@@ -432,11 +617,11 @@ export const PublicSharePortal: React.FC<PublicSharePortalProps> = ({
         </div>
       </header>
 
-      {/* Centered Friendly File Card */}
+      {/* Centered Friendly File or Folder Gallery Card */}
       <main className="flex-1 flex items-center justify-center p-4 sm:p-6">
         <div
           className={`w-full ${
-            isVideoShare && unlockedKey ? 'max-w-3xl' : 'max-w-lg'
+            (isVideoShare || isFolderShare) && unlockedKey ? 'max-w-4xl' : 'max-w-lg'
           } bg-[#1C1A17] border border-[#2C2824]`}
         >
           {loading ? (
@@ -465,30 +650,85 @@ export const PublicSharePortal: React.FC<PublicSharePortalProps> = ({
             </div>
           ) : (
             <div className="p-5 sm:p-8 space-y-6">
-              {/* File Icon & Name */}
-              <div className="flex items-start gap-3.5 sm:gap-4">
-                <div className="w-11 h-11 sm:w-12 sm:h-12 bg-[#24211D] border border-[#2C2824] flex items-center justify-center shrink-0">
-                  {renderShareFileIcon()}
-                </div>
-                <div className="min-w-0 flex-1 space-y-1">
-                  <h1 className="text-base sm:text-xl font-bold text-[#F2EFE9] break-all">
-                    {share.fileName}
-                  </h1>
-                  <div className="flex flex-wrap items-center gap-1.5 sm:gap-2 text-xs text-[#9E978E] tabular-nums">
-                    <span className="text-[#F2EFE9] font-medium">
-                      {formatBytes(share.fileSizeBytes)}
-                    </span>
-                    <span aria-hidden="true">·</span>
-                    <span>Shared by {share.creatorName}</span>
-                    <span aria-hidden="true">·</span>
-                    <span>{formatShortDate(share.createdAt)}</span>
+              {/* File / Folder Header */}
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                <div className="flex items-start gap-3.5 sm:gap-4 min-w-0">
+                  <div className="w-11 h-11 sm:w-12 sm:h-12 bg-[#24211D] border border-[#2C2824] flex items-center justify-center shrink-0">
+                    {renderShareFileIcon()}
+                  </div>
+                  <div className="min-w-0 flex-1 space-y-1">
+                    <h1 className="text-base sm:text-xl font-bold text-[#F2EFE9] break-all">
+                      {share.fileName}
+                    </h1>
+                    <div className="flex flex-wrap items-center gap-1.5 sm:gap-2 text-xs text-[#9E978E] tabular-nums">
+                      {isFolderShare && Array.isArray(share.sharedFiles) && (
+                        <>
+                          <span className="text-[#D97757] font-semibold">
+                            {share.sharedFiles.length} {share.sharedFiles.length === 1 ? 'item' : 'items'}
+                          </span>
+                          <span aria-hidden="true">·</span>
+                        </>
+                      )}
+                      <span className="text-[#F2EFE9] font-medium">
+                        {formatBytes(share.fileSizeBytes)}
+                      </span>
+                      <span aria-hidden="true">·</span>
+                      <span>Shared by {share.creatorName}</span>
+                      <span aria-hidden="true">·</span>
+                      <span>{formatShortDate(share.createdAt)}</span>
+                    </div>
                   </div>
                 </div>
+
+                {/* Folder Gallery Layout Switcher */}
+                {isFolderShare && unlockedKey && (
+                  <div className="flex items-center gap-1 bg-[#141311] border border-[#2C2824] p-0.5 self-start sm:self-center shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => setFolderLayout('grid')}
+                      className={`px-2.5 py-1.5 text-xs font-medium flex items-center gap-1.5 cursor-pointer transition-colors ${
+                        folderLayout === 'grid'
+                          ? 'bg-[#24211D] text-[#D97757]'
+                          : 'text-[#9E978E] hover:text-[#F2EFE9]'
+                      }`}
+                    >
+                      <LayoutGrid className="w-3.5 h-3.5" />
+                      <span>Grid</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setFolderLayout('list')}
+                      className={`px-2.5 py-1.5 text-xs font-medium flex items-center gap-1.5 cursor-pointer transition-colors ${
+                        folderLayout === 'list'
+                          ? 'bg-[#24211D] text-[#D97757]'
+                          : 'text-[#9E978E] hover:text-[#F2EFE9]'
+                      }`}
+                    >
+                      <ListIcon className="w-3.5 h-3.5" />
+                      <span>List</span>
+                    </button>
+                  </div>
+                )}
               </div>
 
-              {/* Clean JW Player Video Preview when unlocked */}
-              {isVideoShare && unlockedKey && (
+              {/* Direct Multi-Quality Video Player for Single Video Share OR Selected Folder Video */}
+              {(isVideoShare || (isFolderShare && activeFolderVideo)) && unlockedKey && (
                 <div className="space-y-2.5">
+                  {isFolderShare && activeFolderVideo && (
+                    <div className="flex items-center justify-between gap-2 px-3 py-2 bg-[#141311] border border-[#2C2824] text-xs">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <Play className="w-3.5 h-3.5 text-[#D97757] fill-current shrink-0" />
+                        <span className="text-[#9E978E] shrink-0">Now Playing:</span>
+                        <span className="font-semibold text-[#F2EFE9] truncate">
+                          {activeFolderVideo.name}
+                        </span>
+                      </div>
+                      <span className="font-mono text-[11px] text-[#9E978E] shrink-0 tabular-nums">
+                        {formatBytes(activeFolderVideo.sizeBytes)}
+                      </span>
+                    </div>
+                  )}
+
                   {loadingVideoStream ? (
                     <div className="w-full aspect-video bg-black border border-[#2C2824] flex flex-col items-center justify-center gap-2 text-xs text-[#9E978E]">
                       <Loader2 className="w-6 h-6 text-[#D97757] animate-spin" />
@@ -496,19 +736,48 @@ export const PublicSharePortal: React.FC<PublicSharePortalProps> = ({
                     </div>
                   ) : videoStreamUrl ? (
                     <YouTubeIframePlayer
-                      fileId={share.token}
-                      fileName={share.fileName}
+                      key={isFolderShare && activeFolderVideo ? activeFolderVideo.id : share.token}
+                      fileId={
+                        isFolderShare && activeFolderVideo
+                          ? activeFolderVideo.id
+                          : share.fileId || share.token
+                      }
+                      fileName={
+                        isFolderShare && activeFolderVideo
+                          ? activeFolderVideo.name
+                          : share.fileName
+                      }
                       srcUrl={videoStreamUrl}
                       rawBlob={null}
-                      isMkv={share.fileName.toLowerCase().endsWith('.mkv')}
+                      isMkv={(isFolderShare && activeFolderVideo
+                        ? activeFolderVideo.name
+                        : share.fileName
+                      )
+                        .toLowerCase()
+                        .endsWith('.mkv')}
                       fullViewport={false}
+                      fileSizeBytes={
+                        isFolderShare && activeFolderVideo
+                          ? activeFolderVideo.sizeBytes
+                          : share.fileSizeBytes
+                      }
+                      fileMimeType={
+                        isFolderShare && activeFolderVideo
+                          ? activeFolderVideo.mimeType
+                          : share.fileMimeType
+                      }
+                      telegramChunks={
+                        isFolderShare && activeFolderVideo
+                          ? activeFolderVideo.telegramChunks
+                          : undefined
+                      }
                       onFallbackContainer={handlePublicVideoFallback}
                     />
                   ) : null}
 
                   <div className="flex items-center justify-between gap-2 pt-1">
                     <span className="text-[11px] text-[#9E978E]">
-                      Direct fast-load stream · Preload enabled
+                      Direct multi-quality stream (Auto / 1080p / 720p / 480p / 360p) · Auto-resume enabled
                     </span>
                     <button
                       type="button"
@@ -534,13 +803,179 @@ export const PublicSharePortal: React.FC<PublicSharePortalProps> = ({
                 </div>
               )}
 
-              {/* Password Box or Download Button */}
+              {/* Shared Folder Gallery View */}
+              {isFolderShare && unlockedKey && Array.isArray(share.sharedFiles) && (
+                <div className="space-y-3 pt-2 border-t border-[#2C2824]">
+                  <div className="flex items-center justify-between text-xs text-[#9E978E]">
+                    <span className="font-semibold text-[#F2EFE9]">
+                      Folder Contents ({share.sharedFiles.length})
+                    </span>
+                    <span>Click any video to stream directly or download individual files</span>
+                  </div>
+
+                  {share.sharedFiles.length === 0 ? (
+                    <div className="p-6 text-center bg-[#141311] border border-[#2C2824] text-xs text-[#9E978E]">
+                      This shared folder is currently empty.
+                    </div>
+                  ) : folderLayout === 'grid' ? (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3 max-h-[420px] overflow-y-auto pr-1">
+                      {share.sharedFiles.map((item) => {
+                        const isVid = isMediaVideoFile(item.name, item.mimeType);
+                        const isPlayingThis = activeFolderVideo?.id === item.id;
+                        const watchPct = isVid ? getWatchPercentage(item.id) : null;
+                        return (
+                          <div
+                            key={item.id}
+                            onClick={() => {
+                              if (isVid) setActiveFolderVideo(item);
+                            }}
+                            className={`group relative flex flex-col justify-between p-3.5 bg-[#141311] border transition-colors ${
+                              isPlayingThis
+                                ? 'border-[#D97757] bg-[#24211D]/60'
+                                : 'border-[#2C2824] hover:border-[#D97757]/60'
+                            } ${isVid ? 'cursor-pointer' : ''}`}
+                          >
+                            <div className="space-y-2.5">
+                              <div className="flex items-start justify-between gap-2">
+                                <div className="w-9 h-9 bg-[#1C1A17] border border-[#2C2824] flex items-center justify-center shrink-0">
+                                  {renderShareFileIcon(item.name, item.mimeType)}
+                                </div>
+                                <div className="flex items-center gap-1">
+                                  {isVid && (
+                                    <button
+                                      type="button"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        setActiveFolderVideo(item);
+                                      }}
+                                      className={`px-2 py-1 text-[11px] font-semibold flex items-center gap-1 cursor-pointer ${
+                                        isPlayingThis
+                                          ? 'bg-[#D97757] text-[#141311]'
+                                          : 'bg-[#24211D] text-[#F2EFE9] hover:bg-[#D97757] hover:text-[#141311]'
+                                      }`}
+                                    >
+                                      <Play className="w-3 h-3 fill-current" />
+                                      <span>{isPlayingThis ? 'Playing' : 'Stream'}</span>
+                                    </button>
+                                  )}
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      void handleDownloadSingleFolderItem(item);
+                                    }}
+                                    disabled={downloadingItemId === item.id}
+                                    className="p-1.5 bg-[#24211D] hover:bg-[#2C2824] text-[#F2EFE9] border border-[#2C2824] cursor-pointer"
+                                    title={`Download ${item.name}`}
+                                  >
+                                    {downloadingItemId === item.id ? (
+                                      <Loader2 className="w-3.5 h-3.5 animate-spin text-[#D97757]" />
+                                    ) : (
+                                      <Download className="w-3.5 h-3.5" />
+                                    )}
+                                  </button>
+                                </div>
+                              </div>
+                              <div className="space-y-1">
+                                <div className="text-xs font-semibold text-[#F2EFE9] line-clamp-2 break-all">
+                                  {item.name}
+                                </div>
+                                <div className="text-[11px] text-[#9E978E] font-mono tabular-nums">
+                                  {formatBytes(item.sizeBytes)}
+                                  {watchPct !== null ? ` · ${watchPct}% watched` : ''}
+                                </div>
+                              </div>
+                            </div>
+                            {watchPct !== null && (
+                              <div className="w-full h-1 bg-[#24211D] mt-2.5 overflow-hidden">
+                                <div
+                                  className="h-full bg-[#D97757]"
+                                  style={{ width: `${watchPct}%` }}
+                                />
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <div className="divide-y divide-[#2C2824] border border-[#2C2824] bg-[#141311] max-h-[420px] overflow-y-auto">
+                      {share.sharedFiles.map((item) => {
+                        const isVid = isMediaVideoFile(item.name, item.mimeType);
+                        const isPlayingThis = activeFolderVideo?.id === item.id;
+                        return (
+                          <div
+                            key={item.id}
+                            onClick={() => {
+                              if (isVid) setActiveFolderVideo(item);
+                            }}
+                            className={`flex items-center justify-between gap-3 px-3.5 py-2.5 text-xs transition-colors ${
+                              isPlayingThis ? 'bg-[#24211D]' : 'hover:bg-[#1C1A17]'
+                            } ${isVid ? 'cursor-pointer' : ''}`}
+                          >
+                            <div className="flex items-center gap-3 min-w-0 flex-1">
+                              {renderShareFileIcon(item.name, item.mimeType)}
+                              <div className="min-w-0 flex-1">
+                                <div className="font-medium text-[#F2EFE9] truncate">
+                                  {item.name}
+                                </div>
+                                <div className="text-[11px] text-[#9E978E] font-mono tabular-nums">
+                                  {formatBytes(item.sizeBytes)}
+                                </div>
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-2 shrink-0">
+                              {isVid && (
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setActiveFolderVideo(item);
+                                  }}
+                                  className={`px-2.5 py-1 text-[11px] font-semibold flex items-center gap-1 cursor-pointer ${
+                                    isPlayingThis
+                                      ? 'bg-[#D97757] text-[#141311]'
+                                      : 'bg-[#24211D] text-[#F2EFE9] border border-[#2C2824] hover:border-[#D97757]'
+                                  }`}
+                                >
+                                  <Play className="w-3 h-3 fill-current" />
+                                  <span>{isPlayingThis ? 'Playing' : 'Stream'}</span>
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  void handleDownloadSingleFolderItem(item);
+                                }}
+                                disabled={downloadingItemId === item.id}
+                                className="px-2.5 py-1 text-[11px] font-medium bg-[#24211D] hover:bg-[#2C2824] text-[#F2EFE9] border border-[#2C2824] flex items-center gap-1 cursor-pointer"
+                              >
+                                {downloadingItemId === item.id ? (
+                                  <Loader2 className="w-3 h-3 animate-spin text-[#D97757]" />
+                                ) : (
+                                  <Download className="w-3 h-3" />
+                                )}
+                                <span>Download</span>
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Password Box or Primary Download Button */}
               <div className="pt-4 border-t border-[#2C2824]">
                 {share.hasPassword && !unlockedKey ? (
                   <form onSubmit={handleVerifyPassword} className="space-y-4">
                     <div className="flex items-center gap-2 text-xs sm:text-sm font-semibold text-[#F2EFE9]">
                       <Lock className="w-4 h-4 text-[#D97757] shrink-0" />
-                      <span>This file is protected with a password</span>
+                      <span>
+                        This shared {isFolderShare ? 'folder' : 'file'} is protected with a password
+                      </span>
                     </div>
                     {share.token === 'tg-spec-vault-2026' && (
                       <p className="text-xs text-[#9E978E]">
@@ -562,7 +997,7 @@ export const PublicSharePortal: React.FC<PublicSharePortalProps> = ({
                         disabled={verifying}
                         className="min-h-[44px] px-6 py-2.5 text-sm font-semibold bg-[#D97757] text-[#141311] hover:bg-[#E08568] transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
                       >
-                        {verifying ? 'Checking...' : 'Unlock File'}
+                        {verifying ? 'Checking...' : `Unlock ${isFolderShare ? 'Folder' : 'File'}`}
                       </button>
                     </div>
                     {authError && <p className="text-xs text-[#D94848]">{authError}</p>}
@@ -576,16 +1011,22 @@ export const PublicSharePortal: React.FC<PublicSharePortalProps> = ({
                     >
                       {downloading ? (
                         <Loader2 className="w-4 h-4 shrink-0 animate-spin" />
+                      ) : isFolderShare ? (
+                        <Archive className="w-4 h-4 shrink-0" />
                       ) : (
                         <Download className="w-4 h-4 shrink-0" />
                       )}
                       <span className="truncate">
                         {downloading
-                          ? downloadProgress && downloadProgress.percent > 0
+                          ? downloadProgress?.statusLabel
+                            ? `${downloadProgress.statusLabel} (${downloadProgress.percent}%)`
+                            : downloadProgress && downloadProgress.percent > 0
                             ? `Downloading... ${downloadProgress.percent}% (${formatBytes(
                                 downloadProgress.loadedBytes
                               )} / ${formatBytes(downloadProgress.totalBytes)})`
                             : 'Preparing Cloud Stream...'
+                          : isFolderShare
+                          ? `Download Full Folder as .ZIP (${formatBytes(share.fileSizeBytes)})`
                           : `Download File (${formatBytes(share.fileSizeBytes)})`}
                       </span>
                     </button>
@@ -594,7 +1035,9 @@ export const PublicSharePortal: React.FC<PublicSharePortalProps> = ({
                       <div className="space-y-1.5 bg-[#141311] border border-[#2C2824] p-3">
                         <div className="flex items-center justify-between text-xs text-[#9E978E] tabular-nums">
                           <span>
-                            {downloadProgress.chunkIndex && downloadProgress.totalChunks
+                            {downloadProgress.statusLabel
+                              ? downloadProgress.statusLabel
+                              : downloadProgress.chunkIndex && downloadProgress.totalChunks
                               ? `Fetching cloud part ${downloadProgress.chunkIndex} of ${downloadProgress.totalChunks}`
                               : 'Streaming binary data'}
                           </span>
@@ -620,7 +1063,9 @@ export const PublicSharePortal: React.FC<PublicSharePortalProps> = ({
                     <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1.5 text-xs text-[#9E978E] tabular-nums">
                       <span className="flex items-center gap-1.5 text-[#2E9E6B]">
                         <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
-                        Ready for direct download
+                        {isFolderShare
+                          ? 'Direct streaming & batch ZIP download enabled'
+                          : 'Ready for direct download'}
                       </span>
                       <span>
                         {share.throttleKbps
@@ -642,4 +1087,3 @@ export const PublicSharePortal: React.FC<PublicSharePortalProps> = ({
     </div>
   );
 };
-

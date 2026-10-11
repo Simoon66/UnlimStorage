@@ -18,6 +18,11 @@ import {
 } from 'lucide-react';
 import { TelegramChunk } from '../types';
 import { getClientBinaryBlob } from '../services/clientCloudFallback';
+import {
+  getVideoProgress,
+  saveVideoProgress,
+  clearVideoProgress,
+} from '../utils/mediaProgressAndZip';
 
 interface YouTubeIframePlayerProps {
   fileId: string;
@@ -299,18 +304,38 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
     srcUrl && !srcUrl.startsWith('blob:') && !srcUrl.startsWith('data:')
   );
 
+  // Check saved playback progress for automatic resume
+  const initialResumeProgress = useMemo(() => getVideoProgress(fileId), [fileId]);
+  const initialResumeSeconds =
+    initialResumeProgress && initialResumeProgress.currentTime >= 5
+      ? initialResumeProgress.currentTime
+      : 0;
+  const hasAppliedNativeResumeRef = useRef<boolean>(false);
+  const lastSavedSecRef = useRef<number>(-1);
+  const [resumedBannerSeconds, setResumedBannerSeconds] = useState<number | null>(() =>
+    initialResumeSeconds >= 5 ? initialResumeSeconds : null
+  );
+
   // Immediately use the server FFmpeg H.264/AAC stream for MKVs so 10-bit HEVC MKVs render crystal-clear video on frame 1
   const [useServerTranscode, setUseServerTranscode] = useState<boolean>(
     () => Boolean(isMkv && isServerApiSource)
   );
-  const [streamStartOffset, setStreamStartOffset] = useState<number>(0);
-  const [probedDuration, setProbedDuration] = useState<number>(0);
+  const [streamStartOffset, setStreamStartOffset] = useState<number>(() =>
+    Boolean(isMkv && isServerApiSource) ? initialResumeSeconds : 0
+  );
+  const [probedDuration, setProbedDuration] = useState<number>(() =>
+    initialResumeProgress?.duration && initialResumeProgress.duration > 0
+      ? initialResumeProgress.duration
+      : 0
+  );
   const [hydrationNonce, setHydrationNonce] = useState<number>(0);
 
   const [isPlaying, setIsPlaying] = useState(false);
   const [isBuffering, setIsBuffering] = useState(true);
   const [showSpinner, setShowSpinner] = useState(false);
-  const [currentTime, setCurrentTime] = useState(0);
+  const [currentTime, setCurrentTime] = useState(() =>
+    Boolean(isMkv && isServerApiSource) ? 0 : initialResumeSeconds
+  );
   const [duration, setDuration] = useState(0);
   const [bufferedPct, setBufferedPct] = useState(0);
   const [volume, setVolume] = useState(1);
@@ -590,6 +615,15 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
     rawBlob,
     srcUrl,
   ]);
+
+  // Auto-dismiss Resume Playback badge after 6.5 seconds
+  useEffect(() => {
+    if (resumedBannerSeconds === null) return;
+    const t = setTimeout(() => {
+      setResumedBannerSeconds(null);
+    }, 6500);
+    return () => clearTimeout(t);
+  }, [resumedBannerSeconds]);
 
   // Cleanup timers on unmount
   useEffect(() => {
@@ -1252,6 +1286,7 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
               setIsPlaying(false);
               setIsBuffering(false);
               setControlsVisible(true);
+              clearVideoProgress(fileId);
             }}
             onWaiting={() => {
               setIsBuffering(true);
@@ -1294,6 +1329,19 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
                 vid.duration > 0
               ) {
                 setDuration(vid.duration);
+                if (
+                  !hasAppliedNativeResumeRef.current &&
+                  initialResumeSeconds >= 5 &&
+                  initialResumeSeconds < vid.duration - 8
+                ) {
+                  hasAppliedNativeResumeRef.current = true;
+                  try {
+                    vid.currentTime = initialResumeSeconds;
+                    setCurrentTime(initialResumeSeconds);
+                  } catch {
+                    // ignore
+                  }
+                }
               }
               if (!useServerTranscode && isServerApiSource && vid.videoWidth === 0) {
                 autoPlayAfterSwitchRef.current = !vid.paused;
@@ -1320,6 +1368,14 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
                 setCurrentTime(vid.currentTime || 0);
               }
               const maxDur = effectiveDuration || vid.duration || 0;
+              const actualPos = useServerTranscode
+                ? streamStartOffset + (vid.currentTime || 0)
+                : vid.currentTime || 0;
+              const floorSec = Math.floor(actualPos);
+              if (floorSec > 0 && floorSec % 2 === 0 && floorSec !== lastSavedSecRef.current) {
+                lastSavedSecRef.current = floorSec;
+                saveVideoProgress(fileId, actualPos, maxDur);
+              }
               if (vid.buffered && vid.buffered.length > 0 && maxDur > 0) {
                 const bufEnd = streamStartOffset + vid.buffered.end(vid.buffered.length - 1);
                 setBufferedPct(Math.min(100, (bufEnd / maxDur) * 100));
@@ -1390,6 +1446,31 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
           {hudBadgeText && (
             <div className="pointer-events-none absolute top-4 left-1/2 -translate-x-1/2 z-20 px-3 py-1 bg-black/80 border border-white/15 text-white text-xs font-mono font-semibold tracking-wide">
               {hudBadgeText}
+            </div>
+          )}
+
+          {/* Resume Playback Toast Badge with One-Click "Start Over" */}
+          {resumedBannerSeconds !== null && (
+            <div
+              onClick={(e) => e.stopPropagation()}
+              className="absolute top-3 left-3 z-20 flex items-center gap-2.5 px-3 py-1.5 bg-[#141311]/90 border border-[#2C2824] text-[#F2EFE9] text-xs shadow-lg"
+            >
+              <span className="font-mono text-[11px] text-[#9E978E]">
+                Resumed at <strong className="text-[#F2EFE9]">{formatClock(resumedBannerSeconds)}</strong>
+              </span>
+              <span className="text-[#68625A]">·</span>
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  clearVideoProgress(fileId);
+                  setResumedBannerSeconds(null);
+                  seekToTargetSeconds(0, true);
+                }}
+                className="text-[11px] font-semibold text-[#D97757] hover:underline cursor-pointer"
+              >
+                Start Over
+              </button>
             </div>
           )}
 

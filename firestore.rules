@@ -342,7 +342,7 @@ service cloud.firestore {
 
     // 6. Cloud File Metadata Collection (/cloudFiles/{fileId})
     match /cloudFiles/{fileId} {
-      allow get: if isSignedIn() && isValidId(fileId) && (existing().ownerId == request.auth.uid || isAdmin());
+      allow get: if isSignedIn() && isValidId(fileId) && (resource == null || existing().ownerId == request.auth.uid || isAdmin());
       allow list: if isSignedIn() && (resource.data.ownerId == request.auth.uid || isAdmin());
 
       allow create: if isVerifiedUser() &&
@@ -385,7 +385,7 @@ service cloud.firestore {
 
     // 7. Cloud Folder Metadata Collection (/cloudFolders/{folderId})
     match /cloudFolders/{folderId} {
-      allow get: if isSignedIn() && isValidId(folderId) && (existing().ownerId == request.auth.uid || isAdmin());
+      allow get: if isSignedIn() && isValidId(folderId) && (resource == null || existing().ownerId == request.auth.uid || isAdmin());
       allow list: if isSignedIn() && (resource.data.ownerId == request.auth.uid || isAdmin());
 
       allow create: if isVerifiedUser() &&

@@ -48,6 +48,10 @@ export interface FolderRecord {
   ownerId: string;
   ownerName: string;
   createdAt: string;
+  trashed?: boolean;
+  trashedAt?: string | null;
+  isPinProtected?: boolean;
+  pinHash?: string | null;
 }
 
 export interface TelegramChunk {
@@ -75,6 +79,7 @@ export interface FileRecord {
   telegramFileId?: string;
   starred: boolean;
   trashed?: boolean;
+  trashedAt?: string | null;
   downloadCount: number;
   createdAt: string;
   updatedAt: string;
@@ -84,9 +89,25 @@ export interface FileRecord {
   tags?: string[];
 }
 
+export interface SharedFolderFileEntry {
+  id: string;
+  name: string;
+  sizeBytes: number;
+  mimeType: string;
+  sha256?: string;
+  storageDriver?: StorageDriver;
+  telegramChatId?: string;
+  telegramChunks?: TelegramChunk[];
+  previewText?: string;
+  previewDataUrl?: string;
+}
+
 export interface ShareLink {
   id: string;
   token: string;
+  targetType?: 'file' | 'folder';
+  folderId?: string | null;
+  sharedFiles?: SharedFolderFileEntry[];
   fileId: string;
   fileName: string;
   fileSizeBytes: number;
@@ -107,7 +128,7 @@ export interface ShareLink {
 }
 
 export type TransferJobType = 'local_upload' | 'remote_url' | 'telegram_sync';
-export type TransferJobStatus = 'queued' | 'streaming' | 'syncing_telegram' | 'completed' | 'failed';
+export type TransferJobStatus = 'queued' | 'streaming' | 'paused' | 'syncing_telegram' | 'completed' | 'failed';
 
 export interface TransferJob {
   id: string;
@@ -123,6 +144,7 @@ export interface TransferJob {
   status: TransferJobStatus;
   storageDriver: StorageDriver;
   fileId?: string;
+  uploadId?: string;
   sha256?: string;
   error?: string;
   errorMessage?: string;

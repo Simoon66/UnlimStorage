@@ -35,6 +35,13 @@ import {
   CheckSquare,
   Square,
   Clock,
+  LayoutGrid,
+  List as ListIcon,
+  Pause,
+  Play,
+  RotateCcw,
+  KeyRound,
+  FolderArchive,
 } from 'lucide-react';
 import {
   User,
@@ -88,6 +95,8 @@ import {
   BuyTokensModal,
   AuthModal,
   ManageTagsModal,
+  FolderPinModal,
+  FolderPinModalState,
 } from './components/Modals';
 import {
   SharedLinksView,
@@ -95,8 +104,22 @@ import {
   ActivityAndSpeedView,
   TelegramStorageView,
 } from './components/Views';
+import { PWAInstallButton } from './components/PWAInstallButton';
+import { OfflineIndicator } from './components/OfflineIndicator';
+import {
+  hashFolderPin,
+  verifyFolderPin,
+  downloadFilesAsZip,
+  getVideoProgress,
+} from './utils/mediaProgressAndZip';
 
-type ActiveView = 'explorer' | 'shares' | 'pricing' | 'activity' | 'telegram_settings';
+type ActiveView =
+  | 'explorer'
+  | 'trash'
+  | 'shares'
+  | 'pricing'
+  | 'activity'
+  | 'telegram_settings';
 
 function renderFileIcon(file: FileRecord) {
   if (file.lockedOverQuota) {
@@ -308,13 +331,32 @@ export default function App() {
   const [selectedFileIds, setSelectedFileIds] = useState<string[]>([]);
   const [creatingFolder, setCreatingFolder] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
+  const [newFolderPin, setNewFolderPin] = useState('');
   const [isDraggingOver, setIsDraggingOver] = useState(false);
+
+  // Explorer Grid / List layout toggle (persisted in localStorage)
+  const [explorerLayout, setExplorerLayout] = useState<'grid' | 'list'>(() => {
+    try {
+      return localStorage.getItem('tgdrive_explorer_layout_v1') === 'list' ? 'list' : 'grid';
+    } catch {
+      return 'grid';
+    }
+  });
+
+  // Folder PIN Lock session state
+  const [unlockedFolderIds, setUnlockedFolderIds] = useState<string[]>([]);
+  const [folderPinModalState, setFolderPinModalState] = useState<FolderPinModalState | null>(null);
+
+  // Batch ZIP download progress state
+  const [zipDownloading, setZipDownloading] = useState(false);
+  const [zipProgressPct, setZipProgressPct] = useState(0);
 
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const searchContainerRef = useRef<HTMLDivElement | null>(null);
 
   // Live File Upload Progress Bar & Post-Upload Processing State
   const [uploadingFiles, setUploadingFiles] = useState(false);
+  const [uploadPaused, setUploadPaused] = useState(false);
   const [uploadProgress, setUploadProgress] = useState<{
     fileName: string;
     percent: number;
@@ -329,6 +371,7 @@ export default function App() {
   // Modals & Drag-and-Drop Move State
   const [showRemoteModal, setShowRemoteModal] = useState(false);
   const [shareModalFile, setShareModalFile] = useState<FileRecord | null>(null);
+  const [shareModalFolder, setShareModalFolder] = useState<FolderRecord | null>(null);
   const [inspectedFile, setInspectedFile] = useState<FileRecord | null>(null);
   const [moveModalFile, setMoveModalFile] = useState<FileRecord | null>(null);
   const [batchMoveFiles, setBatchMoveFiles] = useState<FileRecord[] | null>(null);
@@ -339,10 +382,13 @@ export default function App() {
   const [draggedFileId, setDraggedFileId] = useState<string | null>(null);
   const [dragOverFolderId, setDragOverFolderId] = useState<string | null>(null);
 
-  // Real-time notifications & Upload AbortController
+  // Real-time notifications & Upload AbortController + Pause/Resume Controller
   const [notifications, setNotifications] = useState<RealtimeNotification[]>([]);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const uploadAbortControllerRef = useRef<AbortController | null>(null);
+  const uploadChunkAbortControllerRef = useRef<AbortController | null>(null);
+  const uploadPausedRef = useRef<boolean>(false);
+  const uploadResumeResolverRef = useRef<((outcome: 'resumed' | 'cancelled') => void) | null>(null);
 
   const authHeaders = useCallback(
     (extra: Record<string, string> = {}) => {
@@ -429,14 +475,16 @@ export default function App() {
           });
 
         for (const f of unsyncedLocalFiles) {
-          syncCloudFileToFirestore(f).catch(() => null);
+          await syncCloudFileToFirestore(f).catch(() => null);
         }
         for (const fl of unsyncedLocalFolders) {
-          syncCloudFolderToFirestore(fl).catch(() => null);
+          await syncCloudFolderToFirestore(fl).catch(() => null);
         }
         for (const sh of unsyncedLocalShares) {
-          const linkedFile = cloudDrive.files.find((cf) => cf.id === sh.fileId);
-          syncPublicShareToFirestore({
+          const linkedFile =
+            cloudDrive.files.find((cf) => cf.id === sh.fileId) ||
+            unsyncedLocalFiles.find((uf) => uf.id === sh.fileId);
+          await syncPublicShareToFirestore({
             share: sh,
             file: linkedFile || null,
             passwordHash: sh.passwordHash || null,
@@ -565,7 +613,7 @@ export default function App() {
           cloudFiles,
           removedFileIds,
         });
-        setFiles(reconciled.files.filter((f) => !f.trashed));
+        setFiles(reconciled.files);
         setShares(reconciled.shares);
         if (reconciled.user) {
           setCurrentUser(reconciled.user);
@@ -781,6 +829,10 @@ export default function App() {
 
     const abortController = new AbortController();
     uploadAbortControllerRef.current = abortController;
+    const chunkAbortController = new AbortController();
+    uploadChunkAbortControllerRef.current = chunkAbortController;
+    uploadPausedRef.current = false;
+    setUploadPaused(false);
 
     setUploadingFiles(true);
     setPostUploadProcessing(null);
@@ -798,6 +850,14 @@ export default function App() {
         folderId: currentFolderId,
         headers: authHeaders(),
         signal: abortController.signal,
+        pauseController: {
+          isPaused: () => uploadPausedRef.current,
+          getChunkAbortSignal: () => uploadChunkAbortControllerRef.current?.signal,
+          waitForResumeOrCancel: () =>
+            new Promise<'resumed' | 'cancelled'>((resolve) => {
+              uploadResumeResolverRef.current = resolve;
+            }),
+        },
         onProgress: (info) => {
           setUploadProgress({
             fileName: label,
@@ -859,13 +919,51 @@ export default function App() {
       loadWorkspaceData().catch(() => null);
     } finally {
       uploadAbortControllerRef.current = null;
+      uploadChunkAbortControllerRef.current = null;
+      uploadPausedRef.current = false;
+      uploadResumeResolverRef.current = null;
+      setUploadPaused(false);
       setUploadingFiles(false);
       setUploadProgress(null);
       setPostUploadProcessing(null);
     }
   };
 
+  const handleTogglePauseUpload = () => {
+    if (!uploadingFiles) return;
+    if (!uploadPausedRef.current) {
+      // Pause immediately (abort current in-flight chunk XHR so it pauses right away and resumes from chunk offset)
+      uploadPausedRef.current = true;
+      setUploadPaused(true);
+      if (uploadChunkAbortControllerRef.current) {
+        uploadChunkAbortControllerRef.current.abort();
+      }
+      setUploadProgress((prev) => (prev ? { ...prev, speedBps: 0 } : prev));
+    } else {
+      // Resume upload from last completed chunk offset
+      uploadPausedRef.current = false;
+      setUploadPaused(false);
+      uploadChunkAbortControllerRef.current = new AbortController();
+      if (uploadResumeResolverRef.current) {
+        const resolve = uploadResumeResolverRef.current;
+        uploadResumeResolverRef.current = null;
+        resolve('resumed');
+      }
+    }
+  };
+
   const handleCancelUpload = () => {
+    uploadPausedRef.current = false;
+    setUploadPaused(false);
+    if (uploadResumeResolverRef.current) {
+      const resolve = uploadResumeResolverRef.current;
+      uploadResumeResolverRef.current = null;
+      resolve('cancelled');
+    }
+    if (uploadChunkAbortControllerRef.current) {
+      uploadChunkAbortControllerRef.current.abort();
+      uploadChunkAbortControllerRef.current = null;
+    }
     if (uploadAbortControllerRef.current) {
       uploadAbortControllerRef.current.abort();
       uploadAbortControllerRef.current = null;
@@ -897,21 +995,86 @@ export default function App() {
   const handleCreateFolder = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newFolderName.trim()) return;
+    let pinHash: string | null = null;
+    if (newFolderPin.trim()) {
+      if (!/^\d{4,8}$/.test(newFolderPin.trim())) {
+        pushNotification({
+          id: `pin_err_${Date.now()}`,
+          timestamp: new Date().toISOString(),
+          title: 'Invalid Folder PIN',
+          message: 'Optional Folder PIN must be 4 to 8 numeric digits.',
+          type: 'error',
+        });
+        return;
+      }
+      pinHash = await hashFolderPin(newFolderPin.trim());
+    }
     const res = await apiFetch('/api/folders', {
       method: 'POST',
       headers: authHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({
         name: newFolderName.trim(),
         parentId: currentFolderId,
+        pinHash,
       }),
     });
     if (res.ok) {
       const data = await res.json();
       setFolders((prev) => [...prev, data.folder]);
+      if (pinHash && data.folder?.id) {
+        setUnlockedFolderIds((prev) => Array.from(new Set([...prev, data.folder.id])));
+      }
       syncCloudFolderToFirestore(data.folder).catch(() => null);
       setNewFolderName('');
+      setNewFolderPin('');
       setCreatingFolder(false);
     }
+  };
+
+  const handleOpenFolder = (folder: FolderRecord) => {
+    if (folder.isPinProtected && folder.pinHash && !unlockedFolderIds.includes(folder.id)) {
+      setFolderPinModalState({ folder, mode: 'unlock' });
+      return;
+    }
+    setCurrentFolderId(folder.id);
+  };
+
+  const handleSaveFolderPin = async (folder: FolderRecord, newPin: string | null) => {
+    const pinHash = newPin ? await hashFolderPin(newPin) : null;
+    const res = await apiFetch(`/api/folders/${encodeURIComponent(folder.id)}`, {
+      method: 'PATCH',
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({
+        pinHash,
+        isPinProtected: Boolean(pinHash),
+      }),
+    });
+    if (!res.ok) {
+      const errData = await res.json().catch(() => ({}));
+      throw new Error(errData.error || 'Failed to update folder PIN');
+    }
+    const data = await res.json();
+    const updatedFolder: FolderRecord = data.folder || {
+      ...folder,
+      pinHash,
+      isPinProtected: Boolean(pinHash),
+    };
+    setFolders((prev) => prev.map((fl) => (fl.id === folder.id ? updatedFolder : fl)));
+    if (pinHash) {
+      setUnlockedFolderIds((prev) => Array.from(new Set([...prev, folder.id])));
+    } else {
+      setUnlockedFolderIds((prev) => prev.filter((id) => id !== folder.id));
+    }
+    syncCloudFolderToFirestore(updatedFolder).catch(() => null);
+    pushNotification({
+      id: `pin_save_${Date.now()}`,
+      timestamp: new Date().toISOString(),
+      title: pinHash ? 'Folder PIN Lock Enabled' : 'Folder PIN Lock Removed',
+      message: pinHash
+        ? `"${folder.name}" is now protected with a PIN code.`
+        : `PIN lock removed from "${folder.name}".`,
+      type: 'completed',
+    });
   };
 
   const handleCreateFolderFromModal = async (
@@ -1058,11 +1221,142 @@ export default function App() {
     );
   };
 
+  const handleRestoreFile = async (file: FileRecord) => {
+    const res = await apiFetch(`/api/files/${encodeURIComponent(file.id)}`, {
+      method: 'PATCH',
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ trashed: false, trashedAt: null }),
+    });
+    if (res.ok) {
+      const data = await res.json();
+      const restored: FileRecord = data.file || { ...file, trashed: false, trashedAt: null };
+      setFiles((prev) => prev.map((f) => (f.id === file.id ? restored : f)));
+      syncCloudFileToFirestore(restored, true).catch(() => null);
+      pushNotification({
+        id: `restore_${Date.now()}`,
+        timestamp: new Date().toISOString(),
+        title: 'File Restored',
+        message: `"${file.name}" was restored to My Files.`,
+        type: 'completed',
+      });
+    }
+  };
+
+  const handleRestoreFolder = async (folder: FolderRecord) => {
+    const res = await apiFetch(`/api/folders/${encodeURIComponent(folder.id)}`, {
+      method: 'PATCH',
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ trashed: false, trashedAt: null }),
+    });
+    if (res.ok) {
+      const data = await res.json();
+      const restoredFolder: FolderRecord = data.folder || {
+        ...folder,
+        trashed: false,
+        trashedAt: null,
+      };
+      setFolders((prev) => prev.map((fl) => (fl.id === folder.id ? restoredFolder : fl)));
+      syncCloudFolderToFirestore(restoredFolder).catch(() => null);
+      if (Array.isArray(data.files)) {
+        setFiles(data.files);
+        for (const f of data.files as FileRecord[]) {
+          if (f.folderId === folder.id) {
+            syncCloudFileToFirestore(f, true).catch(() => null);
+          }
+        }
+      } else {
+        setFiles((prev) =>
+          prev.map((f) =>
+            f.folderId === folder.id ? { ...f, trashed: false, trashedAt: null } : f
+          )
+        );
+      }
+      pushNotification({
+        id: `restore_fld_${Date.now()}`,
+        timestamp: new Date().toISOString(),
+        title: 'Folder Restored',
+        message: `"${folder.name}" and its files were restored to My Files.`,
+        type: 'completed',
+      });
+    }
+  };
+
   const executeDeleteTarget = async () => {
     if (!deleteTarget) return;
+    const isPermanent = Boolean(deleteTarget.permanent || deleteTarget.type === 'empty-trash');
+
+    if (deleteTarget.type === 'empty-trash') {
+      const trashedFileList = files.filter((f) => f.trashed);
+      const trashedFolderList = folders.filter((fl) => fl.trashed);
+      for (const tf of trashedFileList) {
+        await deleteCloudFileFromFirestore(tf.id).catch(() => null);
+      }
+      for (const tfl of trashedFolderList) {
+        await deleteCloudFolderFromFirestore(tfl.id).catch(() => null);
+      }
+      const res = await apiFetch('/api/trash/empty', {
+        method: 'POST',
+        headers: authHeaders(),
+      });
+      if (res.ok) {
+        const data = await res.json().catch(() => ({}));
+        if (data.user) setCurrentUser(data.user);
+        setFiles((prev) => prev.filter((f) => !f.trashed));
+        setFolders((prev) => prev.filter((fl) => !fl.trashed));
+        pushNotification({
+          id: `empty_trash_${Date.now()}`,
+          timestamp: new Date().toISOString(),
+          title: 'Trash Bin Emptied',
+          message: 'All trashed items were permanently erased across all devices.',
+          type: 'info',
+        });
+      }
+      return;
+    }
+
     if (deleteTarget.type === 'folder') {
       const folderId = deleteTarget.id;
       const folderName = deleteTarget.name;
+      if (!isPermanent) {
+        const trashedAt = new Date().toISOString();
+        const res = await apiFetch(`/api/folders/${encodeURIComponent(folderId)}`, {
+          method: 'PATCH',
+          headers: authHeaders({ 'Content-Type': 'application/json' }),
+          body: JSON.stringify({ trashed: true, trashedAt }),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (currentFolderId === folderId) setCurrentFolderId(null);
+          const updatedFolder: FolderRecord = data.folder || {
+            ...(folders.find((fl) => fl.id === folderId) as FolderRecord),
+            trashed: true,
+            trashedAt,
+          };
+          setFolders((prev) => prev.map((fl) => (fl.id === folderId ? updatedFolder : fl)));
+          syncCloudFolderToFirestore(updatedFolder).catch(() => null);
+          if (Array.isArray(data.files)) {
+            setFiles(data.files);
+            for (const f of data.files as FileRecord[]) {
+              if (f.folderId === folderId) {
+                syncCloudFileToFirestore(f, true).catch(() => null);
+              }
+            }
+          } else {
+            setFiles((prev) =>
+              prev.map((f) => (f.folderId === folderId ? { ...f, trashed: true, trashedAt } : f))
+            );
+          }
+          pushNotification({
+            id: `trash_fld_${Date.now()}`,
+            timestamp: new Date().toISOString(),
+            title: 'Folder Moved to Trash Bin',
+            message: `"${folderName}" was moved to Trash. Restore it anytime from the Trash Bin tab.`,
+            type: 'info',
+          });
+        }
+        return;
+      }
+
       await deleteCloudFolderFromFirestore(folderId).catch(() => null);
       const res = await apiFetch(`/api/folders/${encodeURIComponent(folderId)}`, {
         method: 'DELETE',
@@ -1077,8 +1371,8 @@ export default function App() {
         pushNotification({
           id: `del_${Date.now()}`,
           timestamp: new Date().toISOString(),
-          title: 'Folder Deleted',
-          message: `"${folderName}" was removed across all devices.`,
+          title: 'Folder Permanently Deleted',
+          message: `"${folderName}" was permanently removed across all devices.`,
           type: 'info',
         });
       }
@@ -1088,8 +1382,46 @@ export default function App() {
           ? deleteTarget.fileIds
           : selectedFileIds;
       const idSet = new Set(batchIds);
-      const relatedShares = shares.filter((s) => idSet.has(s.fileId));
 
+      if (!isPermanent) {
+        const trashedAt = new Date().toISOString();
+        const updatedMap = new Map<string, FileRecord>();
+        for (const fid of batchIds) {
+          const res = await apiFetch(`/api/files/${encodeURIComponent(fid)}`, {
+            method: 'PATCH',
+            headers: authHeaders({ 'Content-Type': 'application/json' }),
+            body: JSON.stringify({ trashed: true, trashedAt }),
+          });
+          if (res.ok) {
+            const data = await res.json().catch(() => ({}));
+            if (data.file) {
+              updatedMap.set(fid, data.file);
+              syncCloudFileToFirestore(data.file, true).catch(() => null);
+            }
+          }
+        }
+        setFiles((prev) =>
+          prev.map((f) =>
+            idSet.has(f.id) ? updatedMap.get(f.id) || { ...f, trashed: true, trashedAt } : f
+          )
+        );
+        setSelectedFileIds((prev) => prev.filter((id) => !idSet.has(id)));
+        if (inspectedFile && idSet.has(inspectedFile.id)) setInspectedFile(null);
+        if (shareModalFile && idSet.has(shareModalFile.id)) setShareModalFile(null);
+        if (moveModalFile && idSet.has(moveModalFile.id)) setMoveModalFile(null);
+        pushNotification({
+          id: `batch_trash_${Date.now()}`,
+          timestamp: new Date().toISOString(),
+          title: 'Moved to Trash Bin',
+          message: `${batchIds.length} ${
+            batchIds.length === 1 ? 'file was' : 'files were'
+          } moved to the Trash Bin.`,
+          type: 'info',
+        });
+        return;
+      }
+
+      const relatedShares = shares.filter((s) => idSet.has(s.fileId));
       for (const fid of batchIds) {
         await deleteCloudFileFromFirestore(fid).catch(() => null);
       }
@@ -1128,9 +1460,39 @@ export default function App() {
     } else {
       const fileId = deleteTarget.id;
       const fileName = deleteTarget.name;
-      const relatedShares = shares.filter((s) => s.fileId === fileId);
 
-      // Delete from Firestore first so real-time listeners on all devices purge immediately
+      if (!isPermanent) {
+        const trashedAt = new Date().toISOString();
+        const res = await apiFetch(`/api/files/${encodeURIComponent(fileId)}`, {
+          method: 'PATCH',
+          headers: authHeaders({ 'Content-Type': 'application/json' }),
+          body: JSON.stringify({ trashed: true, trashedAt }),
+        });
+        if (res.ok) {
+          const data = await res.json().catch(() => ({}));
+          const updatedFile: FileRecord = data.file || {
+            ...(files.find((f) => f.id === fileId) as FileRecord),
+            trashed: true,
+            trashedAt,
+          };
+          setFiles((prev) => prev.map((f) => (f.id === fileId ? updatedFile : f)));
+          setSelectedFileIds((prev) => prev.filter((id) => id !== fileId));
+          if (inspectedFile?.id === fileId) setInspectedFile(null);
+          if (shareModalFile?.id === fileId) setShareModalFile(null);
+          if (moveModalFile?.id === fileId) setMoveModalFile(null);
+          syncCloudFileToFirestore(updatedFile, true).catch(() => null);
+          pushNotification({
+            id: `trash_${Date.now()}`,
+            timestamp: new Date().toISOString(),
+            title: 'Moved to Trash Bin',
+            message: `"${fileName}" was moved to the Trash Bin. You can restore it anytime.`,
+            type: 'info',
+          });
+        }
+        return;
+      }
+
+      const relatedShares = shares.filter((s) => s.fileId === fileId);
       await deleteCloudFileFromFirestore(fileId).catch(() => null);
       for (const sh of relatedShares) {
         deletePublicShareFromFirestore(sh.token).catch(() => null);
@@ -1152,7 +1514,7 @@ export default function App() {
         pushNotification({
           id: `del_${Date.now()}`,
           timestamp: new Date().toISOString(),
-          title: 'File Deleted',
+          title: 'File Permanently Deleted',
           message: `"${fileName}" was permanently deleted across all devices.`,
           type: 'info',
         });
@@ -1276,6 +1638,8 @@ export default function App() {
   const handleCreateShare = useCallback(
     async (payload: {
       fileId: string;
+      folderId?: string;
+      targetType?: 'file' | 'folder';
       customSlug?: string;
       password?: string;
       expiresInHours?: number | null;
@@ -1294,6 +1658,14 @@ export default function App() {
       }
       const createdShare = data.share as ShareLink;
       setShares((prev) => [createdShare, ...prev.filter((s) => s.id !== createdShare.id)]);
+
+      if (payload.targetType === 'folder' || payload.folderId) {
+        await syncPublicShareToFirestore({
+          share: createdShare,
+          file: null,
+        }).catch(() => null);
+        return createdShare;
+      }
 
       const targetFile =
         files.find((f) => f.id === payload.fileId) ||
@@ -1697,7 +2069,7 @@ export default function App() {
         (f.mimeType.startsWith('video/') || /\.(mp4|webm|mov|mkv|avi|m4v)$/i.test(f.name))
     );
     if (firstVideo) {
-      preloadVideoFile(firstVideo, authHeaders);
+      preloadVideoFile(firstVideo, authHeaders());
     }
   }, [files, currentFolderId, firebaseUser, authHeaders]);
 
@@ -2071,10 +2443,16 @@ export default function App() {
     Boolean(firebaseUser) &&
     firebaseUser.email?.toLowerCase() === 'titumamma2425@gmail.com';
 
-  const activeFolder = folders.find((f) => f.id === currentFolderId) || null;
-  const visibleSubfolders = folders.filter((f) => f.parentId === currentFolderId);
+  const activeFolders = folders.filter((f) => !f.trashed);
+  const trashedFolders = folders.filter((f) => Boolean(f.trashed));
+  const activeFiles = files.filter((f) => !f.trashed);
+  const trashedFiles = files.filter((f) => Boolean(f.trashed));
+  const totalTrashCount = trashedFiles.length + trashedFolders.length;
 
-  const visibleFiles = files.filter((f) => {
+  const activeFolder = activeFolders.find((f) => f.id === currentFolderId) || null;
+  const visibleSubfolders = activeFolders.filter((f) => f.parentId === currentFolderId);
+
+  const visibleFiles = activeFiles.filter((f) => {
     if (selectedTagFilter) {
       const hasMatchingTag = (f.tags || []).some(
         (t) => t.toLowerCase() === selectedTagFilter.toLowerCase()
@@ -2100,7 +2478,7 @@ export default function App() {
     return true;
   });
 
-  const selectedFilesObjects = files.filter((f) => selectedFileIds.includes(f.id));
+  const selectedFilesObjects = activeFiles.filter((f) => selectedFileIds.includes(f.id));
   const selectedTotalBytes = selectedFilesObjects.reduce((acc, f) => acc + f.sizeBytes, 0);
   const allVisibleSelected =
     visibleFiles.length > 0 && visibleFiles.every((f) => selectedFileIds.includes(f.id));
@@ -2143,6 +2521,75 @@ export default function App() {
     }
   };
 
+  const handleBatchZipDownload = async () => {
+    if (selectedFilesObjects.length === 0 || zipDownloading) return;
+    const unlocked = selectedFilesObjects.filter((f) => !f.lockedOverQuota);
+    if (unlocked.length === 0) {
+      pushNotification({
+        id: `batch_zip_lock_${Date.now()}`,
+        timestamp: new Date().toISOString(),
+        title: 'Selected Files Locked',
+        message: 'Extend your storage plan with Tokens to download locked files.',
+        type: 'warning',
+      });
+      return;
+    }
+
+    setZipDownloading(true);
+    setZipProgressPct(0);
+    try {
+      const zipEntries: { name: string; fetchBlob: () => Promise<Blob> }[] = unlocked.map(
+        (file) => ({
+          name: file.name,
+          fetchBlob: async () => {
+            const cached = await getClientBinaryBlob(file.id, file);
+            if (cached && cached.size > 64) return cached;
+            const url = `/api/files/${encodeURIComponent(file.id)}/download?uid=${encodeURIComponent(
+              firebaseUser?.uid || ''
+            )}&email=${encodeURIComponent(firebaseUser?.email || '')}`;
+            const res = await apiFetch(url, { headers: authHeaders() });
+            if (!res.ok) throw new Error(`Failed to fetch ${file.name}`);
+            return await res.blob();
+          },
+        })
+      );
+
+      const archiveBaseName = activeFolder ? activeFolder.name : 'UnlimStorage-Selected-Files';
+      await downloadFilesAsZip(zipEntries, `${archiveBaseName}.zip`, (pct) => {
+        setZipProgressPct(pct);
+      });
+      pushNotification({
+        id: `batch_zip_done_${Date.now()}`,
+        timestamp: new Date().toISOString(),
+        title: 'ZIP Archive Downloaded',
+        message: `Bundled ${unlocked.length} ${
+          unlocked.length === 1 ? 'file' : 'files'
+        } into ${archiveBaseName}.zip.`,
+        type: 'completed',
+      });
+    } catch (err: unknown) {
+      pushNotification({
+        id: `batch_zip_err_${Date.now()}`,
+        timestamp: new Date().toISOString(),
+        title: 'ZIP Download Failed',
+        message: err instanceof Error ? err.message : 'Could not build ZIP archive',
+        type: 'error',
+      });
+    } finally {
+      setZipDownloading(false);
+      setZipProgressPct(0);
+    }
+  };
+
+  const handleChangeLayout = (nextLayout: 'grid' | 'list') => {
+    setExplorerLayout(nextLayout);
+    try {
+      localStorage.setItem('tgdrive_explorer_layout_v1', nextLayout);
+    } catch {
+      // ignore
+    }
+  };
+
   const isUnlimitedAdmin =
     isAdminUser ||
     currentUser?.role === 'admin' ||
@@ -2154,7 +2601,7 @@ export default function App() {
     : Math.min(100, Math.round((totalStorageBytes / quotaLimitBytes) * 100));
   const lockedFilesCount = isUnlimitedAdmin
     ? 0
-    : files.filter((f) => f.lockedOverQuota).length;
+    : activeFiles.filter((f) => f.lockedOverQuota).length;
   const tokenBalance = currentUser?.tokenBalance || 0;
   const planBadge = isUnlimitedAdmin
     ? 'Unlimited Admin'
@@ -2165,11 +2612,16 @@ export default function App() {
     : '25 GB Free';
 
   const activeStreamingJobs = transfers.filter(
-    (t) => t.status === 'queued' || t.status === 'streaming' || t.status === 'syncing_telegram'
+    (t) =>
+      t.status === 'queued' ||
+      t.status === 'streaming' ||
+      t.status === 'paused' ||
+      t.status === 'syncing_telegram'
   );
 
   return (
     <div className="min-h-screen bg-[#141311] text-[#F2EFE9] flex flex-col">
+      <OfflineIndicator />
       <input
         ref={fileInputRef}
         type="file"
@@ -2202,7 +2654,7 @@ export default function App() {
         </a>
 
         {/* Zone 2: Desktop Navigation Links (Admin Storage Node tab hidden from regular users) */}
-        <nav className="hidden md:flex items-center gap-6 text-sm font-medium text-[#9E978E]">
+        <nav className="hidden md:flex items-center gap-5 text-sm font-medium text-[#9E978E]">
           <a
             href="#my-files"
             onClick={(e) => {
@@ -2216,7 +2668,26 @@ export default function App() {
                 : 'hover:text-[#F2EFE9]'
             }`}
           >
-            My Files ({files.length})
+            My Files ({activeFiles.length})
+          </a>
+          <a
+            href="#trash"
+            onClick={(e) => {
+              e.preventDefault();
+              setActiveView('trash');
+            }}
+            className={`transition-colors whitespace-nowrap shrink-0 py-1 flex items-center gap-1.5 ${
+              activeView === 'trash'
+                ? 'text-[#F2EFE9] border-b-2 border-[#D97757] font-semibold'
+                : 'hover:text-[#F2EFE9]'
+            }`}
+          >
+            <span>Trash Bin</span>
+            {totalTrashCount > 0 && (
+              <span className="px-1.5 py-0.2 text-[11px] font-bold bg-[#24211D] border border-[#2C2824] text-[#D97757] tabular-nums">
+                {totalTrashCount}
+              </span>
+            )}
           </a>
           <a
             href="#shared-links"
@@ -2278,14 +2749,15 @@ export default function App() {
           )}
         </nav>
 
-        {/* Zone 3: 1 Primary Action */}
-        <div className="flex items-center shrink-0">
+        {/* Zone 3: PWA Install + Primary Action */}
+        <div className="flex items-center gap-2 shrink-0">
+          <PWAInstallButton compact />
           <button
             onClick={() => fileInputRef.current?.click()}
             disabled={uploadingFiles}
             className="min-h-[40px] sm:min-h-[38px] px-4 py-2 text-xs font-bold bg-[#D97757] text-[#141311] hover:bg-[#E08568] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
-            {uploadingFiles ? 'Uploading...' : '+ Upload Files'}
+            {uploadingFiles ? (uploadPaused ? 'Upload Paused' : 'Uploading...') : '+ Upload Files'}
           </button>
         </div>
       </header>
@@ -2366,28 +2838,48 @@ export default function App() {
               <div className="space-y-2">
                 <div className="flex flex-wrap items-center justify-between gap-2 text-xs tabular-nums">
                   <span className="font-bold text-[#F2EFE9] truncate">
-                    Uploading: {uploadProgress.fileName}
+                    {uploadPaused ? 'Paused Upload: ' : 'Uploading: '}
+                    {uploadProgress.fileName}
                   </span>
-                  <div className="flex items-center gap-3 shrink-0">
+                  <div className="flex flex-wrap items-center gap-2 shrink-0">
                     <span className="text-[#D97757] font-bold">
                       {uploadProgress.percent}% · {formatBytes(uploadProgress.loadedBytes)} /{' '}
                       {formatBytes(uploadProgress.totalBytes)} ·{' '}
-                      {formatSpeed(uploadProgress.speedBps)}
+                      {uploadPaused ? 'Paused' : formatSpeed(uploadProgress.speedBps)}
                     </span>
+                    <button
+                      type="button"
+                      onClick={handleTogglePauseUpload}
+                      className="min-h-[32px] px-3 py-1 text-xs font-bold bg-[#24211D] border border-[#D97757] text-[#F2EFE9] hover:bg-[#D97757] hover:text-[#141311] flex items-center gap-1 cursor-pointer"
+                    >
+                      {uploadPaused ? (
+                        <>
+                          <Play className="w-3.5 h-3.5" />
+                          Resume
+                        </>
+                      ) : (
+                        <>
+                          <Pause className="w-3.5 h-3.5" />
+                          Pause
+                        </>
+                      )}
+                    </button>
                     <button
                       type="button"
                       onClick={handleCancelUpload}
                       className="min-h-[32px] px-3 py-1 text-xs font-bold bg-[#141311] border border-[#D94848] text-[#D94848] hover:bg-[#D94848] hover:text-[#F2EFE9] flex items-center gap-1 cursor-pointer"
                     >
                       <X className="w-3.5 h-3.5" />
-                      Cancel Upload
+                      Cancel
                     </button>
                   </div>
                 </div>
                 <div className="h-2.5 w-full bg-[#141311] border border-[#2C2824]">
                   <div
                     style={{ width: `${uploadProgress.percent}%` }}
-                    className="h-full bg-[#D97757] transition-all duration-100"
+                    className={`h-full transition-all duration-100 ${
+                      uploadPaused ? 'bg-[#D99B26]' : 'bg-[#D97757]'
+                    }`}
                   />
                 </div>
               </div>
@@ -2741,6 +3233,25 @@ export default function App() {
 
                   <button
                     type="button"
+                    disabled={zipDownloading}
+                    onClick={handleBatchZipDownload}
+                    className="min-h-[38px] px-3 py-1.5 text-xs font-bold bg-[#1C1A17] border border-[#D97757] text-[#D97757] hover:bg-[#D97757] hover:text-[#141311] disabled:opacity-50 flex items-center justify-center gap-1.5 cursor-pointer"
+                  >
+                    {zipDownloading ? (
+                      <>
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        <span>ZIP {zipProgressPct}%</span>
+                      </>
+                    ) : (
+                      <>
+                        <FolderArchive className="w-3.5 h-3.5" />
+                        <span>Download ZIP ({selectedFileIds.length})</span>
+                      </>
+                    )}
+                  </button>
+
+                  <button
+                    type="button"
                     onClick={handleBatchDownload}
                     className="min-h-[38px] px-3 py-1.5 text-xs font-bold bg-[#D97757] text-[#141311] hover:bg-[#E08568] flex items-center justify-center gap-1.5 cursor-pointer"
                   >
@@ -2762,7 +3273,7 @@ export default function App() {
                     className="min-h-[38px] px-3 py-1.5 text-xs font-semibold bg-[#141311] border border-[#D94848] text-[#D94848] hover:bg-[#D94848] hover:text-[#F2EFE9] flex items-center justify-center gap-1.5 cursor-pointer"
                   >
                     <Trash2 className="w-3.5 h-3.5" />
-                    <span>Delete ({selectedFileIds.length})</span>
+                    <span>Move to Trash ({selectedFileIds.length})</span>
                   </button>
 
                   <button
@@ -2810,46 +3321,80 @@ export default function App() {
 
             {/* Breadcrumb (Also acts as Drop Target to move files back to Root) */}
             {(activeFolder || onlyStarred || selectedTagFilter) && (
-              <div className="flex items-center gap-2 text-sm font-semibold">
-                <button
-                  onClick={() => {
-                    setCurrentFolderId(null);
-                    setOnlyStarred(false);
-                    setSelectedTagFilter(null);
-                  }}
-                  onDragOver={(e) => {
-                    if (draggedFileId) {
+              <div className="flex flex-wrap items-center justify-between gap-2 p-3 bg-[#1C1A17] border border-[#2C2824]">
+                <div className="flex items-center gap-2 text-sm font-semibold min-w-0">
+                  <button
+                    onClick={() => {
+                      setCurrentFolderId(null);
+                      setOnlyStarred(false);
+                      setSelectedTagFilter(null);
+                    }}
+                    onDragOver={(e) => {
+                      if (draggedFileId) {
+                        e.preventDefault();
+                        setDragOverFolderId('root');
+                      }
+                    }}
+                    onDragLeave={() => {
+                      if (dragOverFolderId === 'root') setDragOverFolderId(null);
+                    }}
+                    onDrop={(e) => {
                       e.preventDefault();
-                      setDragOverFolderId('root');
-                    }
-                  }}
-                  onDragLeave={() => {
-                    if (dragOverFolderId === 'root') setDragOverFolderId(null);
-                  }}
-                  onDrop={(e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    setDragOverFolderId(null);
-                    if (draggedFileId) {
-                      const f = files.find((item) => item.id === draggedFileId);
-                      setDraggedFileId(null);
-                      if (f) handleMoveFile(f, null).catch(() => null);
-                    }
-                  }}
-                  className={`min-h-[40px] px-2.5 -ml-2 text-[#9E978E] hover:text-[#F2EFE9] cursor-pointer ${
-                    dragOverFolderId === 'root' ? 'border border-[#D97757] bg-[#24211D] text-[#F2EFE9]' : ''
-                  }`}
-                >
-                  My Files (Root)
-                </button>
-                <ChevronRight className="w-4 h-4 text-[#9E978E]" />
-                <span className="text-[#D97757] truncate">
-                  {selectedTagFilter
-                    ? `Label: ${selectedTagFilter}`
-                    : onlyStarred
-                    ? 'Starred Files'
-                    : activeFolder?.name}
-                </span>
+                      e.stopPropagation();
+                      setDragOverFolderId(null);
+                      if (draggedFileId) {
+                        const f = files.find((item) => item.id === draggedFileId);
+                        setDraggedFileId(null);
+                        if (f) handleMoveFile(f, null).catch(() => null);
+                      }
+                    }}
+                    className={`min-h-[36px] px-2.5 text-[#9E978E] hover:text-[#F2EFE9] cursor-pointer ${
+                      dragOverFolderId === 'root' ? 'border border-[#D97757] bg-[#24211D] text-[#F2EFE9]' : ''
+                    }`}
+                  >
+                    My Files (Root)
+                  </button>
+                  <ChevronRight className="w-4 h-4 text-[#9E978E] shrink-0" />
+                  <span className="text-[#D97757] truncate flex items-center gap-1.5">
+                    {selectedTagFilter
+                      ? `Label: ${selectedTagFilter}`
+                      : onlyStarred
+                      ? 'Starred Files'
+                      : activeFolder?.name}
+                    {activeFolder?.isPinProtected && (
+                      <span className="px-1.5 py-0.5 text-[10px] font-bold bg-[#24211D] border border-[#D97757]/50 text-[#D97757] flex items-center gap-1">
+                        <KeyRound className="w-2.5 h-2.5" />
+                        PIN Protected
+                      </span>
+                    )}
+                  </span>
+                </div>
+
+                {activeFolder && !onlyStarred && !selectedTagFilter && (
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setShareModalFolder(activeFolder)}
+                      className="min-h-[34px] px-3 py-1 text-xs font-semibold bg-[#24211D] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <Link2 className="w-3.5 h-3.5 text-[#D97757]" />
+                      <span>Share Folder Gallery</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setFolderPinModalState({
+                          folder: activeFolder,
+                          mode: 'manage',
+                        })
+                      }
+                      className="min-h-[34px] px-3 py-1 text-xs font-semibold bg-[#24211D] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <KeyRound className="w-3.5 h-3.5 text-[#D97757]" />
+                      <span>{activeFolder.isPinProtected ? 'Manage PIN' : 'Set PIN Lock'}</span>
+                    </button>
+                  </div>
+                )}
               </div>
             )}
 
@@ -2861,17 +3406,21 @@ export default function App() {
                     Folders
                   </h2>
                   <span className="text-[11px] text-[#9E978E]">
-                    Tip: Drag any file onto a folder or click Move on a file card
+                    Tip: Drag any file onto a folder · Lock private folders with a PIN or share as a gallery
                   </span>
                 </div>
                 <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
                   {visibleSubfolders.map((folder) => {
-                    const count = files.filter((f) => f.folderId === folder.id).length;
+                    const count = activeFiles.filter((f) => f.folderId === folder.id).length;
                     const isDropTarget = dragOverFolderId === folder.id;
+                    const isUnlocked = unlockedFolderIds.includes(folder.id);
+                    const existingFolderShare = shares.find(
+                      (s) => s.folderId === folder.id || (s.targetType === 'folder' && s.fileId === folder.id)
+                    );
                     return (
                       <div
                         key={folder.id}
-                        onClick={() => setCurrentFolderId(folder.id)}
+                        onClick={() => handleOpenFolder(folder)}
                         onDragOver={(e) => {
                           if (draggedFileId) {
                             e.preventDefault();
@@ -2892,39 +3441,106 @@ export default function App() {
                             if (f) handleMoveFile(f, folder.id).catch(() => null);
                           }
                         }}
-                        className={`min-h-[64px] p-4 bg-[#1C1A17] border transition-colors flex items-center justify-between gap-3 cursor-pointer group ${
+                        className={`min-h-[68px] p-4 bg-[#1C1A17] border transition-colors flex items-center justify-between gap-2 cursor-pointer group ${
                           isDropTarget
                             ? 'border-[#D97757] bg-[#24211D]'
                             : 'border-[#2C2824] hover:border-[#D97757]'
                         }`}
                       >
                         <div className="flex items-center gap-3 min-w-0">
-                          <Folder className="w-6 h-6 text-[#D97757] shrink-0" />
+                          <div className="relative shrink-0">
+                            <Folder className="w-6 h-6 text-[#D97757]" />
+                            {folder.isPinProtected && (
+                              <Lock
+                                className={`w-3 h-3 absolute -bottom-1 -right-1 ${
+                                  isUnlocked ? 'text-[#389E6C]' : 'text-[#D99B26]'
+                                }`}
+                              />
+                            )}
+                          </div>
                           <div className="min-w-0">
-                            <div className="text-sm font-bold text-[#F2EFE9] truncate group-hover:text-[#D97757]">
-                              {folder.name}
+                            <div className="text-sm font-bold text-[#F2EFE9] truncate group-hover:text-[#D97757] flex items-center gap-1.5">
+                              <span className="truncate">{folder.name}</span>
                             </div>
-                            <div className="text-xs text-[#9E978E]">
-                              {count} {count === 1 ? 'file' : 'files'}
+                            <div className="text-xs text-[#9E978E] flex items-center gap-1.5">
+                              <span>
+                                {count} {count === 1 ? 'file' : 'files'}
+                              </span>
+                              {folder.isPinProtected && (
+                                <span className="text-[10px] text-[#D99B26] font-semibold">
+                                  · {isUnlocked ? 'Unlocked' : 'PIN Locked'}
+                                </span>
+                              )}
+                              {existingFolderShare && (
+                                <span className="text-[10px] text-[#389E6C] font-semibold">
+                                  · Shared
+                                </span>
+                              )}
                             </div>
                           </div>
                         </div>
 
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setDeleteTarget({
-                              type: 'folder',
-                              id: folder.id,
-                              name: folder.name,
-                              subtitle: `Contains ${count} ${count === 1 ? 'file' : 'files'}`,
-                            });
-                          }}
-                          className="min-w-[44px] min-h-[44px] -mr-2 flex items-center justify-center text-[#9E978E] hover:text-[#D94848] cursor-pointer"
-                          title="Delete Folder"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
+                        <div className="flex items-center -mr-2 shrink-0">
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              if (folder.isPinProtected && !isUnlocked) {
+                                setFolderPinModalState({ folder, mode: 'unlock' });
+                                return;
+                              }
+                              setFolderPinModalState({
+                                folder,
+                                mode: 'manage',
+                              });
+                            }}
+                            className={`min-w-[36px] min-h-[40px] flex items-center justify-center cursor-pointer ${
+                              folder.isPinProtected
+                                ? 'text-[#D99B26] hover:text-[#D97757]'
+                                : 'text-[#9E978E] hover:text-[#D97757]'
+                            }`}
+                            title={folder.isPinProtected ? 'Manage PIN Lock' : 'Lock Folder with PIN'}
+                          >
+                            <KeyRound className="w-3.5 h-3.5" />
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              if (folder.isPinProtected && !isUnlocked) {
+                                setFolderPinModalState({ folder, mode: 'unlock' });
+                                return;
+                              }
+                              setShareModalFolder(folder);
+                            }}
+                            className={`min-w-[36px] min-h-[40px] flex items-center justify-center cursor-pointer ${
+                              existingFolderShare
+                                ? 'text-[#D97757]'
+                                : 'text-[#9E978E] hover:text-[#D97757]'
+                            }`}
+                            title="Share Public Folder Gallery"
+                          >
+                            <Link2 className="w-3.5 h-3.5" />
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setDeleteTarget({
+                                type: 'folder',
+                                id: folder.id,
+                                name: folder.name,
+                                subtitle: `Contains ${count} ${count === 1 ? 'file' : 'files'}`,
+                              });
+                            }}
+                            className="min-w-[36px] min-h-[40px] flex items-center justify-center text-[#9E978E] hover:text-[#D94848] cursor-pointer"
+                            title="Move Folder to Trash"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
                       </div>
                     );
                   })}
@@ -2943,7 +3559,7 @@ export default function App() {
                     <button
                       type="button"
                       onClick={handleToggleSelectAllVisible}
-                      className="min-h-[30px] px-2.5 py-1 text-xs font-semibold bg-[#1C1A17] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center gap-1.5 cursor-pointer"
+                      className="min-h-[32px] px-2.5 py-1 text-xs font-semibold bg-[#1C1A17] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center gap-1.5 cursor-pointer"
                     >
                       {allVisibleSelected ? (
                         <CheckSquare className="w-3.5 h-3.5 text-[#D97757]" />
@@ -2956,9 +3572,41 @@ export default function App() {
                     </button>
                   )}
                 </div>
-                <span className="hidden sm:inline text-xs text-[#9E978E]">
-                  Check files for batch actions · Tap any file to preview · Click + Label to organize
-                </span>
+
+                <div className="flex items-center gap-3">
+                  <span className="hidden md:inline text-xs text-[#9E978E]">
+                    Check files for batch ZIP/move · Tap any file to preview
+                  </span>
+                  {/* Grid / List Layout Toggle */}
+                  <div className="flex items-center bg-[#1C1A17] border border-[#2C2824]">
+                    <button
+                      type="button"
+                      onClick={() => handleChangeLayout('grid')}
+                      className={`min-h-[32px] px-2.5 py-1 text-xs font-semibold flex items-center gap-1.5 cursor-pointer ${
+                        explorerLayout === 'grid'
+                          ? 'bg-[#D97757] text-[#141311]'
+                          : 'text-[#9E978E] hover:text-[#F2EFE9]'
+                      }`}
+                      title="Grid View"
+                    >
+                      <LayoutGrid className="w-3.5 h-3.5" />
+                      <span>Grid</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleChangeLayout('list')}
+                      className={`min-h-[32px] px-2.5 py-1 text-xs font-semibold flex items-center gap-1.5 cursor-pointer ${
+                        explorerLayout === 'list'
+                          ? 'bg-[#D97757] text-[#141311]'
+                          : 'text-[#9E978E] hover:text-[#F2EFE9]'
+                      }`}
+                      title="List View"
+                    >
+                      <ListIcon className="w-3.5 h-3.5" />
+                      <span>List</span>
+                    </button>
+                  </div>
+                </div>
               </div>
 
               {visibleFiles.length === 0 ? (
@@ -3003,7 +3651,184 @@ export default function App() {
                     )}
                   </div>
                 </div>
+              ) : explorerLayout === 'list' ? (
+                /* ============================================================
+                    LIST VIEW LAYOUT
+                ============================================================ */
+                <div className="bg-[#1C1A17] border border-[#2C2824] divide-y divide-[#2C2824]">
+                  {visibleFiles.map((file) => {
+                    const existingShare = shares.find((s) => s.fileId === file.id);
+                    const isLocked = Boolean(file.lockedOverQuota);
+                    const isSelected = selectedFileIds.includes(file.id);
+                    const fileTags = Array.isArray(file.tags) ? file.tags : [];
+                    return (
+                      <div
+                        key={file.id}
+                        draggable={!isLocked}
+                        onMouseEnter={() => {
+                          if (!isLocked) preloadVideoFile(file, authHeaders());
+                        }}
+                        onTouchStart={() => {
+                          if (!isLocked) preloadVideoFile(file, authHeaders());
+                        }}
+                        onDragStart={(e) => {
+                          setDraggedFileId(file.id);
+                          e.dataTransfer.setData('text/plain', file.id);
+                        }}
+                        onDragEnd={() => {
+                          setDraggedFileId(null);
+                          setDragOverFolderId(null);
+                        }}
+                        className={`p-3 sm:px-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 transition-colors ${
+                          isSelected
+                            ? 'bg-[#24211D]'
+                            : 'hover:bg-[#24211D]/60'
+                        }`}
+                      >
+                        <div className="flex items-center gap-3 min-w-0 flex-1">
+                          <button
+                            type="button"
+                            role="checkbox"
+                            aria-checked={isSelected}
+                            aria-label={`Select ${file.name}`}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              toggleSelectFile(file.id);
+                            }}
+                            className={`w-8 h-8 border flex items-center justify-center shrink-0 transition-colors cursor-pointer ${
+                              isSelected
+                                ? 'bg-[#D97757] border-[#D97757] text-[#141311]'
+                                : 'bg-[#141311] border-[#2C2824] text-[#9E978E] hover:border-[#D97757] hover:text-[#F2EFE9]'
+                            }`}
+                          >
+                            {isSelected ? (
+                              <CheckSquare className="w-3.5 h-3.5" />
+                            ) : (
+                              <Square className="w-3.5 h-3.5" />
+                            )}
+                          </button>
+
+                          <button
+                            onClick={() => setInspectedFile(file)}
+                            className="w-10 h-10 bg-[#24211D] border border-[#2C2824] flex items-center justify-center shrink-0 cursor-pointer overflow-hidden"
+                            title="Preview File"
+                          >
+                            {file.previewDataUrl && file.mimeType.startsWith('image/') ? (
+                              <img
+                                src={file.previewDataUrl}
+                                alt={file.name}
+                                className="w-full h-full object-cover"
+                              />
+                            ) : (
+                              renderFileIcon(file)
+                            )}
+                          </button>
+
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-2">
+                              <button
+                                onClick={() => setInspectedFile(file)}
+                                className="text-sm font-bold text-[#F2EFE9] hover:text-[#D97757] text-left truncate cursor-pointer"
+                                title={file.name}
+                              >
+                                {file.name}
+                              </button>
+                              {fileTags.map((tag) => (
+                                <span
+                                  key={tag}
+                                  className="hidden md:inline-flex items-center px-1.5 py-0.5 text-[10px] font-semibold bg-[#141311] border border-[#2C2824] text-[#D97757]"
+                                >
+                                  {tag}
+                                </span>
+                              ))}
+                            </div>
+                            <div className="flex flex-wrap items-center gap-1.5 text-xs text-[#9E978E] tabular-nums mt-0.5">
+                              <span className="text-[#F2EFE9] font-medium">
+                                {formatBytes(file.sizeBytes)}
+                              </span>
+                              <span>·</span>
+                              <span>{formatShortDate(file.updatedAt)}</span>
+                              {existingShare && (
+                                <>
+                                  <span>·</span>
+                                  <span className="text-[#389E6C] font-semibold">Shared</span>
+                                </>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center justify-end gap-1.5 shrink-0">
+                          <button
+                            onClick={() => setInspectedFile(file)}
+                            className="min-h-[36px] px-2.5 py-1 text-xs font-semibold bg-[#24211D] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center gap-1 cursor-pointer"
+                            title="Preview File"
+                          >
+                            <Eye className="w-3.5 h-3.5 text-[#D97757]" />
+                            <span className="hidden lg:inline">Preview</span>
+                          </button>
+                          {!isLocked && (
+                            <>
+                              <button
+                                onClick={() => setMoveModalFile(file)}
+                                className="min-h-[36px] px-2.5 py-1 text-xs font-semibold bg-[#24211D] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center gap-1 cursor-pointer"
+                                title="Move File"
+                              >
+                                <FolderInput className="w-3.5 h-3.5 text-[#D97757]" />
+                                <span className="hidden lg:inline">Move</span>
+                              </button>
+                              <button
+                                onClick={() => setShareModalFile(file)}
+                                className="min-h-[36px] px-2.5 py-1 text-xs font-semibold bg-[#24211D] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center gap-1 cursor-pointer"
+                                title="Share Link"
+                              >
+                                <Link2 className="w-3.5 h-3.5 text-[#D97757]" />
+                                <span className="hidden lg:inline">
+                                  {existingShare ? 'Shared' : 'Share'}
+                                </span>
+                              </button>
+                              <button
+                                onClick={() => handleDownloadFile(file)}
+                                className="min-h-[36px] px-3 py-1 text-xs font-bold bg-[#D97757] text-[#141311] hover:bg-[#E08568] flex items-center gap-1 cursor-pointer"
+                                title="Download File"
+                              >
+                                <Download className="w-3.5 h-3.5" />
+                                <span className="hidden sm:inline">Download</span>
+                              </button>
+                            </>
+                          )}
+                          <button
+                            onClick={() => handleToggleStar(file)}
+                            className={`min-w-[36px] min-h-[36px] flex items-center justify-center border border-[#2C2824] bg-[#141311] cursor-pointer ${
+                              file.starred ? 'text-[#D97757]' : 'text-[#9E978E] hover:text-[#F2EFE9]'
+                            }`}
+                            title="Star File"
+                          >
+                            <Star className="w-3.5 h-3.5" fill={file.starred ? '#D97757' : 'none'} />
+                          </button>
+                          <button
+                            onClick={() =>
+                              setDeleteTarget({
+                                type: 'file',
+                                id: file.id,
+                                name: file.name,
+                                subtitle: `Size: ${formatBytes(file.sizeBytes)}`,
+                              })
+                            }
+                            className="min-w-[36px] min-h-[36px] flex items-center justify-center border border-[#2C2824] bg-[#141311] text-[#9E978E] hover:text-[#D94848] cursor-pointer"
+                            title="Move to Trash"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
               ) : (
+                /* ============================================================
+                    GRID VIEW LAYOUT
+                ============================================================ */
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
                   {visibleFiles.map((file) => {
                     const existingShare = shares.find((s) => s.fileId === file.id);
@@ -3015,10 +3840,10 @@ export default function App() {
                         key={file.id}
                         draggable={!isLocked}
                         onMouseEnter={() => {
-                          if (!isLocked) preloadVideoFile(file, authHeaders);
+                          if (!isLocked) preloadVideoFile(file, authHeaders());
                         }}
                         onTouchStart={() => {
-                          if (!isLocked) preloadVideoFile(file, authHeaders);
+                          if (!isLocked) preloadVideoFile(file, authHeaders());
                         }}
                         onDragStart={(e) => {
                           setDraggedFileId(file.id);
@@ -3128,7 +3953,7 @@ export default function App() {
                                   })
                                 }
                                 className="min-w-[36px] min-h-[44px] flex items-center justify-center text-[#9E978E] hover:text-[#D94848] cursor-pointer"
-                                title="Delete File"
+                                title="Move File to Trash"
                               >
                                 <Trash2 className="w-4 h-4" />
                               </button>
@@ -3261,6 +4086,165 @@ export default function App() {
         )}
 
         {/* ==================================================================
+            VIEW 1B: TRASH BIN (Restore or Permanently Delete)
+        ================================================================== */}
+        {activeView === 'trash' && (
+          <div className="space-y-6">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-[#2C2824] pb-4">
+              <div>
+                <h1 className="text-xl font-bold tracking-tight flex items-center gap-2.5">
+                  <Trash2 className="w-5 h-5 text-[#D97757]" />
+                  <span>Trash Bin</span>
+                </h1>
+                <p className="text-sm text-[#9E978E] mt-1">
+                  Restore accidentally deleted files and folders, or permanently erase them from cloud storage.
+                </p>
+              </div>
+              {totalTrashCount > 0 && (
+                <button
+                  type="button"
+                  onClick={() =>
+                    setDeleteTarget({
+                      type: 'empty-trash',
+                      id: 'empty-trash',
+                      name: 'All Trashed Items',
+                      subtitle: `${totalTrashCount} items in Trash Bin`,
+                      permanent: true,
+                    })
+                  }
+                  className="min-h-[42px] px-4 py-2 text-xs font-bold bg-[#D94848] text-[#F2EFE9] hover:bg-[#C53B3B] flex items-center justify-center gap-2 cursor-pointer shrink-0"
+                >
+                  <Trash2 className="w-4 h-4" />
+                  <span>Empty Trash ({totalTrashCount})</span>
+                </button>
+              )}
+            </div>
+
+            {totalTrashCount === 0 ? (
+              <div className="p-12 bg-[#1C1A17] border border-[#2C2824] text-center space-y-3">
+                <Trash2 className="w-8 h-8 text-[#9E978E] mx-auto" />
+                <div className="text-base font-bold text-[#F2EFE9]">Trash Bin is Empty</div>
+                <p className="text-xs text-[#9E978E] max-w-md mx-auto">
+                  Items moved to Trash will appear here so you can restore them anytime before permanent deletion.
+                </p>
+              </div>
+            ) : (
+              <div className="space-y-6">
+                {trashedFolders.length > 0 && (
+                  <div className="space-y-2.5">
+                    <h2 className="text-xs font-semibold text-[#9E978E] uppercase tracking-wider">
+                      Trashed Folders ({trashedFolders.length})
+                    </h2>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                      {trashedFolders.map((folder) => (
+                        <div
+                          key={folder.id}
+                          className="p-4 bg-[#1C1A17] border border-[#2C2824] flex items-center justify-between gap-3"
+                        >
+                          <div className="flex items-center gap-3 min-w-0">
+                            <Folder className="w-6 h-6 text-[#9E978E] shrink-0" />
+                            <div className="min-w-0">
+                              <div className="text-sm font-bold text-[#F2EFE9] truncate">
+                                {folder.name}
+                              </div>
+                              <div className="text-xs text-[#9E978E]">Folder in Trash</div>
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            <button
+                              type="button"
+                              onClick={() => handleRestoreFolder(folder)}
+                              className="min-h-[36px] px-3 py-1 text-xs font-bold bg-[#24211D] border border-[#389E6C] text-[#389E6C] hover:bg-[#389E6C] hover:text-[#141311] flex items-center gap-1 cursor-pointer"
+                            >
+                              <RotateCcw className="w-3.5 h-3.5" />
+                              <span>Restore</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setDeleteTarget({
+                                  type: 'folder',
+                                  id: folder.id,
+                                  name: folder.name,
+                                  subtitle: 'Permanently delete folder',
+                                  permanent: true,
+                                })
+                              }
+                              className="min-h-[36px] px-2.5 py-1 text-xs font-semibold bg-[#141311] border border-[#D94848] text-[#D94848] hover:bg-[#D94848] hover:text-[#F2EFE9] cursor-pointer"
+                              title="Delete Forever"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {trashedFiles.length > 0 && (
+                  <div className="space-y-2.5">
+                    <h2 className="text-xs font-semibold text-[#9E978E] uppercase tracking-wider">
+                      Trashed Files ({trashedFiles.length})
+                    </h2>
+                    <div className="bg-[#1C1A17] border border-[#2C2824] divide-y divide-[#2C2824]">
+                      {trashedFiles.map((file) => (
+                        <div
+                          key={file.id}
+                          className="p-3.5 sm:px-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+                        >
+                          <div className="flex items-center gap-3 min-w-0">
+                            <div className="w-10 h-10 bg-[#24211D] border border-[#2C2824] flex items-center justify-center shrink-0">
+                              {renderFileIcon(file)}
+                            </div>
+                            <div className="min-w-0">
+                              <div className="text-sm font-bold text-[#F2EFE9] truncate">
+                                {file.name}
+                              </div>
+                              <div className="text-xs text-[#9E978E] tabular-nums">
+                                {formatBytes(file.sizeBytes)} · Trashed{' '}
+                                {formatShortDate(file.trashedAt || file.updatedAt)}
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="flex items-center justify-end gap-2 shrink-0">
+                            <button
+                              type="button"
+                              onClick={() => handleRestoreFile(file)}
+                              className="min-h-[36px] px-3 py-1.5 text-xs font-bold bg-[#24211D] border border-[#389E6C] text-[#389E6C] hover:bg-[#389E6C] hover:text-[#141311] flex items-center gap-1.5 cursor-pointer"
+                            >
+                              <RotateCcw className="w-3.5 h-3.5" />
+                              <span>Restore</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setDeleteTarget({
+                                  type: 'file',
+                                  id: file.id,
+                                  name: file.name,
+                                  subtitle: `Size: ${formatBytes(file.sizeBytes)}`,
+                                  permanent: true,
+                                })
+                              }
+                              className="min-h-[36px] px-3 py-1.5 text-xs font-semibold bg-[#141311] border border-[#D94848] text-[#D94848] hover:bg-[#D94848] hover:text-[#F2EFE9] flex items-center gap-1.5 cursor-pointer"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                              <span>Delete Forever</span>
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ==================================================================
             VIEW 2: SHARED LINKS
         ================================================================== */}
         {activeView === 'shares' && (
@@ -3317,7 +4301,7 @@ export default function App() {
       ==================================================================== */}
       <nav
         className={`fixed bottom-0 left-0 right-0 z-40 md:hidden grid ${
-          isAdminUser ? 'grid-cols-5' : 'grid-cols-4'
+          isAdminUser ? 'grid-cols-6' : 'grid-cols-5'
         } bg-[#1C1A17] border-t border-[#2C2824]`}
       >
         <button
@@ -3331,6 +4315,16 @@ export default function App() {
         >
           <Folder className="w-5 h-5" />
           <span>My Files</span>
+        </button>
+
+        <button
+          onClick={() => setActiveView('trash')}
+          className={`min-h-[56px] flex flex-col items-center justify-center gap-1 text-[11px] font-medium cursor-pointer ${
+            activeView === 'trash' ? 'text-[#D97757] font-bold' : 'text-[#9E978E]'
+          }`}
+        >
+          <Trash2 className="w-5 h-5" />
+          <span>Trash</span>
         </button>
 
         <button
@@ -3400,22 +4394,49 @@ export default function App() {
       ==================================================================== */}
       {showRemoteModal && (
         <RemoteUploadModal
-          folders={folders}
+          folders={folders.filter((fl) => !fl.trashed)}
           currentFolderId={currentFolderId}
           onClose={() => setShowRemoteModal(false)}
           onStartRemoteUpload={handleStartRemoteUpload}
         />
       )}
 
-      {shareModalFile && (
+      {(shareModalFile || shareModalFolder) && (
         <CreateShareModal
           file={shareModalFile}
-          existingShare={shares.find((s) => s.fileId === shareModalFile.id)}
+          folder={shareModalFolder}
+          existingShare={
+            shareModalFolder
+              ? shares.find(
+                  (s) =>
+                    s.folderId === shareModalFolder.id ||
+                    (s.targetType === 'folder' && s.fileId === shareModalFolder.id)
+                )
+              : shareModalFile
+              ? shares.find((s) => s.fileId === shareModalFile.id)
+              : undefined
+          }
           defaultThrottleKbps={bandwidthSettings.defaultShareThrottleKbps}
-          onClose={() => setShareModalFile(null)}
+          onClose={() => {
+            setShareModalFile(null);
+            setShareModalFolder(null);
+          }}
           onCreateShare={handleCreateShare}
           onUpdateShare={handleUpdateShare}
           onPreviewPublicPortal={(tok) => setPublicShareToken(tok)}
+        />
+      )}
+
+      {folderPinModalState && (
+        <FolderPinModal
+          state={folderPinModalState}
+          onClose={() => setFolderPinModalState(null)}
+          onUnlockSuccess={(folder) => {
+            setUnlockedFolderIds((prev) => Array.from(new Set([...prev, folder.id])));
+            setCurrentFolderId(folder.id);
+          }}
+          onSavePin={handleSaveFolderPin}
+          verifyPinFn={async (inputPin, storedHash) => verifyFolderPin(inputPin, storedHash)}
         />
       )}
 
@@ -3448,8 +4469,8 @@ export default function App() {
         <MoveFileModal
           file={moveModalFile}
           targetFiles={batchMoveFiles || undefined}
-          folders={folders}
-          files={files}
+          folders={folders.filter((fl) => !fl.trashed)}
+          files={activeFiles}
           onClose={() => {
             setMoveModalFile(null);
             setBatchMoveFiles(null);
