@@ -737,12 +737,6 @@ export const FileDetailDrawer: React.FC<FileDetailDrawerProps> = ({
     videoContainerFallback,
   ]);
 
-  const serverInlineUrl = `/api/files/${encodeURIComponent(
-    file.id
-  )}/download?inline=1&uid=${encodeURIComponent(
-    firebaseUid || ''
-  )}&email=${encodeURIComponent(firebaseEmail || '')}&name=${encodeURIComponent(file.name)}`;
-
   const tgManifestInlineUrl = React.useMemo(
     () =>
       buildTelegramStreamManifestUrl({
@@ -754,6 +748,17 @@ export const FileDetailDrawer: React.FC<FileDetailDrawerProps> = ({
       }),
     [file.name, file.mimeType, file.sizeBytes, file.telegramChunks]
   );
+
+  const manifestQueryParam =
+    tgManifestInlineUrl && tgManifestInlineUrl.includes('m=')
+      ? '&' + tgManifestInlineUrl.split('?')[1]
+      : '';
+
+  const serverInlineUrl = `/api/files/${encodeURIComponent(
+    file.id
+  )}/download?inline=1&uid=${encodeURIComponent(
+    firebaseUid || ''
+  )}&email=${encodeURIComponent(firebaseEmail || '')}&name=${encodeURIComponent(file.name)}${manifestQueryParam}`;
 
   const inlineUrl: string = isVideo
     ? !isMkv && localBlobUrl
@@ -829,26 +834,26 @@ export const FileDetailDrawer: React.FC<FileDetailDrawerProps> = ({
   }, [isCsv, dynamicTextPreview]);
 
   return (
-    <div className="animate-app-backdrop fixed inset-0 z-50 bg-slate-900/45 backdrop-blur-xs flex items-end sm:items-center justify-center p-0 sm:p-4">
+    <div className="animate-app-backdrop fixed inset-0 z-50 bg-black/75 backdrop-blur-xs flex items-end sm:items-center justify-center p-0 sm:p-4">
       <div
         className={`animate-app-modal w-full ${
           isVideo || isPdf || isTextOrCode ? 'sm:max-w-4xl' : 'sm:max-w-2xl'
-        } bg-white border-t sm:border border-[#E2E8F0] rounded-t-3xl sm:rounded-2xl shadow-2xl max-h-[94vh] overflow-y-auto`}
+        } bg-[#12131C] border-t sm:border border-[#212330] rounded-t-3xl sm:rounded-2xl shadow-2xl max-h-[94vh] overflow-y-auto text-[#F3F4F6]`}
       >
         {/* Mobile Sheet Grab Handle */}
-        <div className="w-10 h-1 rounded-full bg-[#CBD5E1] mx-auto mt-2.5 mb-0.5 sm:hidden" />
+        <div className="w-10 h-1 rounded-full bg-[#2E3144] mx-auto mt-2.5 mb-0.5 sm:hidden" />
 
         {/* Clean Sticky Header */}
-        <div className="flex items-center justify-between gap-3 px-4 sm:px-5 py-3.5 border-b border-[#E2E8F0] sticky top-0 bg-white/95 backdrop-blur-md z-10">
+        <div className="flex items-center justify-between gap-3 px-4 sm:px-5 py-3.5 border-b border-[#212330] sticky top-0 bg-[#12131C]/95 backdrop-blur-md z-10">
           <div className="flex items-center gap-2.5 min-w-0">
-            <div className="w-8 h-8 rounded-xl bg-[#EFF6FF] border border-[#DBEAFE] flex items-center justify-center shrink-0">
-              <Eye className="w-4 h-4 text-[#2563EB]" />
+            <div className="w-8 h-8 rounded-xl bg-blue-600/15 border border-blue-500/30 flex items-center justify-center shrink-0">
+              <Eye className="w-4 h-4 text-blue-400" />
             </div>
-            <h2 className="text-sm sm:text-base font-bold text-[#0F172A] truncate">{file.name}</h2>
+            <h2 className="text-sm sm:text-base font-bold text-white truncate">{file.name}</h2>
           </div>
           <button
             onClick={onClose}
-            className="w-8 h-8 rounded-xl bg-[#F8FAFC] border border-[#E2E8F0] hover:border-[#CBD5E1] flex items-center justify-center text-[#64748B] hover:text-[#0F172A] shrink-0 cursor-pointer"
+            className="w-8 h-8 rounded-xl bg-[#181A26] border border-[#252838] hover:border-[#383C52] flex items-center justify-center text-zinc-400 hover:text-white shrink-0 cursor-pointer transition-colors"
             aria-label="Close modal"
           >
             <X className="w-4 h-4" />
@@ -856,16 +861,16 @@ export const FileDetailDrawer: React.FC<FileDetailDrawerProps> = ({
         </div>
 
         <div className="p-3.5 sm:p-5 space-y-3.5 sm:space-y-4">
-          {/* 1. Universal Live Rich Preview (Placed immediately at top for native app feel) */}
+          {/* 1. Universal Live Rich Preview */}
           {file.lockedOverQuota ? (
-            <div className="p-6 bg-[#F8FAFC] border border-[#D97706] rounded-2xl space-y-3 text-center">
-              <div className="w-11 h-11 mx-auto bg-white border border-[#D97706] rounded-xl flex items-center justify-center">
-                <Lock className="w-5 h-5 text-[#D97706]" />
+            <div className="p-6 bg-[#181A26] border border-amber-500/40 rounded-2xl space-y-3 text-center">
+              <div className="w-11 h-11 mx-auto bg-amber-500/15 border border-amber-500/30 rounded-xl flex items-center justify-center">
+                <Lock className="w-5 h-5 text-amber-400" />
               </div>
-              <div className="text-sm font-bold text-[#0F172A]">
+              <div className="text-sm font-bold text-white">
                 File Locked — Exceeds 25 GB Free Limit
               </div>
-              <p className="text-xs text-[#475569] max-w-md mx-auto">
+              <p className="text-xs text-zinc-400 max-w-md mx-auto">
                 Your monthly storage plan has expired. Your data is safely preserved for 3 months
                 (90 days), but files above your first 25 GB require an active 50 GB or 1 TB plan to
                 preview, download, or share.
@@ -876,7 +881,7 @@ export const FileDetailDrawer: React.FC<FileDetailDrawerProps> = ({
                     onClose();
                     onGoToPricing();
                   }}
-                  className="min-h-[42px] px-5 py-2.5 text-xs font-bold bg-[#2563EB] text-white hover:bg-[#1D4ED8] rounded-xl cursor-pointer"
+                  className="min-h-[42px] px-5 py-2.5 text-xs font-bold bg-amber-500 text-black hover:bg-amber-400 rounded-xl cursor-pointer"
                 >
                   Extend Storage Plan with Tokens
                 </button>
@@ -885,20 +890,20 @@ export const FileDetailDrawer: React.FC<FileDetailDrawerProps> = ({
           ) : isImage ? (
             <div className="space-y-2">
               <div className="flex items-center justify-between">
-                <span className="text-xs font-semibold text-[#475569]">
+                <span className="text-xs font-semibold text-zinc-400">
                   Original Lossless Image
                 </span>
                 <button
                   type="button"
                   onClick={() => setImageZoomed((z) => !z)}
-                  className="px-2.5 py-1 text-xs font-medium bg-[#F8FAFC] border border-[#E2E8F0] hover:border-[#2563EB] text-[#0F172A] rounded-lg cursor-pointer"
+                  className="px-2.5 py-1 text-xs font-medium bg-[#181A26] border border-[#252838] hover:border-blue-500 text-zinc-300 hover:text-white rounded-lg cursor-pointer transition-colors"
                 >
                   {imageZoomed ? 'Fit to Window' : '1:1 Full Resolution'}
                 </button>
               </div>
               <div
                 onClick={() => setImageZoomed((z) => !z)}
-                className={`p-2.5 bg-[#F8FAFC] border border-[#E2E8F0] rounded-2xl flex items-center justify-center cursor-zoom-in ${
+                className={`p-2.5 bg-[#161724] border border-[#252838] rounded-2xl flex items-center justify-center cursor-zoom-in ${
                   imageZoomed ? 'max-h-[75vh] overflow-auto' : 'max-h-[440px] overflow-hidden'
                 }`}
               >
@@ -931,25 +936,25 @@ export const FileDetailDrawer: React.FC<FileDetailDrawerProps> = ({
               />
 
               {videoPlaybackError && (
-                <div className="p-3 bg-[#FEF3C7] border border-[#D97706] rounded-xl text-xs text-[#B45309]">
+                <div className="p-3 bg-amber-500/10 border border-amber-500/30 rounded-xl text-xs text-amber-300">
                   {videoPlaybackError}
                 </div>
               )}
             </div>
           ) : isAudio ? (
-            <div className="p-4 sm:p-5 bg-[#F8FAFC] border border-[#E2E8F0] rounded-2xl space-y-3">
-              <div className="text-xs font-semibold text-[#0F172A] truncate">{file.name}</div>
+            <div className="p-4 sm:p-5 bg-[#181A26] border border-[#252838] rounded-2xl space-y-3">
+              <div className="text-xs font-semibold text-white truncate">{file.name}</div>
               <audio src={inlineUrl} controls className="w-full" />
             </div>
           ) : isPdf ? (
             <div className="space-y-2">
               <div className="flex items-center justify-between">
-                <span className="text-xs font-semibold text-[#475569]">PDF Document Preview</span>
+                <span className="text-xs font-semibold text-zinc-400">PDF Document Preview</span>
                 <a
                   href={inlineUrl}
                   target="_blank"
                   rel="noreferrer"
-                  className="px-2.5 py-1 text-xs font-semibold bg-[#F8FAFC] border border-[#E2E8F0] hover:border-[#2563EB] text-[#2563EB] rounded-lg"
+                  className="px-2.5 py-1 text-xs font-semibold bg-[#181A26] border border-[#252838] hover:border-blue-500 text-blue-400 rounded-lg transition-colors"
                 >
                   Open Full PDF
                 </a>
@@ -957,52 +962,52 @@ export const FileDetailDrawer: React.FC<FileDetailDrawerProps> = ({
               <iframe
                 title={file.name}
                 src={inlineUrl}
-                className="w-full h-[420px] bg-[#F8FAFC] border border-[#E2E8F0] rounded-2xl"
+                className="w-full h-[420px] bg-[#161724] border border-[#252838] rounded-2xl"
               />
             </div>
           ) : isTextOrCode || dynamicTextPreview ? (
             <div className="space-y-2">
               <div className="flex items-center justify-between">
-                <span className="text-xs font-semibold text-[#475569]">
+                <span className="text-xs font-semibold text-zinc-400">
                   {isCsv ? 'Spreadsheet / CSV Preview' : 'Document / Code Preview'}
                 </span>
                 {dynamicTextPreview && (
                   <button
                     type="button"
                     onClick={handleCopyPreviewText}
-                    className="min-h-[32px] px-3 py-1 text-xs font-medium bg-[#F8FAFC] border border-[#E2E8F0] hover:border-[#2563EB] text-[#0F172A] rounded-lg flex items-center gap-1.5 cursor-pointer"
+                    className="min-h-[32px] px-3 py-1 text-xs font-medium bg-[#181A26] border border-[#252838] hover:border-blue-500 text-zinc-200 rounded-lg flex items-center gap-1.5 cursor-pointer transition-colors"
                   >
                     {copiedText ? (
-                      <Check className="w-3.5 h-3.5 text-[#16A34A]" />
+                      <Check className="w-3.5 h-3.5 text-emerald-400" />
                     ) : (
-                      <Copy className="w-3.5 h-3.5 text-[#2563EB]" />
+                      <Copy className="w-3.5 h-3.5 text-blue-400" />
                     )}
-                    {copiedText ? 'Copied' : 'Copy Content'}
+                    <span>{copiedText ? 'Copied' : 'Copy Content'}</span>
                   </button>
                 )}
               </div>
 
               {loadingTextPreview ? (
-                <div className="p-8 bg-[#F8FAFC] border border-[#E2E8F0] rounded-2xl text-center text-xs text-[#64748B]">
+                <div className="p-8 bg-[#181A26] border border-[#252838] rounded-2xl text-center text-xs text-zinc-400">
                   Loading live file preview...
                 </div>
               ) : csvRows && csvRows.length > 0 ? (
-                <div className="border border-[#E2E8F0] rounded-2xl overflow-x-auto max-h-80 bg-white">
+                <div className="border border-[#252838] rounded-2xl overflow-x-auto max-h-80 bg-[#161724]">
                   <table className="w-full text-left border-collapse text-xs">
                     <thead>
-                      <tr className="bg-[#F8FAFC] border-b border-[#E2E8F0]">
+                      <tr className="bg-[#181A26] border-b border-[#252838]">
                         {csvRows[0].map((col, idx) => (
-                          <th key={idx} className="px-3 py-2 font-bold text-[#0F172A] border-r border-[#E2E8F0] last:border-r-0">
+                          <th key={idx} className="px-3 py-2 font-bold text-white border-r border-[#252838] last:border-r-0">
                             {col || `Column ${idx + 1}`}
                           </th>
                         ))}
                       </tr>
                     </thead>
-                    <tbody className="divide-y divide-[#E2E8F0]">
+                    <tbody className="divide-y divide-[#252838]">
                       {csvRows.slice(1).map((row, rIdx) => (
-                        <tr key={rIdx} className="hover:bg-[#F8FAFC]">
+                        <tr key={rIdx} className="hover:bg-[#181A26]">
                           {row.map((cell, cIdx) => (
-                            <td key={cIdx} className="px-3 py-1.5 text-[#475569] border-r border-[#E2E8F0] last:border-r-0 font-mono">
+                            <td key={cIdx} className="px-3 py-1.5 text-zinc-300 border-r border-[#252838] last:border-r-0 font-mono">
                               {cell}
                             </td>
                           ))}
@@ -1012,22 +1017,22 @@ export const FileDetailDrawer: React.FC<FileDetailDrawerProps> = ({
                   </table>
                 </div>
               ) : (
-                <pre className="p-4 bg-[#F8FAFC] border border-[#E2E8F0] rounded-2xl text-xs font-mono text-[#0F172A] overflow-x-auto max-h-96 whitespace-pre-wrap">
+                <pre className="p-4 bg-[#161724] border border-[#252838] rounded-2xl text-xs font-mono text-zinc-200 overflow-x-auto max-h-96 whitespace-pre-wrap">
                   {dynamicTextPreview || 'Empty text document.'}
                 </pre>
               )}
             </div>
           ) : (
             /* Universal Inspector for Office Docs, ZIP/RAR Archives & Binary Packages */
-            <div className="p-5 bg-[#F8FAFC] border border-[#E2E8F0] rounded-2xl space-y-4">
+            <div className="p-5 bg-[#181A26] border border-[#252838] rounded-2xl space-y-4">
               <div className="flex items-start justify-between gap-3">
                 <div className="flex items-center gap-3 min-w-0">
-                  <div className="w-11 h-11 bg-white border border-[#E2E8F0] rounded-xl flex items-center justify-center shrink-0">
-                    <FileText className="w-5 h-5 text-[#2563EB]" />
+                  <div className="w-11 h-11 bg-[#141520] border border-[#252838] rounded-xl flex items-center justify-center shrink-0">
+                    <FileText className="w-5 h-5 text-blue-400" />
                   </div>
                   <div className="min-w-0">
-                    <div className="text-sm font-bold text-[#0F172A] break-all">{file.name}</div>
-                    <div className="text-xs text-[#64748B] mt-0.5">
+                    <div className="text-sm font-bold text-white break-all">{file.name}</div>
+                    <div className="text-xs text-zinc-400 mt-0.5">
                       {isOfficeDoc
                         ? 'Office Document · Verified Lossless Cloud Copy'
                         : isArchive
@@ -1036,19 +1041,19 @@ export const FileDetailDrawer: React.FC<FileDetailDrawerProps> = ({
                     </div>
                   </div>
                 </div>
-                <span className="px-2.5 py-1 text-[10px] font-bold bg-[#DCFCE7] text-[#15803D] rounded-lg shrink-0">
+                <span className="px-2.5 py-1 text-[10px] font-bold bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 rounded-lg shrink-0">
                   100% Original
                 </span>
               </div>
 
               {zipEntriesPreview.length > 0 && (
-                <div className="space-y-1.5 pt-2 border-t border-[#E2E8F0]">
-                  <div className="text-xs font-semibold text-[#0F172A]">
+                <div className="space-y-1.5 pt-2 border-t border-[#252838]">
+                  <div className="text-xs font-semibold text-white">
                     Archive Contents ({zipEntriesPreview.length} items)
                   </div>
-                  <div className="max-h-40 overflow-y-auto bg-white border border-[#E2E8F0] rounded-xl divide-y divide-[#E2E8F0] text-xs font-mono">
+                  <div className="max-h-40 overflow-y-auto bg-[#141520] border border-[#252838] rounded-xl divide-y divide-[#252838] text-xs font-mono">
                     {zipEntriesPreview.map((entryName, idx) => (
-                      <div key={idx} className="px-3 py-1.5 text-[#475569] truncate">
+                      <div key={idx} className="px-3 py-1.5 text-zinc-300 truncate">
                         {entryName}
                       </div>
                     ))}
@@ -1059,29 +1064,29 @@ export const FileDetailDrawer: React.FC<FileDetailDrawerProps> = ({
           )}
 
           {/* 2. Compact, Clean File Metadata Card */}
-          <div className="rounded-xl bg-[#F8FAFC] border border-[#E2E8F0] px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs text-[#64748B] tabular-nums">
+          <div className="rounded-xl bg-[#181A26] border border-[#252838] px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs text-zinc-400 tabular-nums">
             <div className="flex items-center gap-1.5 min-w-0">
-              <span className="font-bold text-[#0F172A] shrink-0">
+              <span className="font-bold text-white shrink-0">
                 {formatBytes(file.sizeBytes)}
               </span>
-              <span className="text-[#CBD5E1]" aria-hidden="true">
+              <span className="text-zinc-600" aria-hidden="true">
                 •
               </span>
               <span className="truncate max-w-[155px] sm:max-w-xs">
                 {currentFolderName || 'My Cloud Drive'}
               </span>
               {isSavedOffline && (
-                <span className="md:hidden px-1.5 py-0.5 rounded-md bg-[#DCFCE7] text-[#15803D] text-[10px] font-bold shrink-0">
+                <span className="md:hidden px-1.5 py-0.5 rounded-md bg-emerald-500/15 text-emerald-400 text-[10px] font-bold shrink-0">
                   Offline
                 </span>
               )}
             </div>
             <div className="flex items-center gap-1.5 shrink-0">
               <span>{formatShortDate(file.createdAt)}</span>
-              <span className="text-[#CBD5E1]" aria-hidden="true">
+              <span className="text-zinc-600" aria-hidden="true">
                 •
               </span>
-              <span className="px-2 py-0.5 rounded-md bg-white border border-[#E2E8F0] font-mono text-[10px] font-semibold text-[#475569] uppercase">
+              <span className="px-2 py-0.5 rounded-md bg-[#141520] border border-[#252838] font-mono text-[10px] font-semibold text-zinc-300 uppercase">
                 {(file.name.split('.').pop() || file.mimeType.split('/')[1] || 'FILE').slice(0, 8)}
               </span>
             </div>
@@ -1095,7 +1100,7 @@ export const FileDetailDrawer: React.FC<FileDetailDrawerProps> = ({
                 <button
                   type="button"
                   onClick={() => onDownload(file)}
-                  className="h-11 rounded-xl px-4 text-xs sm:text-sm font-bold bg-[#2563EB] hover:bg-[#1D4ED8] text-white shadow-xs flex items-center justify-center gap-2 whitespace-nowrap cursor-pointer"
+                  className="h-11 rounded-xl px-4 text-xs sm:text-sm font-bold bg-blue-600 hover:bg-blue-500 text-white shadow-xs flex items-center justify-center gap-2 whitespace-nowrap cursor-pointer transition-colors"
                 >
                   <Download className="w-4 h-4 shrink-0" />
                   <span>Download</span>
@@ -1107,9 +1112,9 @@ export const FileDetailDrawer: React.FC<FileDetailDrawerProps> = ({
                     onClose();
                     onOpenShareModal(file);
                   }}
-                  className="h-11 rounded-xl px-4 text-xs sm:text-sm font-bold bg-[#F8FAFC] hover:bg-[#F1F5F9] border border-[#E2E8F0] hover:border-[#2563EB] text-[#0F172A] flex items-center justify-center gap-2 whitespace-nowrap cursor-pointer"
+                  className="h-11 rounded-xl px-4 text-xs sm:text-sm font-bold bg-[#181A26] hover:bg-[#202232] border border-[#252838] hover:border-blue-500 text-white flex items-center justify-center gap-2 whitespace-nowrap cursor-pointer transition-colors"
                 >
-                  <Link2 className="w-4 h-4 text-[#2563EB] shrink-0" />
+                  <Link2 className="w-4 h-4 text-blue-400 shrink-0" />
                   <span>Share Link</span>
                 </button>
               </div>
@@ -1123,9 +1128,9 @@ export const FileDetailDrawer: React.FC<FileDetailDrawerProps> = ({
                       onClose();
                       onOpenMoveModal(file);
                     }}
-                    className="h-11 rounded-xl px-2.5 text-xs font-semibold bg-[#F8FAFC] hover:bg-[#F1F5F9] border border-[#E2E8F0] hover:border-[#2563EB] text-[#0F172A] flex items-center justify-center gap-1.5 whitespace-nowrap cursor-pointer"
+                    className="h-11 rounded-xl px-2.5 text-xs font-semibold bg-[#181A26] hover:bg-[#202232] border border-[#252838] hover:border-blue-500 text-zinc-300 hover:text-white flex items-center justify-center gap-1.5 whitespace-nowrap cursor-pointer transition-colors"
                   >
-                    <FolderInput className="w-3.5 h-3.5 text-[#2563EB] shrink-0" />
+                    <FolderInput className="w-3.5 h-3.5 text-blue-400 shrink-0" />
                     <span>Move</span>
                   </button>
                 )}
@@ -1137,9 +1142,9 @@ export const FileDetailDrawer: React.FC<FileDetailDrawerProps> = ({
                       onClose();
                       onOpenCopyModal(file);
                     }}
-                    className="h-11 rounded-xl px-2.5 text-xs font-semibold bg-[#F8FAFC] hover:bg-[#F1F5F9] border border-[#E2E8F0] hover:border-[#2563EB] text-[#0F172A] flex items-center justify-center gap-1.5 whitespace-nowrap cursor-pointer"
+                    className="h-11 rounded-xl px-2.5 text-xs font-semibold bg-[#181A26] hover:bg-[#202232] border border-[#252838] hover:border-blue-500 text-zinc-300 hover:text-white flex items-center justify-center gap-1.5 whitespace-nowrap cursor-pointer transition-colors"
                   >
-                    <Copy className="w-3.5 h-3.5 text-[#2563EB] shrink-0" />
+                    <Copy className="w-3.5 h-3.5 text-blue-400 shrink-0" />
                     <span>Copy</span>
                   </button>
                 )}
@@ -1148,16 +1153,16 @@ export const FileDetailDrawer: React.FC<FileDetailDrawerProps> = ({
                   <button
                     type="button"
                     onClick={() => onToggleOffline(file)}
-                    className={`md:hidden h-11 rounded-xl px-2.5 text-xs font-semibold border flex items-center justify-center gap-1.5 whitespace-nowrap cursor-pointer ${
+                    className={`md:hidden h-11 rounded-xl px-2.5 text-xs font-semibold border flex items-center justify-center gap-1.5 whitespace-nowrap cursor-pointer transition-colors ${
                       isSavedOffline
-                        ? 'bg-[#DCFCE7]/50 border-[#16A34A] text-[#15803D]'
-                        : 'bg-[#F8FAFC] hover:bg-[#F1F5F9] border-[#E2E8F0] hover:border-[#2563EB] text-[#0F172A]'
+                        ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-400'
+                        : 'bg-[#181A26] hover:bg-[#202232] border-[#252838] hover:border-blue-500 text-zinc-300'
                     }`}
                   >
                     {isSavedOffline ? (
-                      <Check className="w-3.5 h-3.5 text-[#16A34A] shrink-0" />
+                      <Check className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
                     ) : (
-                      <Download className="w-3.5 h-3.5 text-[#2563EB] shrink-0" />
+                      <Download className="w-3.5 h-3.5 text-blue-400 shrink-0" />
                     )}
                     <span>{isSavedOffline ? 'Saved' : 'Offline'}</span>
                   </button>
@@ -1169,7 +1174,7 @@ export const FileDetailDrawer: React.FC<FileDetailDrawerProps> = ({
                     onClose();
                     onRequestDelete(file);
                   }}
-                  className="h-11 rounded-xl px-2.5 text-xs font-semibold bg-[#FEF2F2] hover:bg-[#FEE2E2] border border-[#FECACA] text-[#DC2626] flex items-center justify-center gap-1.5 whitespace-nowrap cursor-pointer"
+                  className="h-11 rounded-xl px-2.5 text-xs font-semibold bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/30 text-rose-400 flex items-center justify-center gap-1.5 whitespace-nowrap cursor-pointer transition-colors"
                 >
                   <Trash2 className="w-3.5 h-3.5 shrink-0" />
                   <span>Delete</span>

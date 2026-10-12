@@ -41,7 +41,7 @@ export default {
       return new Response(null, { status: 204, headers: CORS_HEADERS });
     }
 
-    // Graceful no-op responses for FFprobe / hydration endpoints on Cloudflare Pages static deployment
+    // Graceful responses for FFprobe / hydration endpoints on Cloudflare Pages static deployment
     if (
       url.pathname.endsWith('/media-info') ||
       url.pathname.endsWith('/ensure-streamable') ||
@@ -51,10 +51,42 @@ export default {
         JSON.stringify({
           ok: false,
           hasBinaryOrChunks: true,
-           staticWorker: true,
+          staticWorker: true,
         }),
         {
           status: 200,
+          headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
+        }
+      );
+    }
+
+    // Direct proxy for /api/files/:id/download or /api/files/:id/stream on Cloudflare Pages
+    if (url.pathname.startsWith('/api/files/') && (url.pathname.endsWith('/stream') || url.pathname.endsWith('/download'))) {
+      const parts = url.pathname.split('/');
+      const fileId = decodeURIComponent(parts[3] || '');
+      const isStream = url.pathname.endsWith('/stream');
+      const isInline = url.searchParams.get('inline') === '1' || isStream;
+      const fileName = url.searchParams.get('name') || (isStream ? 'video.mp4' : 'file.bin');
+
+      // If manifest param 'm' is provided or chunks in query, forward to tg-stream
+      if (url.searchParams.has('m')) {
+        const streamUrl = new URL('/api/public/tg-stream', request.url);
+        streamUrl.search = url.search;
+        return this.fetch(new Request(streamUrl.toString(), request), env);
+      }
+
+      // Single chunk fileId direct fallback
+      if (fileId && !fileId.startsWith('file_')) {
+        const chunkUrl = new URL('/api/public/tg-chunk', request.url);
+        chunkUrl.searchParams.set('fileId', fileId);
+        return this.fetch(new Request(chunkUrl.toString(), request), env);
+      }
+
+      // If file stream/download cannot be resolved directly on Cloudflare worker, return 404 JSON with CORS so client IndexedDB/blob fallback activates immediately
+      return new Response(
+        JSON.stringify({ error: 'File stream not found on static worker', staticWorker: true }),
+        {
+          status: 404,
           headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
         }
       );

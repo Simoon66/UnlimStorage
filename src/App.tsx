@@ -51,6 +51,12 @@ import {
   ArrowDown,
   ChevronDown,
   CornerLeftUp,
+  Menu,
+  MoreVertical,
+  SlidersHorizontal,
+  Sparkles,
+  HardDrive,
+  LogOut,
 } from 'lucide-react';
 import {
   User,
@@ -150,27 +156,27 @@ type ActiveView =
 
 function renderFileIcon(file: FileRecord) {
   if (file.lockedOverQuota) {
-    return <Lock className="w-6 h-6 text-[#D99B26]" />;
+    return <Lock className="w-5 h-5 text-amber-500" />;
   }
   if (
     file.mimeType.startsWith('image/') ||
-    /\.(png|jpg|jpeg|gif|webp|svg|bmp)$/i.test(file.name)
+    /\.(png|jpg|jpeg|gif|webp|svg|bmp|ico)$/i.test(file.name)
   ) {
-    return <ImageIcon className="w-6 h-6 text-[#D97757]" />;
+    return <ImageIcon className="w-5 h-5 text-blue-400" />;
   }
-  if (file.mimeType.startsWith('video/') || /\.(mp4|webm|mov|mkv)$/i.test(file.name)) {
-    return <Film className="w-6 h-6 text-[#D97757]" />;
+  if (file.mimeType.startsWith('video/') || /\.(mp4|webm|mov|mkv|avi|wmv)$/i.test(file.name)) {
+    return <Film className="w-5 h-5 text-purple-400" />;
   }
-  if (file.mimeType.startsWith('audio/') || /\.(mp3|wav|ogg|m4a)$/i.test(file.name)) {
-    return <Music className="w-6 h-6 text-[#D97757]" />;
+  if (file.mimeType.startsWith('audio/') || /\.(mp3|wav|ogg|m4a|flac)$/i.test(file.name)) {
+    return <Music className="w-5 h-5 text-emerald-400" />;
   }
-  if (/\.(json|sh|ts|tsx|js|py|html|css)$/i.test(file.name)) {
-    return <FileCode className="w-6 h-6 text-[#D97757]" />;
+  if (/\.(json|sh|ts|tsx|js|py|html|css|sql|yaml|yml)$/i.test(file.name)) {
+    return <FileCode className="w-5 h-5 text-cyan-400" />;
   }
   if (/\.(csv|xls|xlsx)$/i.test(file.name)) {
-    return <FileSpreadsheet className="w-6 h-6 text-[#2E9E6B]" />;
+    return <FileSpreadsheet className="w-5 h-5 text-emerald-400" />;
   }
-  return <FileText className="w-6 h-6 text-[#D97757]" />;
+  return <FileText className="w-5 h-5 text-amber-400" />;
 }
 
 interface ToastNotificationCardProps {
@@ -267,17 +273,17 @@ const ToastNotificationCard: React.FC<ToastNotificationCardProps> = ({
         touchAction: 'pan-y',
       }}
       title="Swipe left/right or click X to dismiss"
-      className="pointer-events-auto relative overflow-hidden bg-[#1C1A17] border border-[#D97757] p-4 flex items-start justify-between gap-3 select-none cursor-grab active:cursor-grabbing shadow-xl"
+      className="pointer-events-auto relative overflow-hidden bg-[#12131C] border border-[#2563EB]/40 p-4 rounded-xl flex items-start justify-between gap-3 select-none cursor-grab active:cursor-grabbing shadow-xl text-white"
     >
       <div className="flex items-start gap-2.5 min-w-0">
         {notification.type === 'error' ? (
-          <AlertCircle className="w-4 h-4 text-[#D94848] shrink-0 mt-0.5" />
+          <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
         ) : (
-          <CheckCircle2 className="w-4 h-4 text-[#2E9E6B] shrink-0 mt-0.5" />
+          <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
         )}
         <div className="space-y-0.5 min-w-0">
-          <div className="text-xs font-bold text-[#F2EFE9]">{notification.title}</div>
-          <div className="text-xs text-[#9E978E] break-words">{notification.message}</div>
+          <div className="text-xs font-bold text-white">{notification.title}</div>
+          <div className="text-xs text-zinc-400 break-words">{notification.message}</div>
         </div>
       </div>
       <button
@@ -287,15 +293,15 @@ const ToastNotificationCard: React.FC<ToastNotificationCardProps> = ({
           triggerDismiss();
         }}
         aria-label="Dismiss notification"
-        className="min-w-[32px] min-h-[32px] -mr-1.5 -mt-1.5 flex items-center justify-center text-[#9E978E] hover:text-[#F2EFE9] hover:bg-[#262420] cursor-pointer shrink-0 transition-colors"
+        className="min-w-[32px] min-h-[32px] -mr-1.5 -mt-1.5 flex items-center justify-center text-zinc-400 hover:text-white hover:bg-white/10 rounded-lg cursor-pointer shrink-0 transition-colors"
       >
         <X className="w-4 h-4" />
       </button>
       {/* 4-second auto-dismiss countdown progress bar */}
-      <div className="absolute bottom-0 left-0 right-0 h-[2px] bg-[#262420]">
+      <div className="absolute bottom-0 left-0 right-0 h-[2px] bg-white/10">
         <div
           className={`h-full transition-all duration-75 ${
-            notification.type === 'error' ? 'bg-[#D94848]' : 'bg-[#D97757]'
+            notification.type === 'error' ? 'bg-rose-500' : 'bg-blue-500'
           }`}
           style={{ width: `${progressPercent}%` }}
         />
@@ -357,6 +363,8 @@ export default function App() {
   const [onlyStarred, setOnlyStarred] = useState(false);
   const [onlyOffline, setOnlyOffline] = useState(false);
   const [selectedTagFilter, setSelectedTagFilter] = useState<string | null>(null);
+  const [selectedCategoryFilter, setSelectedCategoryFilter] = useState<'all' | 'image' | 'video' | 'document' | 'other'>('all');
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [selectedFileIds, setSelectedFileIds] = useState<string[]>([]);
   const [creatingFolder, setCreatingFolder] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
@@ -1265,6 +1273,14 @@ export default function App() {
     setUploadingFiles(false);
     setUploadProgress(null);
     setPostUploadProcessing(null);
+    setTransfers((prev) =>
+      prev.filter(
+        (t) =>
+          t.status !== 'streaming' &&
+          t.status !== 'queued' &&
+          t.status !== 'syncing_telegram'
+      )
+    );
   };
 
   const handleCancelRemoteTransfer = async (jobId: string) => {
@@ -1272,16 +1288,12 @@ export default function App() {
       method: 'POST',
       headers: authHeaders(),
     }).catch(() => null);
-    setTransfers((prev) =>
-      prev.map((t) =>
-        t.id === jobId ? { ...t, status: 'failed', errorMessage: 'Cancelled by user' } : t
-      )
-    );
+    setTransfers((prev) => prev.filter((t) => t.id !== jobId));
     pushNotification({
       id: `cancel_rm_${Date.now()}`,
       timestamp: new Date().toISOString(),
-      title: 'Remote Transfer Cancelled',
-      message: 'The active transfer was stopped.',
+      title: 'Transfer Dismissed',
+      message: 'The active transfer was stopped and dismissed.',
       type: 'info',
     });
   };
@@ -3017,10 +3029,10 @@ export default function App() {
 
   if (authLoading) {
     return (
-      <div className="min-h-screen bg-[#141311] text-[#F2EFE9] flex items-center justify-center p-6">
-        <div className="p-6 bg-[#1C1A17] border border-[#2C2824] text-center space-y-2 max-w-sm w-full">
-          <div className="text-sm font-bold text-[#F2EFE9]">UnlimStorage Encrypted Vault</div>
-          <div className="text-xs text-[#9E978E]">Verifying your secure cloud session...</div>
+      <div className="min-h-screen bg-[#0A0B0E] text-[#F3F4F6] flex items-center justify-center p-6">
+        <div className="p-6 bg-[#101118] border border-[#1F212D] rounded-2xl text-center space-y-2 max-w-sm w-full shadow-2xl">
+          <div className="text-sm font-bold text-white">StackDrive Encrypted Vault</div>
+          <div className="text-xs text-zinc-400">Verifying your secure cloud session...</div>
         </div>
       </div>
     );
@@ -3028,45 +3040,44 @@ export default function App() {
 
   if (!firebaseUser) {
     return (
-      <div className="min-h-screen bg-[#141311] text-[#F2EFE9] flex flex-col justify-between p-4 sm:p-6">
-        <header className="max-w-7xl w-full mx-auto flex items-center justify-between py-2 border-b border-[#2C2824]">
+      <div className="min-h-screen bg-[#0A0B0E] text-[#F3F4F6] flex flex-col justify-between p-4 sm:p-6">
+        <header className="max-w-7xl w-full mx-auto flex items-center justify-between py-2 border-b border-[#1F212D]">
           <div className="flex items-center gap-2.5">
-            <div className="w-8 h-8 bg-[#1C1A17] border border-[#2C2824] flex items-center justify-center">
-              <Cloud className="w-4 h-4 text-[#D97757]" />
+            <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-blue-600 to-indigo-500 border border-blue-500/30 flex items-center justify-center shadow-lg shadow-blue-500/20 text-white">
+              <Cloud className="w-5 h-5" />
             </div>
-            <span className="text-lg font-bold tracking-tight text-[#F2EFE9]">UnlimStorage</span>
+            <div className="flex flex-col">
+              <span className="text-base font-bold tracking-tight text-white">StackDrive</span>
+              <span className="text-[10px] text-zinc-400">UnlimCloud Vault</span>
+            </div>
           </div>
-          <div className="text-xs text-[#9E978E]">25 GB Free Encrypted Cloud Storage</div>
+          <div className="text-xs text-zinc-400">25 GB Free Encrypted Cloud Storage</div>
         </header>
 
         <main className="flex-1 flex items-center justify-center py-8">
-          <div className="w-full max-w-md bg-[#1C1A17] border border-[#2C2824] p-6 sm:p-8 space-y-6">
-            <div className="w-12 h-12 bg-[#24211D] border border-[#2C2824] flex items-center justify-center">
-              <ShieldCheck className="w-6 h-6 text-[#D97757]" />
+          <div className="w-full max-w-md bg-[#101118] border border-[#1F212D] rounded-2xl p-6 sm:p-8 space-y-6 shadow-2xl">
+            <div className="w-12 h-12 rounded-xl bg-blue-600/10 border border-blue-500/30 flex items-center justify-center">
+              <ShieldCheck className="w-6 h-6 text-blue-400" />
             </div>
 
             <div className="space-y-2">
-              <h1 className="text-xl sm:text-2xl font-bold text-[#F2EFE9]">
-                Sign in to UnlimStorage
+              <h1 className="text-xl sm:text-2xl font-bold text-white">
+                Sign in to StackDrive
               </h1>
-              <p className="text-xs sm:text-sm text-[#9E978E] leading-relaxed">
+              <p className="text-xs sm:text-sm text-zinc-400 leading-relaxed">
                 Sign in with your registered Google account to access your private encrypted cloud
-                drive. New account registration is currently closed.
+                drive.
               </p>
             </div>
 
-            <div className="p-4 bg-[#141311] border border-[#2C2824] space-y-2 text-xs text-[#9E978E]">
+            <div className="p-4 bg-[#141622] border border-[#212330] rounded-xl space-y-2 text-xs text-zinc-400">
               <div className="flex items-center justify-between">
                 <span>Access Status</span>
-                <strong className="text-[#D97757]">Existing Members Only</strong>
-              </div>
-              <div className="flex items-center justify-between">
-                <span>New Registration</span>
-                <strong className="text-[#9E978E]">Temporarily Closed</strong>
+                <strong className="text-blue-400">Secure Cloud Access</strong>
               </div>
               <div className="flex items-center justify-between">
                 <span>Account Privacy</span>
-                <strong className="text-[#F2EFE9]">100% Isolated Per-User Vault</strong>
+                <strong className="text-white">100% Isolated Per-User Vault</strong>
               </div>
             </div>
 
@@ -3076,7 +3087,7 @@ export default function App() {
                   handleGoogleSignIn().catch(() => null);
                 }}
                 disabled={signingInGoogle}
-                className="w-full min-h-[48px] px-5 py-3 text-xs sm:text-sm font-bold bg-[#D97757] text-[#141311] hover:bg-[#E08568] flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+                className="w-full min-h-[48px] px-5 py-3 rounded-xl text-xs sm:text-sm font-bold bg-blue-600 text-white hover:bg-blue-500 flex items-center justify-center gap-2 cursor-pointer shadow-lg shadow-blue-600/20 active:scale-98 transition-all disabled:opacity-50"
               >
                 <LogIn className="w-4 h-4" />
                 {signingInGoogle ? 'Signing in with Google...' : 'Sign in with Google'}
@@ -3084,15 +3095,15 @@ export default function App() {
             </div>
 
             {authGateError && (
-              <div className="p-3 bg-[#141311] border border-[#D94848] text-xs text-[#D94848]">
+              <div className="p-3 bg-rose-500/10 border border-rose-500/30 rounded-xl text-xs text-rose-400">
                 {authGateError}
               </div>
             )}
           </div>
         </main>
 
-        <footer className="text-center text-xs text-[#9E978E] py-2">
-          UnlimStorage — Private Encrypted Cloud Storage · Login Required
+        <footer className="text-center text-xs text-zinc-500 py-2">
+          StackDrive — Private Encrypted Cloud Storage · Powered by UnlimCloud
         </footer>
       </div>
     );
@@ -3170,7 +3181,67 @@ export default function App() {
     setShowSortMenu(false);
   };
 
+  const isFileCategory = useCallback(
+    (file: FileRecord, cat: 'image' | 'video' | 'document' | 'other') => {
+      const isImg =
+        file.mimeType.startsWith('image/') ||
+        /\.(png|jpg|jpeg|gif|webp|svg|bmp|ico)$/i.test(file.name);
+      if (cat === 'image') return isImg;
+      const isVid =
+        file.mimeType.startsWith('video/') ||
+        /\.(mp4|webm|mov|mkv|avi|wmv)$/i.test(file.name);
+      if (cat === 'video') return isVid;
+      const isDoc =
+        file.mimeType.includes('pdf') ||
+        file.mimeType.includes('document') ||
+        file.mimeType.includes('text') ||
+        /\.(pdf|doc|docx|txt|xls|xlsx|csv|ppt|pptx|json|md|rtf|epub)$/i.test(file.name);
+      if (cat === 'document') return isDoc;
+      return !isImg && !isVid && !isDoc;
+    },
+    []
+  );
+
+  const categoryStats = {
+    image: {
+      count: activeFiles.filter((f) => isFileCategory(f, 'image')).length,
+      bytes: activeFiles
+        .filter((f) => isFileCategory(f, 'image'))
+        .reduce((acc, f) => acc + f.sizeBytes, 0),
+    },
+    video: {
+      count: activeFiles.filter((f) => isFileCategory(f, 'video')).length,
+      bytes: activeFiles
+        .filter((f) => isFileCategory(f, 'video'))
+        .reduce((acc, f) => acc + f.sizeBytes, 0),
+    },
+    document: {
+      count: activeFiles.filter((f) => isFileCategory(f, 'document')).length,
+      bytes: activeFiles
+        .filter((f) => isFileCategory(f, 'document'))
+        .reduce((acc, f) => acc + f.sizeBytes, 0),
+    },
+    other: {
+      count: activeFiles.filter((f) => isFileCategory(f, 'other')).length,
+      bytes: activeFiles
+        .filter((f) => isFileCategory(f, 'other'))
+        .reduce((acc, f) => acc + f.sizeBytes, 0),
+    },
+  };
+
+  const recentSuggestedFiles = [...activeFiles]
+    .sort(
+      (a, b) =>
+        new Date(b.updatedAt || b.createdAt || 0).getTime() -
+        new Date(a.updatedAt || a.createdAt || 0).getTime()
+    )
+    .slice(0, 4);
+
   const filteredFiles = activeFiles.filter((f) => {
+    if (selectedCategoryFilter !== 'all') {
+      if (!isFileCategory(f, selectedCategoryFilter)) return false;
+    }
+
     if (selectedTagFilter) {
       const hasMatchingTag = (f.tags || []).some(
         (t) => t.toLowerCase() === selectedTagFilter.toLowerCase()
@@ -3184,7 +3255,12 @@ export default function App() {
 
     if (onlyStarred) {
       if (!f.starred) return false;
-    } else if (!onlyOffline && !searchQuery.trim() && !selectedTagFilter) {
+    } else if (
+      !onlyOffline &&
+      selectedCategoryFilter === 'all' &&
+      !searchQuery.trim() &&
+      !selectedTagFilter
+    ) {
       if (f.folderId !== currentFolderId) return false;
     }
 
@@ -3372,7 +3448,7 @@ export default function App() {
   );
 
   return (
-    <div className="min-h-screen bg-[#141311] text-[#F2EFE9] flex flex-col">
+    <div className="min-h-screen bg-[#0A0B0E] text-[#F3F4F6] flex overflow-hidden">
       <OfflineIndicator />
       <input
         ref={fileInputRef}
@@ -3388,644 +3464,1171 @@ export default function App() {
       />
 
       {/* ====================================================================
-          CLEAN MINIMAL TOP BAR (Brand + Streamlined Nav + Side Trash Icon & Upload)
+          1. DESKTOP SLEEK LEFT SIDEBAR (Matching reference images)
       ==================================================================== */}
-      <header className="sticky top-0 z-30 flex items-center justify-between gap-3 sm:gap-6 px-3.5 sm:px-6 h-14 sm:h-16 border-b border-[#2C2824] bg-white/95 backdrop-blur-md shadow-[0_1px_3px_rgba(15,23,42,0.03)]">
-        {/* Zone 1: Brand Title with Clean Favicon Mark */}
-        <a
-          href="#my-files"
-          onClick={(e) => {
-            e.preventDefault();
-            setActiveView('explorer');
-            setCurrentFolderId(null);
-            setOnlyStarred(false);
-          }}
-          className="flex items-center gap-2 text-base sm:text-lg font-bold tracking-tight text-[#F2EFE9] whitespace-nowrap shrink-0"
-        >
-          <img
-            src="/icon.svg"
-            alt="UnlimStorage"
-            className="w-7 h-7 sm:w-8 sm:h-8 rounded-lg border border-[#E2E8F0] shadow-2xs shrink-0"
-          />
-          <span>UnlimStorage</span>
-        </a>
-
-        {/* Zone 2: Minimal Desktop Navigation Links */}
-        <nav className="hidden md:flex items-center gap-5 text-sm font-medium text-[#9E978E]">
-          <a
-            href="#my-files"
-            onClick={(e) => {
-              e.preventDefault();
-              setActiveView('explorer');
-              setOnlyStarred(false);
-              setOnlyOffline(false);
-            }}
-            className={`transition-all whitespace-nowrap shrink-0 px-2.5 py-1.5 rounded-xl ${
-              activeView === 'explorer'
-                ? 'text-[#D97757] bg-blue-50/80 font-semibold'
-                : 'hover:text-[#F2EFE9] hover:bg-slate-100/70'
-            }`}
-          >
-            My Files ({activeFiles.length})
-          </a>
-          <a
-            href="#gallery"
-            onClick={(e) => {
-              e.preventDefault();
-              setActiveView('gallery');
-            }}
-            className={`transition-all whitespace-nowrap shrink-0 px-2.5 py-1.5 rounded-xl ${
-              activeView === 'gallery'
-                ? 'text-[#D97757] bg-blue-50/80 font-semibold'
-                : 'hover:text-[#F2EFE9] hover:bg-slate-100/70'
-            }`}
-          >
-            Gallery
-          </a>
-          <a
-            href="#shared-links"
-            onClick={(e) => {
-              e.preventDefault();
-              setActiveView('shares');
-            }}
-            className={`transition-all whitespace-nowrap shrink-0 px-2.5 py-1.5 rounded-xl ${
-              activeView === 'shares'
-                ? 'text-[#D97757] bg-blue-50/80 font-semibold'
-                : 'hover:text-[#F2EFE9] hover:bg-slate-100/70'
-            }`}
-          >
-            Shared ({shares.length})
-          </a>
-          <a
-            href="#pricing"
-            onClick={(e) => {
-              e.preventDefault();
-              setActiveView('pricing');
-            }}
-            className={`transition-all whitespace-nowrap shrink-0 px-2.5 py-1.5 rounded-xl ${
-              activeView === 'pricing'
-                ? 'text-[#D97757] bg-blue-50/80 font-semibold'
-                : 'hover:text-[#F2EFE9] hover:bg-slate-100/70'
-            }`}
-          >
-            Plans ({tokenBalance.toLocaleString()} T)
-          </a>
-          {isAdminUser && (
+      <aside className="hidden md:flex w-64 xl:w-72 bg-[#101118] border-r border-[#1F212D] flex-col justify-between p-4 h-screen sticky top-0 shrink-0 select-none z-30">
+        <div className="space-y-5 overflow-y-auto no-scrollbar">
+          {/* Brand Logo & Title */}
+          <div className="flex items-center justify-between px-2 pt-1">
             <a
-              href="#storage-node"
+              href="#my-drive"
               onClick={(e) => {
                 e.preventDefault();
-                setActiveView('telegram_settings');
+                setActiveView('explorer');
+                setCurrentFolderId(null);
+                setOnlyStarred(false);
+                setOnlyOffline(false);
+                setSelectedCategoryFilter('all');
+                setSelectedTagFilter(null);
               }}
-              className={`transition-all whitespace-nowrap shrink-0 px-2.5 py-1.5 rounded-xl ${
-                activeView === 'telegram_settings'
-                  ? 'text-[#D97757] bg-blue-50/80 font-semibold'
-                  : 'hover:text-[#F2EFE9] hover:bg-slate-100/70'
-              }`}
+              className="flex items-center gap-2.5 text-base font-bold tracking-tight text-white hover:opacity-90 transition-opacity"
             >
-              Admin Panel
+              <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-blue-600 to-indigo-500 flex items-center justify-center shadow-md shadow-blue-500/20 text-white">
+                <Cloud className="w-5 h-5" />
+              </div>
+              <div className="flex flex-col">
+                <span className="font-bold text-base leading-tight tracking-tight text-white">StackDrive</span>
+                <span className="text-[10px] text-zinc-400 font-medium">UnlimCloud Vault</span>
+              </div>
             </a>
-          )}
-        </nav>
+          </div>
 
-        {/* Zone 3: Clean App Actions (Side Trash Icon + Account Pill on Mobile + Desktop Upload) */}
-        <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
-          {/* Side Trash Bin Icon Button */}
-          <button
-            type="button"
-            onClick={() => setActiveView('trash')}
-            title={`Trash Bin (${totalTrashCount} items)`}
-            aria-label="Open Trash Bin"
-            className={`relative min-h-[38px] min-w-[38px] px-2.5 py-1.5 rounded-xl border flex items-center justify-center gap-1.5 text-xs font-semibold transition-all cursor-pointer ${
-              activeView === 'trash'
-                ? 'bg-[#24211D] border-[#D97757] text-[#D97757]'
-                : 'bg-[#141311] border-[#2C2824] text-[#9E978E] hover:border-[#D97757] hover:text-[#F2EFE9]'
-            }`}
-          >
-            <Trash2 className="w-4 h-4 shrink-0" />
-            {totalTrashCount > 0 && (
-              <span className="text-[11px] font-bold tabular-nums">{totalTrashCount}</span>
-            )}
-          </button>
-
-          <PWAInstallButton compact />
-
-          {/* Mobile Compact Account / Sign-In Button in App Header */}
-          {!firebaseUser ? (
+          {/* Primary Action: + Upload File */}
+          <div className="space-y-2 pt-1">
             <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={uploadingFiles}
+              className="w-full py-3 px-4 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-semibold text-xs sm:text-sm flex items-center justify-center gap-2 shadow-lg shadow-blue-600/20 active:scale-98 transition-all cursor-pointer"
+            >
+              <Upload className="w-4 h-4" />
+              <span>{uploadingFiles ? (uploadPaused ? 'Upload Paused' : 'Uploading...') : 'Upload Files'}</span>
+            </button>
+
+            {/* Quick Secondary Actions: New Folder & Web URL */}
+            <div className="grid grid-cols-2 gap-1.5">
+              <button
+                type="button"
+                onClick={() => setCreatingFolder((prev) => !prev)}
+                className="py-2 px-2.5 rounded-lg bg-[#161722] hover:bg-[#1E202E] border border-[#232535] text-zinc-300 hover:text-white text-xs font-medium flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+              >
+                <FolderPlus className="w-3.5 h-3.5 text-blue-400" />
+                <span>New Folder</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowRemoteModal(true)}
+                className="py-2 px-2.5 rounded-lg bg-[#161722] hover:bg-[#1E202E] border border-[#232535] text-zinc-300 hover:text-white text-xs font-medium flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+              >
+                <Globe className="w-3.5 h-3.5 text-indigo-400" />
+                <span>From URL</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Nav Section: MY DRIVE */}
+          <div className="space-y-1">
+            <div className="px-2.5 text-[10px] font-bold uppercase tracking-wider text-zinc-500">
+              My Drive
+            </div>
+            <nav className="space-y-0.5">
+              <button
+                type="button"
+                onClick={() => {
+                  setActiveView('explorer');
+                  setSelectedCategoryFilter('all');
+                  setOnlyStarred(false);
+                  setOnlyOffline(false);
+                  setSelectedTagFilter(null);
+                  setCurrentFolderId(null);
+                }}
+                className={`w-full px-3 py-2.5 rounded-xl text-xs font-semibold flex items-center justify-between transition-all cursor-pointer ${
+                  activeView === 'explorer' && selectedCategoryFilter === 'all' && !onlyStarred && !onlyOffline && !selectedTagFilter
+                    ? 'bg-blue-600/15 text-blue-400 font-bold border border-blue-500/20'
+                    : 'text-zinc-400 hover:text-white hover:bg-[#161722]'
+                }`}
+              >
+                <span className="flex items-center gap-2.5">
+                  <Folder className={`w-4 h-4 ${activeView === 'explorer' && selectedCategoryFilter === 'all' && !onlyStarred ? 'text-blue-400' : 'text-zinc-400'}`} />
+                  <span>All Files</span>
+                </span>
+                <span className="text-[11px] font-medium text-zinc-500 tabular-nums">
+                  {activeFiles.length}
+                </span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setActiveView('explorer');
+                  setSelectedCategoryFilter('all');
+                  setSortBy('date');
+                  setSortOrder('desc');
+                }}
+                className={`w-full px-3 py-2.5 rounded-xl text-xs font-semibold flex items-center justify-between transition-all cursor-pointer ${
+                  activeView === 'explorer' && sortBy === 'date' && sortOrder === 'desc'
+                    ? 'text-zinc-200 hover:bg-[#161722]'
+                    : 'text-zinc-400 hover:text-white hover:bg-[#161722]'
+                }`}
+              >
+                <span className="flex items-center gap-2.5">
+                  <Clock className="w-4 h-4 text-zinc-400" />
+                  <span>Recent</span>
+                </span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setActiveView('explorer');
+                  setOnlyStarred((prev) => !prev);
+                  setSelectedCategoryFilter('all');
+                }}
+                className={`w-full px-3 py-2.5 rounded-xl text-xs font-semibold flex items-center justify-between transition-all cursor-pointer ${
+                  onlyStarred
+                    ? 'bg-amber-500/15 text-amber-400 font-bold border border-amber-500/20'
+                    : 'text-zinc-400 hover:text-white hover:bg-[#161722]'
+                }`}
+              >
+                <span className="flex items-center gap-2.5">
+                  <Star className={`w-4 h-4 ${onlyStarred ? 'text-amber-400 fill-amber-400' : 'text-zinc-400'}`} />
+                  <span>Favorites</span>
+                </span>
+                <span className="text-[11px] font-medium text-zinc-500 tabular-nums">
+                  {activeFiles.filter((f) => f.starred).length}
+                </span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setActiveView('trash')}
+                className={`w-full px-3 py-2.5 rounded-xl text-xs font-semibold flex items-center justify-between transition-all cursor-pointer ${
+                  activeView === 'trash'
+                    ? 'bg-rose-500/15 text-rose-400 font-bold border border-rose-500/20'
+                    : 'text-zinc-400 hover:text-white hover:bg-[#161722]'
+                }`}
+              >
+                <span className="flex items-center gap-2.5">
+                  <Trash2 className={`w-4 h-4 ${activeView === 'trash' ? 'text-rose-400' : 'text-zinc-400'}`} />
+                  <span>Trash</span>
+                </span>
+                {totalTrashCount > 0 && (
+                  <span className="px-1.5 py-0.5 rounded-md text-[10px] font-bold bg-rose-500/20 text-rose-400 tabular-nums">
+                    {totalTrashCount}
+                  </span>
+                )}
+              </button>
+            </nav>
+          </div>
+
+          {/* Nav Section: CATEGORIES & TOOLS */}
+          <div className="space-y-1">
+            <div className="px-2.5 text-[10px] font-bold uppercase tracking-wider text-zinc-500">
+              Tools &amp; Shares
+            </div>
+            <nav className="space-y-0.5">
+              <button
+                type="button"
+                onClick={() => setActiveView('gallery')}
+                className={`w-full px-3 py-2.5 rounded-xl text-xs font-semibold flex items-center justify-between transition-all cursor-pointer ${
+                  activeView === 'gallery'
+                    ? 'bg-blue-600/15 text-blue-400 font-bold border border-blue-500/20'
+                    : 'text-zinc-400 hover:text-white hover:bg-[#161722]'
+                }`}
+              >
+                <span className="flex items-center gap-2.5">
+                  <Film className="w-4 h-4 text-purple-400" />
+                  <span>Media Gallery</span>
+                </span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setActiveView('shares')}
+                className={`w-full px-3 py-2.5 rounded-xl text-xs font-semibold flex items-center justify-between transition-all cursor-pointer ${
+                  activeView === 'shares'
+                    ? 'bg-blue-600/15 text-blue-400 font-bold border border-blue-500/20'
+                    : 'text-zinc-400 hover:text-white hover:bg-[#161722]'
+                }`}
+              >
+                <span className="flex items-center gap-2.5">
+                  <Link2 className="w-4 h-4 text-emerald-400" />
+                  <span>Shared Links</span>
+                </span>
+                <span className="text-[11px] font-medium text-zinc-500 tabular-nums">
+                  {shares.length}
+                </span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setActiveView('pricing')}
+                className={`w-full px-3 py-2.5 rounded-xl text-xs font-semibold flex items-center justify-between transition-all cursor-pointer ${
+                  activeView === 'pricing'
+                    ? 'bg-blue-600/15 text-blue-400 font-bold border border-blue-500/20'
+                    : 'text-zinc-400 hover:text-white hover:bg-[#161722]'
+                }`}
+              >
+                <span className="flex items-center gap-2.5">
+                  <Coins className="w-4 h-4 text-amber-400" />
+                  <span>Plans &amp; Tokens</span>
+                </span>
+                <span className="text-[11px] font-medium text-amber-400/90 tabular-nums">
+                  {tokenBalance.toLocaleString()} T
+                </span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setActiveView('settings')}
+                className={`w-full px-3 py-2.5 rounded-xl text-xs font-semibold flex items-center justify-between transition-all cursor-pointer ${
+                  activeView === 'settings'
+                    ? 'bg-blue-600/15 text-blue-400 font-bold border border-blue-500/20'
+                    : 'text-zinc-400 hover:text-white hover:bg-[#161722]'
+                }`}
+              >
+                <span className="flex items-center gap-2.5">
+                  <Settings className="w-4 h-4 text-zinc-400" />
+                  <span>Settings &amp; Offline</span>
+                </span>
+                {Object.keys(offlineFilesMap).length > 0 && (
+                  <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-400 tabular-nums">
+                    {Object.keys(offlineFilesMap).length}
+                  </span>
+                )}
+              </button>
+
+              {isAdminUser && (
+                <button
+                  type="button"
+                  onClick={() => setActiveView('telegram_settings')}
+                  className={`w-full px-3 py-2.5 rounded-xl text-xs font-semibold flex items-center justify-between transition-all cursor-pointer ${
+                    activeView === 'telegram_settings'
+                      ? 'bg-blue-600/15 text-blue-400 font-bold border border-blue-500/20'
+                      : 'text-zinc-400 hover:text-white hover:bg-[#161722]'
+                  }`}
+                >
+                  <span className="flex items-center gap-2.5">
+                    <HardDrive className="w-4 h-4 text-cyan-400" />
+                    <span>Admin Panel</span>
+                  </span>
+                </button>
+              )}
+            </nav>
+          </div>
+        </div>
+
+        {/* Bottom Section: Storage Meter Card & User Pill */}
+        <div className="pt-3 border-t border-[#1F212D] space-y-3">
+          {/* Storage Meter Card (Matching StackDrive storage widget) */}
+          <div className="p-3.5 rounded-2xl bg-[#14151E] border border-[#212330] space-y-2">
+            <div className="flex items-center justify-between text-xs">
+              <span className="font-semibold text-zinc-300 flex items-center gap-1.5">
+                <Cloud className="w-3.5 h-3.5 text-blue-400" />
+                <span>Storage</span>
+              </span>
+              <span className="text-[11px] font-bold text-blue-400">
+                {isUnlimitedAdmin ? 'Unlimited' : `${quotaPct}%`}
+              </span>
+            </div>
+            <div className="h-2 w-full rounded-full bg-[#0D0E14] overflow-hidden">
+              <div
+                style={{ width: `${Math.max(3, quotaPct)}%` }}
+                className="h-full rounded-full bg-gradient-to-r from-blue-500 to-indigo-500 transition-all duration-300"
+              />
+            </div>
+            <div className="flex items-center justify-between text-[11px] text-zinc-400 tabular-nums">
+              <span>{formatBytes(totalStorageBytes)}</span>
+              <span>{isUnlimitedAdmin ? 'Unlimited' : formatBytes(quotaLimitBytes)}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowBuyTokensModal(true)}
+              className="w-full mt-1 py-1.5 rounded-lg bg-blue-600/10 hover:bg-blue-600/20 border border-blue-500/20 text-blue-400 text-xs font-semibold transition-colors cursor-pointer text-center"
+            >
+              Extend / Buy Tokens
+            </button>
+          </div>
+
+          {/* User Profile Pill */}
+          {currentUser ? (
+            <div
+              onClick={() => setShowAuthModal(true)}
+              className="p-2 rounded-xl bg-[#14151E] hover:bg-[#1A1C28] border border-[#212330] flex items-center justify-between gap-2 cursor-pointer transition-colors"
+            >
+              <div className="flex items-center gap-2.5 min-w-0">
+                <div className="w-8 h-8 rounded-full bg-blue-600/20 border border-blue-500/30 flex items-center justify-center text-blue-400 font-bold text-xs shrink-0">
+                  {currentUser.name.charAt(0).toUpperCase()}
+                </div>
+                <div className="min-w-0">
+                  <div className="text-xs font-semibold text-white truncate">{currentUser.name}</div>
+                  <div className="text-[10px] text-zinc-400 truncate">{planBadge}</div>
+                </div>
+              </div>
+              <ChevronRight className="w-3.5 h-3.5 text-zinc-500 shrink-0" />
+            </div>
+          ) : (
+            <button
+              type="button"
               onClick={handleGoogleSignIn}
               disabled={signingInGoogle}
-              className="md:hidden min-h-[38px] px-3 py-1.5 rounded-xl text-xs font-bold bg-[#D97757] text-[#141311] flex items-center gap-1.5 cursor-pointer"
+              className="w-full py-2 px-3 rounded-xl bg-[#14151E] hover:bg-[#1A1C28] border border-[#212330] text-xs font-semibold text-white flex items-center justify-center gap-2 transition-colors cursor-pointer"
             >
-              <LogIn className="w-3.5 h-3.5" />
-              <span>{signingInGoogle ? '...' : 'Sign In'}</span>
+              <LogIn className="w-3.5 h-3.5 text-blue-400" />
+              <span>{signingInGoogle ? 'Signing in...' : 'Sign In with Google'}</span>
             </button>
-          ) : currentUser ? (
-            <button
-              onClick={() => setShowAuthModal(true)}
-              className="md:hidden min-h-[38px] px-2.5 py-1.5 rounded-xl text-xs font-semibold bg-[#24211D] border border-[#2C2824] text-[#F2EFE9] flex items-center gap-1.5 cursor-pointer"
-              title="Account Profile"
-            >
-              <UserIcon className="w-3.5 h-3.5 text-[#D97757] shrink-0" />
-              <span className="max-w-[76px] truncate">{currentUser.name.split(' ')[0]}</span>
-            </button>
-          ) : null}
-
-          {/* Primary Upload Button on Desktop (Mobile uses the floating '+' FAB at bottom-right) */}
-          <button
-            onClick={() => fileInputRef.current?.click()}
-            disabled={uploadingFiles}
-            className="hidden md:inline-flex items-center gap-1.5 min-h-[38px] px-4 py-2 rounded-xl text-xs font-bold bg-[#D97757] text-[#141311] hover:bg-[#E08568] shadow-xs transition-all whitespace-nowrap shrink-0 cursor-pointer"
-          >
-            <Upload className="w-3.5 h-3.5" />
-            <span>{uploadingFiles ? (uploadPaused ? 'Upload Paused' : 'Uploading...') : 'Upload Files'}</span>
-          </button>
+          )}
         </div>
-      </header>
+      </aside>
 
       {/* ====================================================================
-          MAIN CONTAINER
+          2. MOBILE SLIDE-OUT DRAWER (Smooth App-like menu on mobile)
       ==================================================================== */}
-      <main className="flex-1 w-full max-w-7xl mx-auto px-3.5 sm:px-6 py-3.5 sm:py-6 pb-28 md:pb-10 space-y-4 sm:space-y-6">
-        {/* Compact App Storage & Wallet Bar (Sleek single-card summary on mobile, full bar on desktop) */}
-        <div className="p-3 sm:p-4 rounded-2xl bg-[#1C1A17] border border-[#2C2824] shadow-2xs flex flex-col lg:flex-row lg:items-center justify-between gap-2.5 sm:gap-4 transition-all">
-          <div className="flex items-center gap-3 flex-1 min-w-0">
-            <div className="w-9 h-9 sm:w-10 sm:h-10 rounded-xl bg-[#24211D] border border-[#2C2824] flex items-center justify-center shrink-0">
-              <Cloud className="w-4 h-4 sm:w-5 sm:h-5 text-[#D97757]" />
-            </div>
-            <div className="min-w-0 flex-1 space-y-1.5">
-              <div className="flex items-center justify-between gap-2">
-                <div className="text-xs sm:text-sm font-bold text-[#F2EFE9] truncate flex items-center gap-1.5">
-                  <span className="truncate">Cloud Vault</span>
-                  <span className="px-2 py-0.5 text-[10px] font-bold rounded-full bg-[#24211D] border border-[#2C2824] text-[#D97757] shrink-0">
-                    {planBadge}
-                  </span>
+      {mobileSidebarOpen && (
+        <div
+          onClick={() => setMobileSidebarOpen(false)}
+          className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs md:hidden flex"
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="w-72 bg-[#101118] border-r border-[#1F212D] h-full flex flex-col justify-between p-4 space-y-4 shadow-2xl animate-app-modal"
+          >
+            <div className="space-y-4 overflow-y-auto no-scrollbar">
+              <div className="flex items-center justify-between pb-2 border-b border-[#1F212D]">
+                <div className="flex items-center gap-2">
+                  <div className="w-8 h-8 rounded-xl bg-blue-600 flex items-center justify-center text-white">
+                    <Cloud className="w-4 h-4" />
+                  </div>
+                  <span className="font-bold text-white text-base">StackDrive</span>
                 </div>
-                <div className="text-[11px] sm:text-xs text-[#9E978E] tabular-nums shrink-0">
-                  <strong className="text-[#F2EFE9]">{formatBytes(totalStorageBytes)}</strong>
-                  {' / '}
-                  {isUnlimitedAdmin ? (
-                    <strong className="text-[#2E9E6B]">Unlimited</strong>
-                  ) : (
-                    <strong className="text-[#F2EFE9]">{formatBytes(quotaLimitBytes)}</strong>
-                  )}
-                </div>
+                <button
+                  type="button"
+                  onClick={() => setMobileSidebarOpen(false)}
+                  className="w-8 h-8 rounded-lg bg-[#181926] text-zinc-400 flex items-center justify-center"
+                >
+                  <X className="w-4 h-4" />
+                </button>
               </div>
-              <div className="h-1.5 sm:h-2 w-full rounded-full bg-[#141311] border border-[#2C2824] overflow-hidden">
-                <div
-                  style={{ width: `${Math.max(2, quotaPct)}%` }}
-                  className={`h-full rounded-full transition-all duration-500 ease-out ${
-                    lockedFilesCount > 0 ? 'bg-[#D99B26]' : 'bg-[#D97757]'
+
+              <button
+                type="button"
+                onClick={() => {
+                  setMobileSidebarOpen(false);
+                  fileInputRef.current?.click();
+                }}
+                className="w-full py-2.5 px-3 rounded-xl bg-blue-600 text-white font-semibold text-xs flex items-center justify-center gap-2"
+              >
+                <Upload className="w-4 h-4" />
+                <span>Upload Files</span>
+              </button>
+
+              <nav className="space-y-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActiveView('explorer');
+                    setSelectedCategoryFilter('all');
+                    setMobileSidebarOpen(false);
+                  }}
+                  className={`w-full px-3 py-2 rounded-xl text-xs font-semibold flex items-center gap-2.5 ${
+                    activeView === 'explorer' && selectedCategoryFilter === 'all'
+                      ? 'bg-blue-600/15 text-blue-400 font-bold'
+                      : 'text-zinc-400'
                   }`}
-                />
+                >
+                  <Folder className="w-4 h-4" />
+                  <span>My Drive</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActiveView('gallery');
+                    setMobileSidebarOpen(false);
+                  }}
+                  className={`w-full px-3 py-2 rounded-xl text-xs font-semibold flex items-center gap-2.5 ${
+                    activeView === 'gallery' ? 'bg-blue-600/15 text-blue-400 font-bold' : 'text-zinc-400'
+                  }`}
+                >
+                  <Film className="w-4 h-4" />
+                  <span>Media Gallery</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActiveView('shares');
+                    setMobileSidebarOpen(false);
+                  }}
+                  className={`w-full px-3 py-2 rounded-xl text-xs font-semibold flex items-center gap-2.5 ${
+                    activeView === 'shares' ? 'bg-blue-600/15 text-blue-400 font-bold' : 'text-zinc-400'
+                  }`}
+                >
+                  <Link2 className="w-4 h-4" />
+                  <span>Shared Links</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActiveView('pricing');
+                    setMobileSidebarOpen(false);
+                  }}
+                  className={`w-full px-3 py-2 rounded-xl text-xs font-semibold flex items-center gap-2.5 ${
+                    activeView === 'pricing' ? 'bg-blue-600/15 text-blue-400 font-bold' : 'text-zinc-400'
+                  }`}
+                >
+                  <Coins className="w-4 h-4" />
+                  <span>Plans &amp; Tokens</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActiveView('trash');
+                    setMobileSidebarOpen(false);
+                  }}
+                  className={`w-full px-3 py-2 rounded-xl text-xs font-semibold flex items-center gap-2.5 ${
+                    activeView === 'trash' ? 'bg-rose-500/15 text-rose-400 font-bold' : 'text-zinc-400'
+                  }`}
+                >
+                  <Trash2 className="w-4 h-4" />
+                  <span>Trash Bin ({totalTrashCount})</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActiveView('settings');
+                    setMobileSidebarOpen(false);
+                  }}
+                  className={`w-full px-3 py-2 rounded-xl text-xs font-semibold flex items-center gap-2.5 ${
+                    activeView === 'settings' ? 'bg-blue-600/15 text-blue-400 font-bold' : 'text-zinc-400'
+                  }`}
+                >
+                  <Settings className="w-4 h-4" />
+                  <span>Settings &amp; Offline</span>
+                </button>
+              </nav>
+            </div>
+
+            <div className="pt-2 border-t border-[#1F212D]">
+              <div className="text-[11px] text-zinc-400">
+                Storage: {formatBytes(totalStorageBytes)} of {isUnlimitedAdmin ? 'Unlimited' : formatBytes(quotaLimitBytes)}
               </div>
             </div>
-          </div>
-
-          <div className="hidden md:flex flex-wrap items-center justify-end gap-2 shrink-0">
-            <button
-              onClick={() => setShowBuyTokensModal(true)}
-              className="min-h-[38px] px-3.5 py-1.5 rounded-xl text-xs font-semibold bg-[#24211D] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center gap-1.5 cursor-pointer"
-            >
-              <Coins className="w-3.5 h-3.5 text-[#D97757]" />
-              <span className="tabular-nums">{tokenBalance.toLocaleString()} Tokens</span>
-              <span className="text-[#D97757] font-bold ml-1">+ Buy</span>
-            </button>
-
-            {!firebaseUser ? (
-              <button
-                onClick={handleGoogleSignIn}
-                disabled={signingInGoogle}
-                className="min-h-[38px] px-3.5 py-1.5 rounded-xl text-xs font-bold bg-[#D97757] text-[#141311] hover:bg-[#E08568] flex items-center gap-1.5 cursor-pointer"
-              >
-                <LogIn className="w-3.5 h-3.5" />
-                {signingInGoogle ? 'Signing in...' : 'Google Sign In'}
-              </button>
-            ) : null}
-
-            {currentUser && (
-              <button
-                onClick={() => setShowAuthModal(true)}
-                className="min-h-[38px] px-3.5 py-1.5 rounded-xl text-xs font-medium bg-[#24211D] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center gap-1.5 shrink-0 cursor-pointer"
-              >
-                <UserIcon className="w-3.5 h-3.5 text-[#D97757]" />
-                <span className="max-w-[130px] truncate">{currentUser.name}</span>
-              </button>
-            )}
           </div>
         </div>
+      )}
 
-        {/* LIVE FILE UPLOAD PROGRESS BAR (Determinate 0% -> 100% + Cancel Button) */}
-        {(uploadProgress || postUploadProcessing || activeStreamingJobs.length > 0) && (
-          <div className="p-4 bg-[#1C1A17] border border-[#D97757] space-y-3">
-            {uploadProgress && !postUploadProcessing && (
-              <div className="space-y-2">
-                <div className="flex flex-wrap items-center justify-between gap-2 text-xs tabular-nums">
-                  <span className="font-bold text-[#F2EFE9] truncate">
-                    {uploadPaused ? 'Paused Upload: ' : 'Uploading: '}
-                    {uploadProgress.fileName}
-                  </span>
-                  <div className="flex flex-wrap items-center gap-2 shrink-0">
-                    <span className="text-[#D97757] font-bold">
-                      {uploadProgress.percent}% · {formatBytes(uploadProgress.loadedBytes)} /{' '}
-                      {formatBytes(uploadProgress.totalBytes)} ·{' '}
-                      {uploadPaused ? 'Paused' : formatSpeed(uploadProgress.speedBps)}
+      {/* ====================================================================
+          3. MAIN CONTENT WORKSPACE (Header + Explorer / Views)
+      ==================================================================== */}
+      <div className="flex-1 min-w-0 flex flex-col h-screen overflow-y-auto bg-[#0A0B0E]">
+        {/* Top Header Bar */}
+        <header className="sticky top-0 z-20 h-16 px-4 sm:px-6 bg-[#0A0B0E]/90 backdrop-blur-md border-b border-[#1A1C24] flex items-center justify-between gap-3 sm:gap-4 shrink-0">
+          {/* Left: Hamburger on Mobile + Search Bar */}
+          <div className="flex items-center gap-3 flex-1 min-w-0 max-w-xl">
+            <button
+              type="button"
+              onClick={() => setMobileSidebarOpen(true)}
+              className="md:hidden w-9 h-9 rounded-xl bg-[#14151D] border border-[#212330] text-zinc-400 hover:text-white flex items-center justify-center shrink-0 cursor-pointer"
+              aria-label="Open navigation menu"
+            >
+              <Menu className="w-4 h-4" />
+            </button>
+
+            <div ref={searchContainerRef} className="relative flex-1 min-w-0">
+              <Search className="w-4 h-4 text-zinc-500 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+              <input
+                ref={searchInputRef}
+                type="text"
+                value={searchQuery}
+                onFocus={() => setShowSearchHistory(true)}
+                onChange={(e) => {
+                  setSearchQuery(e.target.value);
+                  setShowSearchHistory(true);
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && searchQuery.trim().length >= 2) {
+                    saveSearchQueryToHistory(searchQuery.trim());
+                    setShowSearchHistory(false);
+                  }
+                }}
+                placeholder="Search in Drive..."
+                className="w-full h-10 rounded-xl bg-[#14151D] border border-[#212330] pl-10 pr-9 text-xs sm:text-sm text-[#F3F4F6] placeholder-zinc-500 focus:outline-none focus:border-blue-500 transition-colors"
+              />
+              {searchQuery && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (searchQuery.trim().length >= 2) {
+                      saveSearchQueryToHistory(searchQuery.trim());
+                    }
+                    setSearchQuery('');
+                    searchInputRef.current?.focus();
+                  }}
+                  className="w-6 h-6 rounded-full absolute right-2.5 top-1/2 -translate-y-1/2 flex items-center justify-center text-zinc-400 hover:text-white cursor-pointer"
+                  title="Clear search"
+                  aria-label="Clear search"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              )}
+
+              {/* Persistent Search History Dropdown */}
+              {showSearchHistory && searchHistory.length > 0 && (
+                <div className="animate-app-modal absolute left-0 right-0 top-full mt-1.5 z-30 rounded-2xl bg-[#14151D] border border-[#212330] shadow-xl py-1 overflow-hidden">
+                  <div className="px-3.5 py-2 border-b border-[#212330] flex items-center justify-between text-[11px] text-zinc-400">
+                    <span className="font-semibold flex items-center gap-1.5">
+                      <Clock className="w-3 h-3 text-blue-400" />
+                      Recent Searches
                     </span>
                     <button
                       type="button"
-                      onClick={handleTogglePauseUpload}
-                      className="min-h-[32px] px-3 py-1 text-xs font-bold bg-[#24211D] border border-[#D97757] text-[#F2EFE9] hover:bg-[#D97757] hover:text-[#141311] flex items-center gap-1 cursor-pointer"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        clearSearchHistory();
+                      }}
+                      className="text-[11px] text-blue-400 hover:underline cursor-pointer"
                     >
-                      {uploadPaused ? (
-                        <>
-                          <Play className="w-3.5 h-3.5" />
-                          Resume
-                        </>
-                      ) : (
-                        <>
-                          <Pause className="w-3.5 h-3.5" />
-                          Pause
-                        </>
-                      )}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={handleCancelUpload}
-                      className="min-h-[32px] px-3 py-1 text-xs font-bold bg-[#141311] border border-[#D94848] text-[#D94848] hover:bg-[#D94848] hover:text-[#F2EFE9] flex items-center gap-1 cursor-pointer"
-                    >
-                      <X className="w-3.5 h-3.5" />
-                      Cancel
+                      Clear All
                     </button>
                   </div>
-                </div>
-                <div className="h-2.5 w-full bg-[#141311] border border-[#2C2824]">
-                  <div
-                    style={{ width: `${uploadProgress.percent}%` }}
-                    className={`h-full transition-all duration-100 ${
-                      uploadPaused ? 'bg-[#D99B26]' : 'bg-[#D97757]'
-                    }`}
-                  />
-                </div>
-              </div>
-            )}
-
-            {postUploadProcessing && (
-              <div className="space-y-2">
-                <div className="flex items-center justify-between gap-3 text-xs">
-                  <div className="flex items-center gap-2.5 min-w-0">
-                    <Loader2 className="w-4 h-4 text-[#D97757] animate-spin shrink-0" />
-                    <span className="font-bold text-[#F2EFE9] truncate">
-                      Processing: {postUploadProcessing.fileName}
-                    </span>
+                  <div className="max-h-52 overflow-y-auto divide-y divide-[#212330]/50">
+                    {searchHistory.map((item) => (
+                      <div
+                        key={item}
+                        className="flex items-center justify-between px-3.5 py-2 hover:bg-[#1C1E2A] transition-colors group"
+                      >
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setSearchQuery(item);
+                            saveSearchQueryToHistory(item);
+                            setShowSearchHistory(false);
+                          }}
+                          className="flex-1 flex items-center gap-2 text-left text-xs text-zinc-300 group-hover:text-blue-400 truncate cursor-pointer"
+                        >
+                          <Clock className="w-3.5 h-3.5 text-zinc-500 group-hover:text-blue-400 shrink-0" />
+                          <span className="truncate">{item}</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            removeSearchHistoryItem(item);
+                          }}
+                          className="p-1 text-zinc-500 hover:text-rose-400 cursor-pointer shrink-0"
+                          title="Remove from history"
+                        >
+                          <X className="w-3 h-3" />
+                        </button>
+                      </div>
+                    ))}
                   </div>
-                  <span className="text-[#D97757] font-semibold shrink-0">
-                    Please wait...
-                  </span>
                 </div>
-                <div className="h-2 w-full bg-[#141311] border border-[#2C2824] overflow-hidden">
-                  <div className="h-full w-full bg-[#D97757] animate-pulse" />
-                </div>
-              </div>
-            )}
+              )}
+            </div>
+          </div>
 
-            {activeStreamingJobs.map((job) => {
-              const pct =
-                job.totalBytes > 0
-                  ? Math.min(100, Math.round((job.transferredBytes / job.totalBytes) * 100))
-                  : 60;
-              return (
-                <div key={job.id} className="space-y-1.5">
+          {/* Right Header Controls */}
+          <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
+            {/* View Mode Toggle: Grid vs List */}
+            <div className="hidden sm:flex items-center p-0.5 rounded-xl bg-[#14151D] border border-[#212330]">
+              <button
+                type="button"
+                onClick={() => handleChangeLayout('grid')}
+                className={`p-1.5 rounded-lg text-xs font-semibold flex items-center gap-1 transition-colors cursor-pointer ${
+                  explorerLayout === 'grid'
+                    ? 'bg-blue-600 text-white shadow-xs'
+                    : 'text-zinc-400 hover:text-white'
+                }`}
+                title="Grid View"
+              >
+                <LayoutGrid className="w-3.5 h-3.5" />
+              </button>
+              <button
+                type="button"
+                onClick={() => handleChangeLayout('list')}
+                className={`p-1.5 rounded-lg text-xs font-semibold flex items-center gap-1 transition-colors cursor-pointer ${
+                  explorerLayout === 'list'
+                    ? 'bg-blue-600 text-white shadow-xs'
+                    : 'text-zinc-400 hover:text-white'
+                }`}
+                title="List View"
+              >
+                <ListIcon className="w-3.5 h-3.5" />
+              </button>
+            </div>
+
+            {/* Side Trash Bin Icon Button */}
+            <button
+              type="button"
+              onClick={() => setActiveView('trash')}
+              title={`Trash Bin (${totalTrashCount} items)`}
+              aria-label="Open Trash Bin"
+              className={`relative min-h-[36px] min-w-[36px] px-2 py-1.5 rounded-xl border flex items-center justify-center gap-1.5 text-xs font-semibold transition-all cursor-pointer ${
+                activeView === 'trash'
+                  ? 'bg-rose-500/15 border-rose-500/40 text-rose-400'
+                  : 'bg-[#14151D] border-[#212330] text-zinc-400 hover:text-white hover:border-zinc-700'
+              }`}
+            >
+              <Trash2 className="w-4 h-4 shrink-0" />
+              {totalTrashCount > 0 && (
+                <span className="text-[11px] font-bold tabular-nums text-rose-400">{totalTrashCount}</span>
+              )}
+            </button>
+
+            <PWAInstallButton compact />
+
+            {/* Profile Avatar / Login */}
+            {currentUser ? (
+              <button
+                type="button"
+                onClick={() => setShowAuthModal(true)}
+                className="w-9 h-9 rounded-xl bg-[#14151D] hover:bg-[#1E202E] border border-[#212330] text-blue-400 font-bold text-xs flex items-center justify-center cursor-pointer transition-colors"
+                title={currentUser.name}
+              >
+                {currentUser.name.charAt(0).toUpperCase()}
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={handleGoogleSignIn}
+                disabled={signingInGoogle}
+                className="h-9 px-3 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-semibold text-xs flex items-center gap-1.5 cursor-pointer shadow-sm transition-all"
+              >
+                <LogIn className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">Sign In</span>
+              </button>
+            )}
+          </div>
+        </header>
+
+        {/* Main Content Area */}
+        <main className="flex-1 w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-5 sm:py-7 pb-28 md:pb-12 space-y-6 sm:space-y-8">
+          {/* LIVE FILE UPLOAD PROGRESS BAR */}
+          {(uploadProgress || postUploadProcessing || activeStreamingJobs.length > 0) && (
+            <div className="p-4 rounded-2xl bg-[#13141C] border border-blue-500/40 shadow-lg space-y-3">
+              {uploadProgress && !postUploadProcessing && (
+                <div className="space-y-2">
                   <div className="flex flex-wrap items-center justify-between gap-2 text-xs tabular-nums">
-                    <span className="font-semibold text-[#F2EFE9] truncate">{job.fileName}</span>
-                    <div className="flex items-center gap-3 shrink-0">
-                      <span className="text-[#9E978E]">
-                        {pct}% · {formatBytes(job.transferredBytes)} · {formatSpeed(job.speedBps)}
+                    <span className="font-bold text-white truncate">
+                      {uploadPaused ? 'Paused: ' : 'Uploading: '}
+                      {uploadProgress.fileName}
+                    </span>
+                    <div className="flex flex-wrap items-center gap-2 shrink-0">
+                      <span className="text-blue-400 font-bold">
+                        {uploadProgress.percent}% · {formatBytes(uploadProgress.loadedBytes)} /{' '}
+                        {formatBytes(uploadProgress.totalBytes)} ·{' '}
+                        {uploadPaused ? 'Paused' : formatSpeed(uploadProgress.speedBps)}
                       </span>
                       <button
                         type="button"
-                        onClick={() => handleCancelRemoteTransfer(job.id)}
-                        className="min-h-[30px] px-2.5 py-0.5 text-xs font-semibold bg-[#141311] border border-[#D94848] text-[#D94848] hover:bg-[#D94848] hover:text-[#F2EFE9] flex items-center gap-1 cursor-pointer"
+                        onClick={handleTogglePauseUpload}
+                        className="min-h-[28px] px-2.5 py-0.5 text-xs font-semibold rounded-lg bg-[#181A26] border border-[#2B2D3E] text-zinc-200 hover:bg-blue-600 hover:text-white flex items-center gap-1 cursor-pointer"
+                      >
+                        {uploadPaused ? <Play className="w-3 h-3" /> : <Pause className="w-3 h-3" />}
+                        <span>{uploadPaused ? 'Resume' : 'Pause'}</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleCancelUpload}
+                        className="min-h-[28px] px-2.5 py-0.5 text-xs font-semibold rounded-lg bg-rose-500/10 border border-rose-500/30 text-rose-400 hover:bg-rose-500 hover:text-white flex items-center gap-1 cursor-pointer"
                       >
                         <X className="w-3 h-3" />
-                        Cancel
+                        <span>Cancel</span>
                       </button>
                     </div>
                   </div>
-                  <div className="h-2 w-full bg-[#141311] border border-[#2C2824]">
+                  <div className="h-2 w-full rounded-full bg-[#181A26] overflow-hidden">
                     <div
-                      style={{ width: `${pct}%` }}
-                      className="h-full bg-[#D97757] transition-all duration-150"
+                      style={{ width: `${uploadProgress.percent}%` }}
+                      className={`h-full rounded-full transition-all duration-100 ${
+                        uploadPaused ? 'bg-amber-500' : 'bg-blue-500'
+                      }`}
                     />
                   </div>
                 </div>
-              );
-            })}
-          </div>
-        )}
+              )}
 
-        {/* DEDICATED POST-UPLOAD PROCESSING LOADING SCREEN OVERLAY */}
-        {postUploadProcessing && (
-          <div className="fixed inset-0 z-50 bg-black/75 flex items-center justify-center p-4">
-            <div className="w-full max-w-sm bg-[#1C1A17] border border-[#D97757] p-6 space-y-4 text-center shadow-2xl">
-              <div className="w-12 h-12 mx-auto bg-[#24211D] border border-[#2C2824] flex items-center justify-center">
-                <Loader2 className="w-6 h-6 text-[#D97757] animate-spin" />
-              </div>
-              <div className="space-y-1">
-                <div className="text-base font-bold text-[#F2EFE9]">Processing...</div>
-                <p className="text-xs text-[#9E978E] truncate px-2">
-                  {postUploadProcessing.fileName}
-                </p>
-                <p className="text-[11px] text-[#9E978E]">
-                  Finalizing your file for instant cloud access...
-                </p>
-              </div>
-              <div className="h-2 w-full bg-[#141311] border border-[#2C2824] overflow-hidden">
-                <div className="h-full w-full bg-[#D97757] animate-pulse" />
+              {postUploadProcessing && (
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between gap-3 text-xs">
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <Loader2 className="w-4 h-4 text-blue-400 animate-spin shrink-0" />
+                      <span className="font-bold text-white truncate">
+                        Processing: {postUploadProcessing.fileName}
+                      </span>
+                    </div>
+                    <span className="text-blue-400 font-semibold shrink-0">Please wait...</span>
+                  </div>
+                  <div className="h-1.5 w-full rounded-full bg-[#181A26] overflow-hidden">
+                    <div className="h-full w-full bg-blue-500 animate-pulse" />
+                  </div>
+                </div>
+              )}
+
+              {activeStreamingJobs.map((job) => {
+                const pct =
+                  job.totalBytes > 0
+                    ? Math.min(100, Math.round((job.transferredBytes / job.totalBytes) * 100))
+                    : 60;
+                return (
+                  <div key={job.id} className="space-y-1.5">
+                    <div className="flex flex-wrap items-center justify-between gap-2 text-xs tabular-nums">
+                      <span className="font-semibold text-white truncate">{job.fileName}</span>
+                      <div className="flex items-center gap-3 shrink-0">
+                        <span className="text-zinc-400">
+                          {pct}% · {formatBytes(job.transferredBytes)} · {formatSpeed(job.speedBps)}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => handleCancelRemoteTransfer(job.id)}
+                          className="min-h-[26px] px-2 py-0.5 text-[11px] font-semibold rounded-md bg-rose-500/10 border border-rose-500/30 text-rose-400 hover:bg-rose-500 hover:text-white flex items-center gap-1 cursor-pointer"
+                        >
+                          <X className="w-3 h-3" />
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                    <div className="h-1.5 w-full rounded-full bg-[#181A26] overflow-hidden">
+                      <div
+                        style={{ width: `${pct}%` }}
+                        className="h-full rounded-full bg-blue-500 transition-all duration-150"
+                      />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {/* DEDICATED POST-UPLOAD PROCESSING LOADING SCREEN OVERLAY */}
+          {postUploadProcessing && (
+            <div className="fixed inset-0 z-50 bg-black/75 flex items-center justify-center p-4">
+              <div className="w-full max-w-sm bg-[#13141C] border border-blue-500/40 p-6 rounded-2xl space-y-4 text-center shadow-2xl">
+                <div className="w-12 h-12 mx-auto rounded-xl bg-blue-500/10 border border-blue-500/30 flex items-center justify-center">
+                  <Loader2 className="w-6 h-6 text-blue-400 animate-spin" />
+                </div>
+                <div className="space-y-1">
+                  <div className="text-base font-bold text-white">Processing...</div>
+                  <p className="text-xs text-zinc-400 truncate px-2">
+                    {postUploadProcessing.fileName}
+                  </p>
+                  <p className="text-[11px] text-zinc-500">
+                    Finalizing your file for instant cloud access...
+                  </p>
+                </div>
+                <div className="h-1.5 w-full rounded-full bg-[#181A26] overflow-hidden">
+                  <div className="h-full w-full bg-blue-500 animate-pulse" />
+                </div>
               </div>
             </div>
-          </div>
-        )}
+          )}
 
-        {/* ==================================================================
-            VIEW 1: MY FILES
-        ================================================================== */}
-        {activeView === 'explorer' && (
-          <div className="animate-app-view space-y-4 sm:space-y-5">
-            {/* Expired Plan / Over-25GB Lock Warning Banner */}
-            {lockedFilesCount > 0 && (
-              <div className="p-3.5 sm:p-4 rounded-2xl bg-[#1C1A17] border border-[#D99B26] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                <div className="flex items-center gap-2.5 text-xs">
-                  <Lock className="w-4 h-4 text-[#D99B26] shrink-0" />
-                  <span>
-                    <strong className="text-[#F2EFE9]">
-                      {lockedFilesCount} file(s) over your 25 GB Free limit are locked
-                    </strong>{' '}
-                    <span className="text-[#9E978E]">
-                      (3-month grace period active — extend your plan to unlock before auto-clear).
+          {/* ==================================================================
+              VIEW 1: MY FILES / EXPLORER
+          ================================================================== */}
+          {activeView === 'explorer' && (
+            <div className="animate-app-view space-y-6 sm:space-y-7">
+              {/* Expired Plan / Over-25GB Lock Warning Banner */}
+              {lockedFilesCount > 0 && (
+                <div className="p-4 rounded-2xl bg-[#1C1710] border border-amber-500/40 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div className="flex items-center gap-2.5 text-xs text-amber-300">
+                    <Lock className="w-4 h-4 text-amber-400 shrink-0" />
+                    <span>
+                      <strong className="text-white">
+                        {lockedFilesCount} file(s) over your 25 GB limit are locked
+                      </strong>{' '}
+                      <span className="text-zinc-400">
+                        (Extend your plan to unlock before auto-clear).
+                      </span>
                     </span>
-                  </span>
+                  </div>
+                  <button
+                    onClick={() => setActiveView('pricing')}
+                    className="h-9 px-4 rounded-xl text-xs font-bold bg-amber-500 text-black hover:bg-amber-400 shrink-0 cursor-pointer"
+                  >
+                    Extend Plan with Tokens
+                  </button>
                 </div>
+              )}
+
+              {/* ==============================================================
+                  THE 4 CATEGORY OVERVIEW CARDS (Iconic StackDrive Dashboard Feature)
+              ============================================================== */}
+              <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
+                {/* 1. Images */}
                 <button
-                  onClick={() => setActiveView('pricing')}
-                  className="min-h-[38px] px-4 py-1.5 rounded-xl text-xs font-bold bg-[#D97757] text-[#141311] shrink-0 cursor-pointer"
+                  type="button"
+                  onClick={() =>
+                    setSelectedCategoryFilter((prev) => (prev === 'image' ? 'all' : 'image'))
+                  }
+                  className={`p-4 rounded-2xl border text-left transition-all duration-200 cursor-pointer ${
+                    selectedCategoryFilter === 'image'
+                      ? 'bg-blue-950/40 border-blue-500 shadow-lg shadow-blue-500/10 ring-1 ring-blue-500/50'
+                      : 'bg-[#13141C] border-[#212330] hover:bg-[#181926] hover:border-blue-500/40'
+                  }`}
                 >
-                  Extend Plan with Tokens
+                  <div className="flex items-center justify-between mb-3">
+                    <div className="w-10 h-10 rounded-xl bg-blue-500/15 border border-blue-500/30 flex items-center justify-center text-blue-400">
+                      <ImageIcon className="w-5 h-5" />
+                    </div>
+                    <span className="text-[11px] font-semibold text-zinc-400">
+                      {categoryStats.image.count} Files
+                    </span>
+                  </div>
+                  <div className="space-y-1">
+                    <div className="text-sm font-bold text-white">Images</div>
+                    <div className="text-xs text-zinc-400 font-medium">
+                      {formatBytes(categoryStats.image.bytes)}
+                    </div>
+                  </div>
+                  <div className="mt-3 h-1.5 w-full rounded-full bg-[#1C1E2A] overflow-hidden">
+                    <div
+                      style={{
+                        width: `${
+                          totalStorageBytes > 0
+                            ? Math.min(100, Math.max(4, Math.round((categoryStats.image.bytes / totalStorageBytes) * 100)))
+                            : 0
+                        }%`,
+                      }}
+                      className="h-full rounded-full bg-blue-500"
+                    />
+                  </div>
+                </button>
+
+                {/* 2. Videos */}
+                <button
+                  type="button"
+                  onClick={() =>
+                    setSelectedCategoryFilter((prev) => (prev === 'video' ? 'all' : 'video'))
+                  }
+                  className={`p-4 rounded-2xl border text-left transition-all duration-200 cursor-pointer ${
+                    selectedCategoryFilter === 'video'
+                      ? 'bg-purple-950/40 border-purple-500 shadow-lg shadow-purple-500/10 ring-1 ring-purple-500/50'
+                      : 'bg-[#13141C] border-[#212330] hover:bg-[#181926] hover:border-purple-500/40'
+                  }`}
+                >
+                  <div className="flex items-center justify-between mb-3">
+                    <div className="w-10 h-10 rounded-xl bg-purple-500/15 border border-purple-500/30 flex items-center justify-center text-purple-400">
+                      <Film className="w-5 h-5" />
+                    </div>
+                    <span className="text-[11px] font-semibold text-zinc-400">
+                      {categoryStats.video.count} Files
+                    </span>
+                  </div>
+                  <div className="space-y-1">
+                    <div className="text-sm font-bold text-white">Videos</div>
+                    <div className="text-xs text-zinc-400 font-medium">
+                      {formatBytes(categoryStats.video.bytes)}
+                    </div>
+                  </div>
+                  <div className="mt-3 h-1.5 w-full rounded-full bg-[#1C1E2A] overflow-hidden">
+                    <div
+                      style={{
+                        width: `${
+                          totalStorageBytes > 0
+                            ? Math.min(100, Math.max(4, Math.round((categoryStats.video.bytes / totalStorageBytes) * 100)))
+                            : 0
+                        }%`,
+                      }}
+                      className="h-full rounded-full bg-purple-500"
+                    />
+                  </div>
+                </button>
+
+                {/* 3. Documents */}
+                <button
+                  type="button"
+                  onClick={() =>
+                    setSelectedCategoryFilter((prev) => (prev === 'document' ? 'all' : 'document'))
+                  }
+                  className={`p-4 rounded-2xl border text-left transition-all duration-200 cursor-pointer ${
+                    selectedCategoryFilter === 'document'
+                      ? 'bg-amber-950/40 border-amber-500 shadow-lg shadow-amber-500/10 ring-1 ring-amber-500/50'
+                      : 'bg-[#13141C] border-[#212330] hover:bg-[#181926] hover:border-amber-500/40'
+                  }`}
+                >
+                  <div className="flex items-center justify-between mb-3">
+                    <div className="w-10 h-10 rounded-xl bg-amber-500/15 border border-amber-500/30 flex items-center justify-center text-amber-400">
+                      <FileText className="w-5 h-5" />
+                    </div>
+                    <span className="text-[11px] font-semibold text-zinc-400">
+                      {categoryStats.document.count} Files
+                    </span>
+                  </div>
+                  <div className="space-y-1">
+                    <div className="text-sm font-bold text-white">Documents</div>
+                    <div className="text-xs text-zinc-400 font-medium">
+                      {formatBytes(categoryStats.document.bytes)}
+                    </div>
+                  </div>
+                  <div className="mt-3 h-1.5 w-full rounded-full bg-[#1C1E2A] overflow-hidden">
+                    <div
+                      style={{
+                        width: `${
+                          totalStorageBytes > 0
+                            ? Math.min(100, Math.max(4, Math.round((categoryStats.document.bytes / totalStorageBytes) * 100)))
+                            : 0
+                        }%`,
+                      }}
+                      className="h-full rounded-full bg-amber-500"
+                    />
+                  </div>
+                </button>
+
+                {/* 4. Others */}
+                <button
+                  type="button"
+                  onClick={() =>
+                    setSelectedCategoryFilter((prev) => (prev === 'other' ? 'all' : 'other'))
+                  }
+                  className={`p-4 rounded-2xl border text-left transition-all duration-200 cursor-pointer ${
+                    selectedCategoryFilter === 'other'
+                      ? 'bg-emerald-950/40 border-emerald-500 shadow-lg shadow-emerald-500/10 ring-1 ring-emerald-500/50'
+                      : 'bg-[#13141C] border-[#212330] hover:bg-[#181926] hover:border-emerald-500/40'
+                  }`}
+                >
+                  <div className="flex items-center justify-between mb-3">
+                    <div className="w-10 h-10 rounded-xl bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-center text-emerald-400">
+                      <FolderArchive className="w-5 h-5" />
+                    </div>
+                    <span className="text-[11px] font-semibold text-zinc-400">
+                      {categoryStats.other.count} Files
+                    </span>
+                  </div>
+                  <div className="space-y-1">
+                    <div className="text-sm font-bold text-white">Others</div>
+                    <div className="text-xs text-zinc-400 font-medium">
+                      {formatBytes(categoryStats.other.bytes)}
+                    </div>
+                  </div>
+                  <div className="mt-3 h-1.5 w-full rounded-full bg-[#1C1E2A] overflow-hidden">
+                    <div
+                      style={{
+                        width: `${
+                          totalStorageBytes > 0
+                            ? Math.min(100, Math.max(4, Math.round((categoryStats.other.bytes / totalStorageBytes) * 100)))
+                            : 0
+                        }%`,
+                      }}
+                      className="h-full rounded-full bg-emerald-500"
+                    />
+                  </div>
                 </button>
               </div>
-            )}
 
-            {/* Clean App Search Bar + Desktop Actions */}
-            <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
-              {/* Search Bar (First on Mobile like Google Drive / Apple Files, Right on Desktop) */}
-              <div ref={searchContainerRef} className="relative w-full md:w-80 md:order-2">
-                <Search className="w-4 h-4 text-[#9E978E] absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
-                <input
-                  ref={searchInputRef}
-                  type="text"
-                  value={searchQuery}
-                  onFocus={() => setShowSearchHistory(true)}
-                  onChange={(e) => {
-                    setSearchQuery(e.target.value);
-                    setShowSearchHistory(true);
-                  }}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' && searchQuery.trim().length >= 2) {
-                      saveSearchQueryToHistory(searchQuery.trim());
-                      setShowSearchHistory(false);
-                    }
-                  }}
-                  placeholder="Search files, folders, or labels..."
-                  className="w-full min-h-[44px] rounded-2xl bg-[#1C1A17] border border-[#2C2824] shadow-2xs pl-10 pr-9 py-2.5 text-xs sm:text-sm text-[#F2EFE9] focus:outline-none focus:border-[#D97757]"
-                />
-                {searchQuery && (
+              {/* Active Category Filter Reset Strip */}
+              {selectedCategoryFilter !== 'all' && (
+                <div className="flex items-center justify-between p-3 rounded-xl bg-[#14151E] border border-blue-500/30 text-xs">
+                  <div className="flex items-center gap-2 text-zinc-300">
+                    <span className="text-zinc-500">Filtered view:</span>
+                    <strong className="text-blue-400 capitalize">{selectedCategoryFilter}s</strong>
+                    <span className="text-zinc-500">({visibleFiles.length} files)</span>
+                  </div>
                   <button
                     type="button"
-                    onClick={() => {
-                      if (searchQuery.trim().length >= 2) {
-                        saveSearchQueryToHistory(searchQuery.trim());
-                      }
-                      setSearchQuery('');
-                      searchInputRef.current?.focus();
-                    }}
-                    className="w-7 h-7 rounded-full absolute right-2 top-1/2 -translate-y-1/2 flex items-center justify-center text-[#9E978E] hover:text-[#F2EFE9] cursor-pointer"
-                    title="Clear search"
-                    aria-label="Clear search"
+                    onClick={() => setSelectedCategoryFilter('all')}
+                    className="text-xs text-blue-400 hover:text-blue-300 hover:underline flex items-center gap-1 cursor-pointer"
                   >
                     <X className="w-3.5 h-3.5" />
+                    <span>Clear Filter</span>
                   </button>
-                )}
+                </div>
+              )}
 
-                {/* Persistent Search History Dropdown */}
-                {showSearchHistory && searchHistory.length > 0 && (
-                  <div className="animate-app-modal absolute left-0 right-0 top-full mt-1.5 z-30 rounded-2xl bg-[#1C1A17] border border-[#2C2824] shadow-xl py-1 overflow-hidden">
-                    <div className="px-3.5 py-2 border-b border-[#2C2824] flex items-center justify-between text-[11px] text-[#9E978E]">
-                      <span className="font-semibold flex items-center gap-1.5">
-                        <Clock className="w-3 h-3 text-[#D97757]" />
-                        Recent Searches
+              {/* ==============================================================
+                  SUGGESTED / RECENT FILES ROW (Direct from user reference image)
+              ============================================================== */}
+              {recentSuggestedFiles.length > 0 &&
+                selectedCategoryFilter === 'all' &&
+                !searchQuery.trim() &&
+                !selectedTagFilter &&
+                !onlyStarred &&
+                !onlyOffline && (
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between">
+                      <h2 className="text-xs font-bold text-zinc-400 uppercase tracking-wider">
+                        Suggested Files
+                      </h2>
+                      <span className="text-[11px] text-zinc-500">
+                        Quick access to recently active files
                       </span>
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          clearSearchHistory();
-                        }}
-                        className="text-[11px] text-[#D97757] hover:underline cursor-pointer"
-                      >
-                        Clear All
-                      </button>
                     </div>
-                    <div className="max-h-52 overflow-y-auto divide-y divide-[#2C2824]/50">
-                      {searchHistory.map((item) => (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
+                      {recentSuggestedFiles.map((file) => (
                         <div
-                          key={item}
-                          className="flex items-center justify-between px-3.5 py-2.5 hover:bg-[#24211D] transition-colors group"
+                          key={`sugg_${file.id}`}
+                          onClick={() => {
+                            if (file.lockedOverQuota) {
+                              setActiveView('pricing');
+                            } else {
+                              setInspectedFile(file);
+                            }
+                          }}
+                          className="group p-3.5 rounded-2xl bg-[#13141C] border border-[#212330] hover:border-blue-500/50 hover:bg-[#181926] transition-all cursor-pointer space-y-3"
                         >
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setSearchQuery(item);
-                              saveSearchQueryToHistory(item);
-                              setShowSearchHistory(false);
-                            }}
-                            className="flex-1 flex items-center gap-2 text-left text-xs text-[#F2EFE9] group-hover:text-[#D97757] truncate cursor-pointer"
-                          >
-                            <Clock className="w-3.5 h-3.5 text-[#9E978E] group-hover:text-[#D97757] shrink-0" />
-                            <span className="truncate">{item}</span>
-                          </button>
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              removeSearchHistoryItem(item);
-                            }}
-                            className="p-1 text-[#9E978E] hover:text-[#D94848] cursor-pointer shrink-0"
-                            title="Remove from history"
-                            aria-label={`Remove ${item} from search history`}
-                          >
-                            <X className="w-3 h-3" />
-                          </button>
+                          <div className="h-28 w-full rounded-xl bg-[#181A25] border border-[#242636] flex items-center justify-center overflow-hidden relative">
+                            {file.previewDataUrl && file.mimeType.startsWith('image/') ? (
+                              <img
+                                src={file.previewDataUrl}
+                                alt={file.name}
+                                className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                              />
+                            ) : file.mimeType.startsWith('video/') ? (
+                              <div className="flex flex-col items-center justify-center gap-1.5 text-purple-400">
+                                <div className="w-9 h-9 rounded-full bg-purple-500/20 border border-purple-500/40 flex items-center justify-center">
+                                  <Play className="w-4 h-4 ml-0.5 fill-purple-400" />
+                                </div>
+                                <span className="text-[10px] text-zinc-400 font-medium">Video</span>
+                              </div>
+                            ) : (
+                              <div className="flex flex-col items-center justify-center gap-1">
+                                {renderFileIcon(file)}
+                                <span className="text-[10px] text-zinc-500 uppercase tracking-wider font-semibold">
+                                  {file.name.split('.').pop() || 'FILE'}
+                                </span>
+                              </div>
+                            )}
+                            {file.starred && (
+                              <div className="absolute top-2 right-2 w-5 h-5 rounded-md bg-amber-500/20 border border-amber-500/30 flex items-center justify-center">
+                                <Star className="w-3 h-3 text-amber-400 fill-amber-400" />
+                              </div>
+                            )}
+                          </div>
+                          <div className="min-w-0">
+                            <div className="text-xs font-bold text-white group-hover:text-blue-400 truncate transition-colors">
+                              {file.name}
+                            </div>
+                            <div className="flex items-center justify-between text-[11px] text-zinc-500 mt-1 tabular-nums">
+                              <span>{formatBytes(file.sizeBytes)}</span>
+                              <span>{formatShortDate(file.updatedAt)}</span>
+                            </div>
+                          </div>
                         </div>
                       ))}
                     </div>
                   </div>
                 )}
-              </div>
 
-              {/* Desktop Action Toolbar (Hidden on mobile because mobile has the floating '+' sheet & horizontal chip rail) */}
-              <div className="hidden md:flex flex-wrap items-center gap-2 md:order-1">
+              {/* Action Toolbar on Mobile (Upload & New Folder buttons) */}
+              <div className="flex md:hidden flex-wrap items-center gap-2">
                 <button
                   onClick={() => fileInputRef.current?.click()}
-                  className="min-h-[42px] rounded-xl flex items-center justify-center gap-2 px-4 py-2 text-xs font-bold bg-[#D97757] text-[#141311] hover:bg-[#E08568] shadow-xs cursor-pointer"
+                  className="min-h-[38px] rounded-xl flex items-center justify-center gap-1.5 px-3.5 py-1.5 text-xs font-bold bg-blue-600 text-white shadow-xs cursor-pointer"
                 >
-                  <Upload className="w-4 h-4 shrink-0" />
-                  <span>Upload Files</span>
+                  <Upload className="w-3.5 h-3.5 shrink-0" />
+                  <span>Upload</span>
                 </button>
-
-                <button
-                  onClick={() => setShowRemoteModal(true)}
-                  className="min-h-[42px] rounded-xl flex items-center justify-center gap-2 px-3.5 py-2 text-xs font-semibold bg-[#1C1A17] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] cursor-pointer"
-                >
-                  <Globe className="w-4 h-4 text-[#D97757] shrink-0" />
-                  <span>Upload URL</span>
-                </button>
-
                 <button
                   onClick={() => setCreatingFolder((prev) => !prev)}
-                  className="min-h-[42px] rounded-xl flex items-center justify-center gap-2 px-3.5 py-2 text-xs font-semibold bg-[#1C1A17] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] cursor-pointer"
+                  className="min-h-[38px] rounded-xl flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-[#13141C] border border-[#212330] text-zinc-300 cursor-pointer"
                 >
-                  <FolderPlus className="w-4 h-4 text-[#D97757] shrink-0" />
+                  <FolderPlus className="w-3.5 h-3.5 text-blue-400 shrink-0" />
                   <span>New Folder</span>
                 </button>
-
-                <button
-                  onClick={() => setOnlyStarred((prev) => !prev)}
-                  className={`min-h-[42px] rounded-xl flex items-center justify-center gap-1.5 px-3.5 py-2 text-xs font-semibold border cursor-pointer ${
-                    onlyStarred
-                      ? 'bg-[#24211D] border-[#D97757] text-[#D97757]'
-                      : 'bg-[#1C1A17] border-[#2C2824] text-[#9E978E] hover:text-[#F2EFE9]'
-                  }`}
-                >
-                  <Star className="w-4 h-4 shrink-0" fill={onlyStarred ? '#D97757' : 'none'} />
-                  <span>Starred</span>
-                </button>
               </div>
-            </div>
 
-            {/* Single-Row Swipeable Filter & Quick Action Rail (Replaces cluttered mobile boxes) */}
-            <div className="no-scrollbar flex items-center gap-2 overflow-x-auto py-0.5">
-              <button
-                type="button"
-                onClick={() => {
-                  setSelectedTagFilter(null);
-                  setOnlyStarred(false);
-                  setOnlyOffline(false);
-                }}
-                className={`min-h-[34px] px-3.5 py-1.5 rounded-xl text-xs font-semibold border whitespace-nowrap shrink-0 transition-all cursor-pointer ${
-                  selectedTagFilter === null && !onlyStarred && !onlyOffline
-                    ? 'bg-[#D97757] border-[#D97757] text-[#141311] shadow-2xs'
-                    : 'bg-[#1C1A17] border-[#2C2824] text-[#9E978E] hover:border-[#D97757] hover:text-[#F2EFE9]'
-                }`}
-              >
-                All Files ({activeFiles.length})
-              </button>
-
-              {/* Mobile Quick Chips: Starred, Offline, New Folder, URL */}
-              <button
-                type="button"
-                onClick={() => setOnlyStarred((prev) => !prev)}
-                className={`md:hidden min-h-[34px] px-3 py-1.5 rounded-xl text-xs font-semibold border whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer ${
-                  onlyStarred
-                    ? 'bg-[#D97757] border-[#D97757] text-[#141311]'
-                    : 'bg-[#1C1A17] border-[#2C2824] text-[#9E978E]'
-                }`}
-              >
-                <Star className="w-3.5 h-3.5 shrink-0" fill={onlyStarred ? 'currentColor' : 'none'} />
-                <span>Starred</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setOnlyOffline((prev) => !prev)}
-                className={`md:hidden min-h-[34px] px-3 py-1.5 rounded-xl text-xs font-semibold border whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer ${
-                  onlyOffline
-                    ? 'bg-[#2E9E6B] border-[#2E9E6B] text-[#141311]'
-                    : 'bg-[#1C1A17] border-[#2C2824] text-[#9E978E]'
-                }`}
-              >
-                <Smartphone className="w-3.5 h-3.5 shrink-0" />
-                <span>Offline ({Object.keys(offlineFilesMap).length})</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setCreatingFolder((prev) => !prev)}
-                className="md:hidden min-h-[34px] px-3 py-1.5 rounded-xl text-xs font-semibold bg-[#1C1A17] border border-[#2C2824] text-[#F2EFE9] whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer"
-              >
-                <FolderPlus className="w-3.5 h-3.5 text-[#D97757] shrink-0" />
-                <span>New Folder</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setShowRemoteModal(true)}
-                className="md:hidden min-h-[34px] px-3 py-1.5 rounded-xl text-xs font-semibold bg-[#1C1A17] border border-[#2C2824] text-[#F2EFE9] whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer"
-              >
-                <Globe className="w-3.5 h-3.5 text-[#D97757] shrink-0" />
-                <span>Web URL</span>
-              </button>
-
-              {/* Custom Label / Tag Filter Chips */}
-              {allFilterTags.map((tagItem) => {
-                const isActive =
-                  selectedTagFilter?.toLowerCase() === tagItem.label.toLowerCase();
-                return (
-                  <button
-                    key={tagItem.label}
-                    type="button"
-                    onClick={() =>
-                      setSelectedTagFilter(isActive ? null : tagItem.label)
-                    }
-                    className={`min-h-[34px] px-3 py-1.5 rounded-xl text-xs font-semibold border whitespace-nowrap shrink-0 transition-all flex items-center gap-1.5 cursor-pointer ${
-                      isActive
-                        ? 'bg-[#D97757] border-[#D97757] text-[#141311]'
-                        : 'bg-[#1C1A17] border-[#2C2824] text-[#9E978E] hover:border-[#D97757] hover:text-[#F2EFE9]'
-                    }`}
-                  >
-                    <Tag className="w-3 h-3 shrink-0" />
-                    <span>{tagItem.label}</span>
-                    <span
-                      className={`text-[11px] tabular-nums ${
-                        isActive ? 'text-[#141311]/80 font-bold' : 'text-[#9E978E]'
-                      }`}
-                    >
-                      ({tagItem.count})
-                    </span>
-                  </button>
-                );
-              })}
-
-              {selectedTagFilter && (
+              {/* Single-Row Swipeable Filter & Quick Action Rail */}
+              <div className="no-scrollbar flex items-center gap-2 overflow-x-auto py-0.5">
                 <button
                   type="button"
-                  onClick={() => setSelectedTagFilter(null)}
-                  className="min-h-[34px] px-2.5 py-1 text-xs text-[#D97757] hover:underline whitespace-nowrap shrink-0 flex items-center gap-1 cursor-pointer"
+                  onClick={() => {
+                    setSelectedTagFilter(null);
+                    setOnlyStarred(false);
+                    setOnlyOffline(false);
+                    setSelectedCategoryFilter('all');
+                  }}
+                  className={`min-h-[34px] px-3.5 py-1.5 rounded-xl text-xs font-semibold border whitespace-nowrap shrink-0 transition-all cursor-pointer ${
+                    selectedTagFilter === null && !onlyStarred && !onlyOffline && selectedCategoryFilter === 'all'
+                      ? 'bg-blue-600 border-blue-600 text-white shadow-2xs'
+                      : 'bg-[#13141C] border-[#212330] text-zinc-400 hover:border-zinc-700 hover:text-white'
+                  }`}
                 >
-                  <X className="w-3.5 h-3.5" />
-                  <span>Reset</span>
+                  All Files ({activeFiles.length})
                 </button>
-              )}
-            </div>
+
+                <button
+                  type="button"
+                  onClick={() => setOnlyStarred((prev) => !prev)}
+                  className={`min-h-[34px] px-3 py-1.5 rounded-xl text-xs font-semibold border whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer ${
+                    onlyStarred
+                      ? 'bg-amber-500 border-amber-500 text-black font-bold'
+                      : 'bg-[#13141C] border-[#212330] text-zinc-400 hover:text-white'
+                  }`}
+                >
+                  <Star className="w-3.5 h-3.5 shrink-0" fill={onlyStarred ? 'currentColor' : 'none'} />
+                  <span>Starred</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setOnlyOffline((prev) => !prev)}
+                  className={`min-h-[34px] px-3 py-1.5 rounded-xl text-xs font-semibold border whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer ${
+                    onlyOffline
+                      ? 'bg-emerald-500 border-emerald-500 text-black font-bold'
+                      : 'bg-[#13141C] border-[#212330] text-zinc-400 hover:text-white'
+                  }`}
+                >
+                  <Smartphone className="w-3.5 h-3.5 shrink-0" />
+                  <span>Offline ({Object.keys(offlineFilesMap).length})</span>
+                </button>
+
+                {/* Custom Label / Tag Filter Chips */}
+                {allFilterTags.map((tagItem) => {
+                  const isActive =
+                    selectedTagFilter?.toLowerCase() === tagItem.label.toLowerCase();
+                  return (
+                    <button
+                      key={tagItem.label}
+                      type="button"
+                      onClick={() =>
+                        setSelectedTagFilter(isActive ? null : tagItem.label)
+                      }
+                      className={`min-h-[34px] px-3 py-1.5 rounded-xl text-xs font-semibold border whitespace-nowrap shrink-0 transition-all flex items-center gap-1.5 cursor-pointer ${
+                        isActive
+                          ? 'bg-blue-600 border-blue-600 text-white'
+                          : 'bg-[#13141C] border-[#212330] text-zinc-400 hover:border-zinc-700 hover:text-white'
+                      }`}
+                    >
+                      <Tag className="w-3 h-3 shrink-0" />
+                      <span>{tagItem.label}</span>
+                      <span
+                        className={`text-[11px] tabular-nums ${
+                          isActive ? 'text-white/80 font-bold' : 'text-zinc-500'
+                        }`}
+                      >
+                        ({tagItem.count})
+                      </span>
+                    </button>
+                  );
+                })}
+
+                {selectedTagFilter && (
+                  <button
+                    type="button"
+                    onClick={() => setSelectedTagFilter(null)}
+                    className="min-h-[34px] px-2.5 py-1 text-xs text-blue-400 hover:underline whitespace-nowrap shrink-0 flex items-center gap-1 cursor-pointer"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                    <span>Reset</span>
+                  </button>
+                )}
+              </div>
 
             {/* Desktop Batch Actions Bar (Hidden on mobile; mobile uses the bottom selection menu) */}
             {selectedFileIds.length > 0 && (
-              <div className="animate-app-modal hidden md:flex p-3.5 rounded-2xl bg-[#24211D] border border-[#D97757] flex-row items-center justify-between gap-3 shadow-sm">
+              <div className="animate-app-modal hidden md:flex p-3.5 rounded-2xl bg-[#12131C] border border-blue-500/40 flex-row items-center justify-between gap-3 shadow-xl">
                 <div className="flex items-center gap-2.5 text-xs">
-                  <CheckSquare className="w-4 h-4 text-[#D97757] shrink-0" />
-                  <span className="font-bold text-[#F2EFE9]">
+                  <CheckSquare className="w-4 h-4 text-blue-400 shrink-0" />
+                  <span className="font-bold text-white">
                     {selectedFileIds.length}{' '}
                     {selectedFileIds.length === 1 ? 'file' : 'files'} selected
                   </span>
-                  <span className="text-[#9E978E] tabular-nums">
+                  <span className="text-zinc-400 tabular-nums">
                     ({formatBytes(selectedTotalBytes)})
                   </span>
                 </div>
@@ -4038,9 +4641,9 @@ export default function App() {
                         setShareModalFile(selectedFilesObjects[0]);
                       }
                     }}
-                    className="min-h-[38px] px-3 py-1.5 rounded-xl text-xs font-semibold bg-[#1C1A17] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center justify-center gap-1.5 cursor-pointer"
+                    className="min-h-[38px] px-3 py-1.5 rounded-xl text-xs font-semibold bg-[#181A26] border border-[#212330] hover:border-blue-500 text-white flex items-center justify-center gap-1.5 cursor-pointer transition-colors"
                   >
-                    <Link2 className="w-3.5 h-3.5 text-[#D97757]" />
+                    <Link2 className="w-3.5 h-3.5 text-blue-400" />
                     <span>Share</span>
                   </button>
 
@@ -4051,14 +4654,14 @@ export default function App() {
                         void handleToggleStar(f);
                       });
                     }}
-                    className="min-h-[38px] px-3 py-1.5 rounded-xl text-xs font-semibold bg-[#1C1A17] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center justify-center gap-1.5 cursor-pointer"
+                    className="min-h-[38px] px-3 py-1.5 rounded-xl text-xs font-semibold bg-[#181A26] border border-[#212330] hover:border-blue-500 text-white flex items-center justify-center gap-1.5 cursor-pointer transition-colors"
                   >
                     <Star
-                      className="w-3.5 h-3.5 text-[#D97757]"
+                      className="w-3.5 h-3.5 text-amber-400"
                       fill={
                         selectedFilesObjects.length > 0 &&
                         selectedFilesObjects.every((f) => f.starred)
-                          ? '#D97757'
+                          ? 'currentColor'
                           : 'none'
                       }
                     />
@@ -4073,9 +4676,9 @@ export default function App() {
                   <button
                     type="button"
                     onClick={() => setTagModalFiles(selectedFilesObjects)}
-                    className="min-h-[38px] px-3 py-1.5 rounded-xl text-xs font-semibold bg-[#1C1A17] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center justify-center gap-1.5 cursor-pointer"
+                    className="min-h-[38px] px-3 py-1.5 rounded-xl text-xs font-semibold bg-[#181A26] border border-[#212330] hover:border-blue-500 text-white flex items-center justify-center gap-1.5 cursor-pointer transition-colors"
                   >
-                    <Tag className="w-3.5 h-3.5 text-[#D97757]" />
+                    <Tag className="w-3.5 h-3.5 text-blue-400" />
                     <span>Label</span>
                   </button>
 
@@ -4085,9 +4688,9 @@ export default function App() {
                       setMoveModalMode('move');
                       setBatchMoveFiles(selectedFilesObjects);
                     }}
-                    className="min-h-[38px] px-3 py-1.5 rounded-xl text-xs font-semibold bg-[#1C1A17] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center justify-center gap-1.5 cursor-pointer"
+                    className="min-h-[38px] px-3 py-1.5 rounded-xl text-xs font-semibold bg-[#181A26] border border-[#212330] hover:border-blue-500 text-white flex items-center justify-center gap-1.5 cursor-pointer transition-colors"
                   >
-                    <FolderInput className="w-3.5 h-3.5 text-[#D97757]" />
+                    <FolderInput className="w-3.5 h-3.5 text-blue-400" />
                     <span>Move</span>
                   </button>
 
@@ -4097,9 +4700,9 @@ export default function App() {
                       setMoveModalMode('copy');
                       setBatchMoveFiles(selectedFilesObjects);
                     }}
-                    className="min-h-[38px] px-3 py-1.5 rounded-xl text-xs font-semibold bg-[#1C1A17] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center justify-center gap-1.5 cursor-pointer"
+                    className="min-h-[38px] px-3 py-1.5 rounded-xl text-xs font-semibold bg-[#181A26] border border-[#212330] hover:border-blue-500 text-white flex items-center justify-center gap-1.5 cursor-pointer transition-colors"
                   >
-                    <Copy className="w-3.5 h-3.5 text-[#D97757]" />
+                    <Copy className="w-3.5 h-3.5 text-blue-400" />
                     <span>Copy</span>
                   </button>
 
@@ -4107,7 +4710,7 @@ export default function App() {
                     type="button"
                     disabled={zipDownloading}
                     onClick={handleBatchZipDownload}
-                    className="min-h-[38px] px-3 py-1.5 rounded-xl text-xs font-bold bg-[#1C1A17] border border-[#D97757] text-[#D97757] hover:bg-[#D97757] hover:text-[#141311] disabled:opacity-50 flex items-center justify-center gap-1.5 cursor-pointer"
+                    className="min-h-[38px] px-3 py-1.5 rounded-xl text-xs font-bold bg-[#181A26] border border-blue-500/50 text-blue-400 hover:bg-blue-600 hover:text-white disabled:opacity-50 flex items-center justify-center gap-1.5 cursor-pointer transition-colors"
                   >
                     {zipDownloading ? (
                       <>
@@ -4125,7 +4728,7 @@ export default function App() {
                   <button
                     type="button"
                     onClick={handleBatchDownload}
-                    className="min-h-[38px] px-3 py-1.5 rounded-xl text-xs font-bold bg-[#D97757] text-[#141311] hover:bg-[#E08568] flex items-center justify-center gap-1.5 cursor-pointer"
+                    className="min-h-[38px] px-3 py-1.5 rounded-xl text-xs font-bold bg-blue-600 text-white hover:bg-blue-500 flex items-center justify-center gap-1.5 cursor-pointer shadow-md shadow-blue-600/20 transition-all"
                   >
                     <Download className="w-3.5 h-3.5" />
                     <span>Download ({selectedFileIds.length})</span>
@@ -4142,7 +4745,7 @@ export default function App() {
                         fileIds: [...selectedFileIds],
                       })
                     }
-                    className="min-h-[38px] px-3 py-1.5 rounded-xl text-xs font-semibold bg-[#141311] border border-[#D94848] text-[#D94848] hover:bg-[#D94848] hover:text-[#F2EFE9] flex items-center justify-center gap-1.5 cursor-pointer"
+                    className="min-h-[38px] px-3 py-1.5 rounded-xl text-xs font-semibold bg-rose-500/10 border border-rose-500/30 text-rose-400 hover:bg-rose-500 hover:text-white flex items-center justify-center gap-1.5 cursor-pointer transition-colors"
                   >
                     <Trash2 className="w-3.5 h-3.5" />
                     <span>Delete</span>
@@ -4151,7 +4754,7 @@ export default function App() {
                   <button
                     type="button"
                     onClick={() => setSelectedFileIds([])}
-                    className="min-h-[38px] px-3 py-1.5 rounded-xl text-xs text-[#9E978E] hover:text-[#F2EFE9] border border-[#2C2824] bg-[#141311] cursor-pointer"
+                    className="min-h-[38px] px-3 py-1.5 rounded-xl text-xs text-zinc-400 hover:text-white border border-[#212330] bg-[#141622] hover:bg-[#1C1E2D] cursor-pointer transition-colors"
                   >
                     Clear
                   </button>
@@ -4163,7 +4766,7 @@ export default function App() {
             {creatingFolder && (
               <form
                 onSubmit={handleCreateFolder}
-                className="p-4 bg-[#1C1A17] border border-[#D97757] flex flex-col sm:flex-row items-stretch sm:items-center gap-3"
+                className="p-4 bg-[#12131C] border border-blue-500/40 rounded-2xl flex flex-col sm:flex-row items-stretch sm:items-center gap-3 shadow-lg"
               >
                 <input
                   type="text"
@@ -4171,19 +4774,19 @@ export default function App() {
                   value={newFolderName}
                   onChange={(e) => setNewFolderName(e.target.value)}
                   placeholder="Type folder name..."
-                  className="flex-1 min-h-[44px] bg-[#141311] border border-[#2C2824] px-3.5 py-2 text-sm text-[#F2EFE9] focus:outline-none focus:border-[#D97757]"
+                  className="flex-1 min-h-[44px] bg-[#181A26] border border-[#212330] rounded-xl px-3.5 py-2 text-sm text-white placeholder-zinc-500 focus:outline-none focus:border-blue-500"
                 />
                 <div className="grid grid-cols-2 sm:flex items-center gap-2">
                   <button
                     type="submit"
-                    className="min-h-[44px] px-5 py-2 text-xs font-bold bg-[#D97757] text-[#141311] cursor-pointer"
+                    className="min-h-[44px] px-5 py-2 rounded-xl text-xs font-bold bg-blue-600 text-white hover:bg-blue-500 cursor-pointer shadow-md shadow-blue-600/20 transition-all"
                   >
                     Create
                   </button>
                   <button
                     type="button"
                     onClick={() => setCreatingFolder(false)}
-                    className="min-h-[44px] px-4 py-2 text-xs text-[#9E978E] border border-[#2C2824] bg-[#141311] cursor-pointer"
+                    className="min-h-[44px] px-4 py-2 rounded-xl text-xs text-zinc-400 hover:text-white border border-[#212330] bg-[#141622] hover:bg-[#1C1E2D] cursor-pointer transition-colors"
                   >
                     Cancel
                   </button>
@@ -4194,7 +4797,7 @@ export default function App() {
             {/* Clickable Nested Folder Breadcrumb Path (Jump back to any parent folder or drag files onto parent segments) */}
             <nav
               aria-label="Folder breadcrumb path"
-              className="flex flex-wrap items-center justify-between gap-2 px-3.5 py-2.5 rounded-2xl bg-[#1C1A17] border border-[#2C2824] shadow-2xs"
+              className="flex flex-wrap items-center justify-between gap-2 px-3.5 py-2.5 rounded-2xl bg-[#12131C] border border-[#212330] shadow-sm"
             >
               <div className="flex flex-wrap items-center gap-1.5 text-xs sm:text-sm font-semibold min-w-0">
                 {/* Quick 'Up One Level' button when inside a subfolder */}
@@ -4207,9 +4810,9 @@ export default function App() {
                         ? 'Jump up to parent folder'
                         : 'Jump back to My Files (Root)'
                     }
-                    className="min-h-[32px] px-2.5 py-1 rounded-xl bg-[#24211D] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center gap-1 cursor-pointer transition-colors shrink-0 mr-1"
+                    className="min-h-[32px] px-2.5 py-1 rounded-xl bg-[#181A26] border border-[#212330] hover:border-blue-500 text-white flex items-center gap-1 cursor-pointer transition-colors shrink-0 mr-1"
                   >
-                    <CornerLeftUp className="w-3.5 h-3.5 text-[#D97757]" />
+                    <CornerLeftUp className="w-3.5 h-3.5 text-blue-400" />
                     <span className="text-xs">Up</span>
                   </button>
                 )}
@@ -4244,37 +4847,37 @@ export default function App() {
                   }}
                   className={`min-h-[32px] px-2.5 py-1 rounded-xl flex items-center gap-1.5 transition-colors cursor-pointer ${
                     dragOverFolderId === 'root'
-                      ? 'border border-[#D97757] bg-[#24211D] text-[#F2EFE9]'
+                      ? 'border border-blue-500 bg-blue-500/20 text-white'
                       : !activeFolder && !onlyStarred && !onlyOffline && !selectedTagFilter
-                      ? 'bg-blue-50/90 text-[#D97757] font-bold'
-                      : 'text-[#9E978E] hover:text-[#F2EFE9] hover:bg-slate-100/80'
+                      ? 'bg-blue-600/20 border border-blue-500/40 text-blue-400 font-bold'
+                      : 'text-zinc-400 hover:text-white hover:bg-white/5'
                   }`}
                 >
-                  <Folder className="w-3.5 h-3.5 text-[#D97757] shrink-0" />
+                  <Folder className="w-3.5 h-3.5 text-blue-400 shrink-0" />
                   <span>My Files</span>
                 </button>
 
                 {/* Special Filter Crumb OR Nested Folder Ancestor Chain */}
                 {selectedTagFilter ? (
                   <>
-                    <ChevronRight className="w-3.5 h-3.5 text-[#9E978E] shrink-0" />
-                    <span className="min-h-[32px] px-2.5 py-1 rounded-xl bg-blue-50/90 text-[#D97757] font-bold flex items-center gap-1.5">
+                    <ChevronRight className="w-3.5 h-3.5 text-zinc-500 shrink-0" />
+                    <span className="min-h-[32px] px-2.5 py-1 rounded-xl bg-blue-600/20 border border-blue-500/40 text-blue-400 font-bold flex items-center gap-1.5">
                       <Tag className="w-3.5 h-3.5 shrink-0" />
                       <span>Label: {selectedTagFilter}</span>
                     </span>
                   </>
                 ) : onlyStarred ? (
                   <>
-                    <ChevronRight className="w-3.5 h-3.5 text-[#9E978E] shrink-0" />
-                    <span className="min-h-[32px] px-2.5 py-1 rounded-xl bg-blue-50/90 text-[#D97757] font-bold flex items-center gap-1.5">
+                    <ChevronRight className="w-3.5 h-3.5 text-zinc-500 shrink-0" />
+                    <span className="min-h-[32px] px-2.5 py-1 rounded-xl bg-amber-500/15 border border-amber-500/30 text-amber-400 font-bold flex items-center gap-1.5">
                       <Star className="w-3.5 h-3.5 shrink-0" fill="currentColor" />
                       <span>Starred Files</span>
                     </span>
                   </>
                 ) : onlyOffline ? (
                   <>
-                    <ChevronRight className="w-3.5 h-3.5 text-[#9E978E] shrink-0" />
-                    <span className="min-h-[32px] px-2.5 py-1 rounded-xl bg-emerald-50 text-[#2E9E6B] font-bold flex items-center gap-1.5">
+                    <ChevronRight className="w-3.5 h-3.5 text-zinc-500 shrink-0" />
+                    <span className="min-h-[32px] px-2.5 py-1 rounded-xl bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 font-bold flex items-center gap-1.5">
                       <Smartphone className="w-3.5 h-3.5 shrink-0" />
                       <span>Offline Saved Files</span>
                     </span>
@@ -4285,7 +4888,7 @@ export default function App() {
                     const isCrumbDropTarget = dragOverFolderId === crumb.id;
                     return (
                       <React.Fragment key={crumb.id}>
-                        <ChevronRight className="w-3.5 h-3.5 text-[#9E978E] shrink-0" />
+                        <ChevronRight className="w-3.5 h-3.5 text-zinc-500 shrink-0" />
                         <button
                           type="button"
                           onClick={() => {
@@ -4315,16 +4918,16 @@ export default function App() {
                           }}
                           className={`min-h-[32px] px-2.5 py-1 rounded-xl flex items-center gap-1.5 max-w-[200px] sm:max-w-[260px] truncate transition-colors cursor-pointer ${
                             isCrumbDropTarget
-                              ? 'border border-[#D97757] bg-[#24211D] text-[#F2EFE9]'
+                              ? 'border border-blue-500 bg-blue-500/20 text-white'
                               : isLastCrumb
-                              ? 'bg-blue-50/90 text-[#D97757] font-bold'
-                              : 'text-[#9E978E] hover:text-[#F2EFE9] hover:bg-slate-100/80'
+                              ? 'bg-blue-600/20 border border-blue-500/40 text-blue-400 font-bold'
+                              : 'text-zinc-400 hover:text-white hover:bg-white/5'
                           }`}
                           title={`Open folder "${crumb.name}"`}
                         >
                           <span className="truncate">{crumb.name}</span>
                           {crumb.isPinProtected && (
-                            <KeyRound className="w-3 h-3 text-[#D97757] shrink-0" />
+                            <KeyRound className="w-3 h-3 text-amber-400 shrink-0" />
                           )}
                         </button>
                       </React.Fragment>
@@ -4338,9 +4941,9 @@ export default function App() {
                   <button
                     type="button"
                     onClick={() => setShareModalFolder(activeFolder)}
-                    className="min-h-[32px] px-3 py-1 rounded-xl text-xs font-semibold bg-[#24211D] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center gap-1.5 cursor-pointer"
+                    className="min-h-[32px] px-3 py-1 rounded-xl text-xs font-semibold bg-[#181A26] border border-[#212330] hover:border-blue-500 text-white flex items-center gap-1.5 cursor-pointer transition-colors"
                   >
-                    <Link2 className="w-3.5 h-3.5 text-[#D97757]" />
+                    <Link2 className="w-3.5 h-3.5 text-blue-400" />
                     <span>Share Folder Gallery</span>
                   </button>
                   <button
@@ -4351,9 +4954,9 @@ export default function App() {
                         mode: 'manage',
                       })
                     }
-                    className="min-h-[32px] px-3 py-1 rounded-xl text-xs font-semibold bg-[#24211D] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center gap-1.5 cursor-pointer"
+                    className="min-h-[32px] px-3 py-1 rounded-xl text-xs font-semibold bg-[#181A26] border border-[#212330] hover:border-blue-500 text-white flex items-center gap-1.5 cursor-pointer transition-colors"
                   >
-                    <KeyRound className="w-3.5 h-3.5 text-[#D97757]" />
+                    <KeyRound className="w-3.5 h-3.5 text-amber-400" />
                     <span>{activeFolder.isPinProtected ? 'Manage PIN' : 'Set PIN Lock'}</span>
                   </button>
                 </div>
@@ -4364,10 +4967,10 @@ export default function App() {
             {!onlyStarred && !onlyOffline && !selectedTagFilter && !searchQuery.trim() && visibleSubfolders.length > 0 && (
               <div className="space-y-2.5">
                 <div className="flex items-center justify-between">
-                  <h2 className="text-xs font-bold text-[#9E978E] uppercase tracking-wider">
+                  <h2 className="text-xs font-bold text-zinc-400 uppercase tracking-wider">
                     Folders ({visibleSubfolders.length})
                   </h2>
-                  <span className="hidden sm:inline text-[11px] text-[#9E978E]">
+                  <span className="hidden sm:inline text-[11px] text-zinc-400">
                     Visual indicators show folder media type, starred/shared items &amp; PIN status
                   </span>
                 </div>
@@ -4393,28 +4996,28 @@ export default function App() {
                         return (
                           <Lock
                             className={`w-3 h-3 ${
-                              isUnlocked ? 'text-[#389E6C]' : 'text-[#D99B26]'
+                              isUnlocked ? 'text-emerald-400' : 'text-amber-400'
                             }`}
                           />
                         );
                       }
                       if (summary.category === 'video') {
-                        return <Film className="w-3 h-3 text-[#D97757]" />;
+                        return <Film className="w-3 h-3 text-blue-400" />;
                       }
                       if (summary.category === 'image') {
-                        return <ImageIcon className="w-3 h-3 text-[#2E9E6B]" />;
+                        return <ImageIcon className="w-3 h-3 text-emerald-400" />;
                       }
                       if (summary.category === 'audio') {
-                        return <Music className="w-3 h-3 text-[#D99B26]" />;
+                        return <Music className="w-3 h-3 text-amber-400" />;
                       }
                       if (summary.category === 'code') {
-                        return <FileCode className="w-3 h-3 text-[#D97757]" />;
+                        return <FileCode className="w-3 h-3 text-indigo-400" />;
                       }
                       if (summary.hasShared) {
-                        return <Link2 className="w-3 h-3 text-[#2E9E6B]" />;
+                        return <Link2 className="w-3 h-3 text-cyan-400" />;
                       }
                       if (summary.hasStarred) {
-                        return <Star className="w-3 h-3 text-[#D97757]" fill="#D97757" />;
+                        return <Star className="w-3 h-3 text-amber-400" fill="currentColor" />;
                       }
                       return null;
                     };
@@ -4445,63 +5048,63 @@ export default function App() {
                             if (f) handleMoveFile(f, folder.id).catch(() => null);
                           }
                         }}
-                        className={`animate-app-card rounded-2xl min-h-[68px] p-3.5 sm:p-4 bg-[#1C1A17] border flex items-center justify-between gap-2 cursor-pointer group ${
+                        className={`animate-app-card rounded-2xl min-h-[68px] p-3.5 sm:p-4 bg-[#12131C] border flex items-center justify-between gap-2 cursor-pointer group transition-all ${
                           isDropTarget
-                            ? 'border-[#D97757] bg-[#24211D]'
-                            : 'border-[#2C2824] hover:border-[#D97757]'
+                            ? 'border-blue-500 bg-blue-500/10'
+                            : 'border-[#212330] hover:border-blue-500/60 hover:bg-[#161724]'
                         }`}
                       >
                         <div className="flex items-center gap-3 min-w-0">
-                          <div className="relative w-10 h-10 rounded-xl bg-[#24211D] border border-[#2C2824] flex items-center justify-center shrink-0">
+                          <div className="relative w-10 h-10 rounded-xl bg-[#181A26] border border-[#252838] flex items-center justify-center shrink-0">
                             <Folder
                               className={`w-5 h-5 ${
                                 summary.category === 'video'
-                                  ? 'text-[#D97757]'
+                                  ? 'text-blue-400'
                                   : summary.category === 'image'
-                                  ? 'text-[#2E9E6B]'
+                                  ? 'text-emerald-400'
                                   : summary.category === 'audio'
-                                  ? 'text-[#D99B26]'
-                                  : 'text-[#D97757]'
+                                  ? 'text-amber-400'
+                                  : 'text-blue-400'
                               }`}
                             />
                             {badgeIcon && (
-                              <span className="absolute -bottom-1 -right-1 w-4 h-4 rounded-md bg-[#141311] border border-[#2C2824] flex items-center justify-center">
+                              <span className="absolute -bottom-1 -right-1 w-4 h-4 rounded-md bg-[#0D0E15] border border-[#212330] flex items-center justify-center">
                                 {badgeIcon}
                               </span>
                             )}
                           </div>
                           <div className="min-w-0">
-                            <div className="text-sm font-bold text-[#F2EFE9] truncate group-hover:text-[#D97757] flex items-center gap-1.5">
+                            <div className="text-sm font-bold text-white truncate group-hover:text-blue-400 flex items-center gap-1.5 transition-colors">
                               <span className="truncate">{folder.name}</span>
                               {summary.hasStarred && (
                                 <Star
-                                  className="w-3 h-3 text-[#D97757] shrink-0"
-                                  fill="#D97757"
+                                  className="w-3 h-3 text-amber-400 shrink-0"
+                                  fill="currentColor"
                                   aria-label="Contains starred items"
                                 />
                               )}
                             </div>
-                            <div className="text-xs text-[#9E978E] flex flex-wrap items-center gap-1 tabular-nums">
+                            <div className="text-xs text-zinc-400 flex flex-wrap items-center gap-1 tabular-nums">
                               <span>
                                 {count} {count === 1 ? 'file' : 'files'}
                               </span>
                               {count > 0 && (
-                                <span className="text-[11px] text-[#F2EFE9]/80">
+                                <span className="text-[11px] text-zinc-400">
                                   · {summary.categoryLabel}
                                 </span>
                               )}
                               {folder.isPinProtected && (
-                                <span className="text-[10px] text-[#D99B26] font-semibold">
+                                <span className="text-[10px] text-amber-400 font-semibold">
                                   · {isUnlocked ? 'Unlocked' : 'PIN'}
                                 </span>
                               )}
                               {summary.hasShared && (
-                                <span className="text-[10px] text-[#389E6C] font-semibold">
+                                <span className="text-[10px] text-emerald-400 font-semibold">
                                   · Shared
                                 </span>
                               )}
                               {summary.hasOffline && (
-                                <span className="md:hidden text-[10px] text-[#2E9E6B] font-semibold">
+                                <span className="md:hidden text-[10px] text-emerald-400 font-semibold">
                                   · Offline
                                 </span>
                               )}
@@ -4523,10 +5126,10 @@ export default function App() {
                                 mode: 'manage',
                               });
                             }}
-                            className={`min-w-[34px] min-h-[38px] rounded-lg flex items-center justify-center cursor-pointer ${
+                            className={`min-w-[34px] min-h-[38px] rounded-lg flex items-center justify-center cursor-pointer transition-colors ${
                               folder.isPinProtected
-                                ? 'text-[#D99B26] hover:text-[#D97757]'
-                                : 'text-[#9E978E] hover:text-[#D97757]'
+                                ? 'text-amber-400 hover:text-amber-300'
+                                : 'text-zinc-400 hover:text-white'
                             }`}
                             title={folder.isPinProtected ? 'Manage PIN Lock' : 'Lock Folder with PIN'}
                           >
@@ -4543,10 +5146,10 @@ export default function App() {
                               }
                               setShareModalFolder(folder);
                             }}
-                            className={`min-w-[34px] min-h-[38px] rounded-lg flex items-center justify-center cursor-pointer ${
+                            className={`min-w-[34px] min-h-[38px] rounded-lg flex items-center justify-center cursor-pointer transition-colors ${
                               existingFolderShare
-                                ? 'text-[#D97757]'
-                                : 'text-[#9E978E] hover:text-[#D97757]'
+                                ? 'text-blue-400'
+                                : 'text-zinc-400 hover:text-white'
                             }`}
                             title="Share Public Folder Gallery"
                           >
@@ -4564,7 +5167,7 @@ export default function App() {
                                 subtitle: `Contains ${count} ${count === 1 ? 'file' : 'files'}`,
                               });
                             }}
-                            className="min-w-[34px] min-h-[38px] rounded-lg flex items-center justify-center text-[#9E978E] hover:text-[#D94848] cursor-pointer"
+                            className="min-w-[34px] min-h-[38px] rounded-lg flex items-center justify-center text-zinc-400 hover:text-rose-400 cursor-pointer transition-colors"
                             title="Move Folder to Trash"
                           >
                             <Trash2 className="w-3.5 h-3.5" />
@@ -4674,7 +5277,7 @@ export default function App() {
 
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div className="flex items-center gap-2.5">
-                  <h2 className="text-xs font-semibold text-[#9E978E] uppercase tracking-wider">
+                  <h2 className="text-xs font-semibold text-zinc-400 uppercase tracking-wider">
                     Files ({visibleFiles.length})
                   </h2>
                   {visibleFiles.length > 0 && (
@@ -4682,12 +5285,12 @@ export default function App() {
                       <button
                         type="button"
                         onClick={handleToggleSelectAllVisible}
-                        className="min-h-[32px] px-2.5 py-1 text-xs font-semibold bg-[#1C1A17] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center gap-1.5 cursor-pointer"
+                        className="min-h-[32px] px-2.5 py-1 text-xs font-semibold rounded-xl bg-[#181A26] border border-[#212330] hover:border-blue-500 text-white flex items-center gap-1.5 cursor-pointer transition-colors"
                       >
                         {allVisibleSelected ? (
-                          <CheckSquare className="w-3.5 h-3.5 text-[#D97757]" />
+                          <CheckSquare className="w-3.5 h-3.5 text-blue-400" />
                         ) : (
-                          <Square className="w-3.5 h-3.5 text-[#9E978E]" />
+                          <Square className="w-3.5 h-3.5 text-zinc-400" />
                         )}
                         <span>
                           {allVisibleSelected ? 'Deselect All' : 'Select All'}
@@ -4699,22 +5302,22 @@ export default function App() {
                         type="button"
                         onClick={() => setLassoModeActive((prev) => !prev)}
                         title="Toggle Lasso Mode — Click and drag across cards to select multiple files"
-                        className={`hidden md:inline-flex min-h-[32px] px-2.5 py-1 text-xs font-semibold border items-center gap-1.5 cursor-pointer transition-colors ${
+                        className={`hidden md:inline-flex min-h-[32px] px-2.5 py-1 rounded-xl text-xs font-semibold border items-center gap-1.5 cursor-pointer transition-colors ${
                           lassoModeActive
-                            ? 'bg-[#D97757] border-[#D97757] text-[#141311]'
-                            : 'bg-[#1C1A17] border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9]'
+                            ? 'bg-blue-600 border-blue-500 text-white shadow-md shadow-blue-600/20'
+                            : 'bg-[#181A26] border border-[#212330] hover:border-blue-500 text-zinc-200'
                         }`}
                       >
                         <CheckSquare className="w-3.5 h-3.5" />
-                        <span>{lassoModeActive ? 'Lasso Mode: ON (Drag to Select)' : 'Lasso Select'}</span>
+                        <span>{lassoModeActive ? 'Lasso Mode: ON' : 'Lasso Select'}</span>
                       </button>
                     </>
                   )}
                 </div>
 
                 <div className="flex items-center gap-2 sm:gap-2.5">
-                  <span className="hidden xl:inline text-xs text-[#9E978E]">
-                    Right-click any file for quick actions or drag (Lasso) to multi-select
+                  <span className="hidden xl:inline text-xs text-zinc-400">
+                    Right-click any file for quick actions or drag to multi-select
                   </span>
 
                   {/* Sort Dropdown Menu (Name, Size, Date Modified, Type) */}
@@ -4725,9 +5328,9 @@ export default function App() {
                       aria-haspopup="menu"
                       aria-expanded={showSortMenu}
                       aria-label="Sort files"
-                      className="min-h-[32px] px-2.5 py-1 rounded-xl text-xs font-semibold bg-[#1C1A17] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center gap-1.5 cursor-pointer transition-colors"
+                      className="min-h-[32px] px-2.5 py-1 rounded-xl text-xs font-semibold bg-[#181A26] border border-[#212330] hover:border-blue-500 text-white flex items-center gap-1.5 cursor-pointer transition-colors"
                     >
-                      <ArrowUpDown className="w-3.5 h-3.5 text-[#D97757] shrink-0" />
+                      <ArrowUpDown className="w-3.5 h-3.5 text-blue-400 shrink-0" />
                       <span>
                         Sort:{' '}
                         {sortBy === 'name'
@@ -4736,23 +5339,23 @@ export default function App() {
                           ? 'Size'
                           : sortBy === 'type'
                           ? 'Type'
-                          : 'Date Modified'}
+                          : 'Date'}
                       </span>
                       {sortOrder === 'asc' ? (
-                        <ArrowUp className="w-3 h-3 text-[#9E978E] shrink-0" />
+                        <ArrowUp className="w-3 h-3 text-zinc-400 shrink-0" />
                       ) : (
-                        <ArrowDown className="w-3 h-3 text-[#9E978E] shrink-0" />
+                        <ArrowDown className="w-3 h-3 text-zinc-400 shrink-0" />
                       )}
-                      <ChevronDown className="w-3 h-3 text-[#9E978E] shrink-0" />
+                      <ChevronDown className="w-3 h-3 text-zinc-400 shrink-0" />
                     </button>
 
                     {showSortMenu && (
                       <div
                         role="menu"
                         aria-label="Sort files by"
-                        className="animate-app-pop absolute right-0 top-full mt-1.5 z-40 w-52 rounded-2xl bg-white/98 backdrop-blur-md border border-slate-200/90 shadow-[0_14px_38px_rgba(15,23,42,0.16)] p-1.5 select-none"
+                        className="animate-app-pop absolute right-0 top-full mt-1.5 z-40 w-52 rounded-2xl bg-[#12131C] backdrop-blur-md border border-[#252838] shadow-2xl p-1.5 select-none text-white"
                       >
-                        <div className="px-2.5 py-1.5 text-[11px] font-bold uppercase tracking-wider text-slate-400">
+                        <div className="px-2.5 py-1.5 text-[11px] font-bold uppercase tracking-wider text-zinc-400">
                           Sort Files By
                         </div>
                         {(
@@ -4772,20 +5375,20 @@ export default function App() {
                               onClick={() => handleSelectSortField(opt.id)}
                               className={`w-full px-2.5 py-2 rounded-xl text-xs font-semibold flex items-center justify-between gap-2 cursor-pointer transition-colors ${
                                 isSelected
-                                  ? 'bg-blue-50/90 text-[#D97757]'
-                                  : 'text-slate-700 hover:bg-slate-100/90'
+                                  ? 'bg-blue-600/20 text-blue-400'
+                                  : 'text-zinc-300 hover:bg-white/5 hover:text-white'
                               }`}
                             >
                               <span className="flex items-center gap-2">
                                 <Check
                                   className={`w-3.5 h-3.5 ${
-                                    isSelected ? 'opacity-100 text-[#D97757]' : 'opacity-0'
+                                    isSelected ? 'opacity-100 text-blue-400' : 'opacity-0'
                                   }`}
                                 />
                                 <span>{opt.label}</span>
                               </span>
                               {isSelected && (
-                                <span className="text-[10px] font-bold text-[#D97757] flex items-center gap-0.5">
+                                <span className="text-[10px] font-bold text-blue-400 flex items-center gap-0.5">
                                   {sortOrder === 'asc' ? 'ASC ↑' : 'DESC ↓'}
                                 </span>
                               )}
@@ -4793,15 +5396,15 @@ export default function App() {
                           );
                         })}
 
-                        <div className="my-1 border-t border-slate-100" />
+                        <div className="my-1 border-t border-[#212330]" />
                         <div className="grid grid-cols-2 gap-1 p-0.5">
                           <button
                             type="button"
                             onClick={() => handleSetSortOrder('asc')}
                             className={`min-h-[30px] px-2 py-1 rounded-lg text-[11px] font-semibold flex items-center justify-center gap-1 cursor-pointer transition-colors ${
                               sortOrder === 'asc'
-                                ? 'bg-[#D97757] text-[#141311]'
-                                : 'bg-slate-100 text-slate-600 hover:text-slate-900'
+                                ? 'bg-blue-600 text-white'
+                                : 'bg-[#181A26] text-zinc-400 hover:text-white'
                             }`}
                           >
                             <ArrowUp className="w-3 h-3" />
@@ -4812,8 +5415,8 @@ export default function App() {
                             onClick={() => handleSetSortOrder('desc')}
                             className={`min-h-[30px] px-2 py-1 rounded-lg text-[11px] font-semibold flex items-center justify-center gap-1 cursor-pointer transition-colors ${
                               sortOrder === 'desc'
-                                ? 'bg-[#D97757] text-[#141311]'
-                                : 'bg-slate-100 text-slate-600 hover:text-slate-900'
+                                ? 'bg-blue-600 text-white'
+                                : 'bg-[#181A26] text-zinc-400 hover:text-white'
                             }`}
                           >
                             <ArrowDown className="w-3 h-3" />
@@ -4825,14 +5428,14 @@ export default function App() {
                   </div>
 
                   {/* Grid / List Layout Toggle */}
-                  <div className="flex items-center bg-[#1C1A17] border border-[#2C2824]">
+                  <div className="flex items-center bg-[#181A26] border border-[#212330] rounded-xl overflow-hidden p-0.5">
                     <button
                       type="button"
                       onClick={() => handleChangeLayout('grid')}
-                      className={`min-h-[32px] px-2.5 py-1 text-xs font-semibold flex items-center gap-1.5 cursor-pointer ${
+                      className={`min-h-[28px] px-2.5 py-1 text-xs font-semibold rounded-lg flex items-center gap-1.5 cursor-pointer transition-colors ${
                         explorerLayout === 'grid'
-                          ? 'bg-[#D97757] text-[#141311]'
-                          : 'text-[#9E978E] hover:text-[#F2EFE9]'
+                          ? 'bg-blue-600 text-white shadow-sm'
+                          : 'text-zinc-400 hover:text-white'
                       }`}
                       title="Grid View"
                     >
@@ -4842,10 +5445,10 @@ export default function App() {
                     <button
                       type="button"
                       onClick={() => handleChangeLayout('list')}
-                      className={`min-h-[32px] px-2.5 py-1 text-xs font-semibold flex items-center gap-1.5 cursor-pointer ${
+                      className={`min-h-[28px] px-2.5 py-1 text-xs font-semibold rounded-lg flex items-center gap-1.5 cursor-pointer transition-colors ${
                         explorerLayout === 'list'
-                          ? 'bg-[#D97757] text-[#141311]'
-                          : 'text-[#9E978E] hover:text-[#F2EFE9]'
+                          ? 'bg-blue-600 text-white shadow-sm'
+                          : 'text-zinc-400 hover:text-white'
                       }`}
                       title="List View"
                     >
@@ -4864,7 +5467,7 @@ export default function App() {
                   <div
                     aria-busy="true"
                     aria-label="Loading file list"
-                    className="rounded-2xl overflow-hidden bg-[#1C1A17] border border-[#2C2824] divide-y divide-[#2C2824]"
+                    className="rounded-2xl overflow-hidden bg-[#12131C] border border-[#212330] divide-y divide-[#212330]"
                   >
                     {[68, 52, 74, 46, 62, 58].map((widthPct, idx) => (
                       <div
@@ -4872,16 +5475,16 @@ export default function App() {
                         className="p-3 sm:px-4 flex items-center justify-between gap-3"
                       >
                         <div className="flex items-center gap-3 min-w-0 flex-1">
-                          <div className="w-8 h-8 rounded-lg bg-[#24211D] border border-[#2C2824] animate-pulse shrink-0" />
-                          <div className="w-10 h-10 rounded-xl bg-[#24211D] border border-[#2C2824] animate-pulse shrink-0" />
+                          <div className="w-8 h-8 rounded-lg bg-[#181A26] border border-[#252838] animate-pulse shrink-0" />
+                          <div className="w-10 h-10 rounded-xl bg-[#181A26] border border-[#252838] animate-pulse shrink-0" />
                           <div className="min-w-0 flex-1 space-y-2">
                             <div
                               style={{ width: `${widthPct}%` }}
-                              className="h-3.5 max-w-xs rounded-md bg-slate-200/80 animate-pulse"
+                              className="h-3.5 max-w-xs rounded-md bg-white/10 animate-pulse"
                             />
                             <div className="flex items-center gap-2">
-                              <div className="h-2.5 w-14 rounded-md bg-slate-200/60 animate-pulse" />
-                              <div className="h-2.5 w-20 rounded-md bg-slate-100 animate-pulse" />
+                              <div className="h-2.5 w-14 rounded-md bg-white/5 animate-pulse" />
+                              <div className="h-2.5 w-20 rounded-md bg-white/5 animate-pulse" />
                             </div>
                           </div>
                         </div>
@@ -4900,19 +5503,19 @@ export default function App() {
                     {[72, 58, 80, 64, 54, 76, 60, 68].map((widthPct, idx) => (
                       <div
                         key={idx}
-                        className="rounded-2xl p-3.5 sm:p-4 bg-[#1C1A17] border border-[#2C2824] flex items-center justify-between gap-3"
+                        className="rounded-2xl p-3.5 sm:p-4 bg-[#12131C] border border-[#212330] flex items-center justify-between gap-3"
                       >
                         <div className="flex items-center gap-3 min-w-0 flex-1">
-                          <div className="w-8 h-8 rounded-lg bg-[#24211D] border border-[#2C2824] animate-pulse shrink-0" />
-                          <div className="w-11 h-11 rounded-xl bg-[#24211D] border border-[#2C2824] animate-pulse shrink-0" />
+                          <div className="w-8 h-8 rounded-lg bg-[#181A26] border border-[#252838] animate-pulse shrink-0" />
+                          <div className="w-11 h-11 rounded-xl bg-[#181A26] border border-[#252838] animate-pulse shrink-0" />
                           <div className="min-w-0 flex-1 space-y-2">
                             <div
                               style={{ width: `${widthPct}%` }}
-                              className="h-3.5 rounded-md bg-slate-200/80 animate-pulse"
+                              className="h-3.5 rounded-md bg-white/10 animate-pulse"
                             />
                             <div className="flex items-center gap-2">
-                              <div className="h-2.5 w-12 rounded-md bg-slate-200/60 animate-pulse" />
-                              <div className="h-2.5 w-16 rounded-md bg-slate-100 animate-pulse" />
+                              <div className="h-2.5 w-12 rounded-md bg-white/5 animate-pulse" />
+                              <div className="h-2.5 w-16 rounded-md bg-white/5 animate-pulse" />
                             </div>
                           </div>
                         </div>
@@ -4922,16 +5525,16 @@ export default function App() {
                 )
               ) : visibleFiles.length === 0 ? (
                 <div
-                  className={`p-8 sm:p-12 bg-[#1C1A17] border text-center space-y-3 ${
-                    isDraggingOver ? 'border-[#D97757]' : 'border-[#2C2824]'
+                  className={`rounded-2xl p-8 sm:p-12 bg-[#12131C] border text-center space-y-3 ${
+                    isDraggingOver ? 'border-blue-500 bg-blue-500/10' : 'border-[#212330]'
                   }`}
                 >
-                  <div className="text-base font-bold text-[#F2EFE9]">
+                  <div className="text-base font-bold text-white">
                     {selectedTagFilter
                       ? `No files labeled "${selectedTagFilter}"`
                       : 'This folder is empty'}
                   </div>
-                  <p className="text-xs text-[#9E978E] max-w-md mx-auto">
+                  <p className="text-xs text-zinc-400 max-w-md mx-auto">
                     {selectedTagFilter
                       ? 'Assign this label to any file card using the + Label button, or clear the active filter.'
                       : 'Tap Upload Files below or upload directly from any web link.'}
@@ -4940,7 +5543,7 @@ export default function App() {
                     {selectedTagFilter ? (
                       <button
                         onClick={() => setSelectedTagFilter(null)}
-                        className="min-h-[44px] px-5 py-2.5 text-xs font-bold bg-[#D97757] text-[#141311] cursor-pointer"
+                        className="min-h-[44px] px-5 py-2.5 rounded-xl text-xs font-bold bg-blue-600 text-white hover:bg-blue-500 cursor-pointer shadow-md shadow-blue-600/20 transition-all"
                       >
                         Show All Files
                       </button>
@@ -4948,13 +5551,13 @@ export default function App() {
                       <>
                         <button
                           onClick={() => fileInputRef.current?.click()}
-                          className="min-h-[44px] px-5 py-2.5 text-xs font-bold bg-[#D97757] text-[#141311] cursor-pointer"
+                          className="min-h-[44px] px-5 py-2.5 rounded-xl text-xs font-bold bg-blue-600 text-white hover:bg-blue-500 cursor-pointer shadow-md shadow-blue-600/20 transition-all"
                         >
                           + Upload Files
                         </button>
                         <button
                           onClick={() => setShowRemoteModal(true)}
-                          className="min-h-[44px] px-4 py-2.5 text-xs font-semibold bg-[#24211D] border border-[#2C2824] text-[#F2EFE9] cursor-pointer"
+                          className="min-h-[44px] px-4 py-2.5 rounded-xl text-xs font-semibold bg-[#181A26] border border-[#212330] hover:border-blue-500 text-white cursor-pointer transition-colors"
                         >
                           Upload from Link
                         </button>
@@ -4986,7 +5589,7 @@ export default function App() {
                       longPressTimerRef.current = null;
                     }
                   }}
-                  className="rounded-2xl overflow-hidden bg-[#1C1A17] border border-[#2C2824] divide-y divide-[#2C2824]"
+                  className="rounded-2xl overflow-hidden bg-[#12131C] border border-[#212330] divide-y divide-[#212330]"
                 >
                   {visibleFiles.map((file) => {
                     const existingShare = shares.find((s) => s.fileId === file.id);
@@ -5035,8 +5638,8 @@ export default function App() {
                         }}
                         className={`p-3 sm:px-4 flex items-center justify-between gap-3 transition-colors select-none cursor-pointer group ${
                           isSelected
-                            ? 'bg-[#24211D]'
-                            : 'hover:bg-[#24211D]/60'
+                            ? 'bg-blue-600/15'
+                            : 'hover:bg-white/5'
                         }`}
                       >
                         <div className="flex items-center gap-3 min-w-0 flex-1">
@@ -5055,8 +5658,8 @@ export default function App() {
                             }}
                             className={`w-8 h-8 rounded-lg border flex items-center justify-center shrink-0 transition-all cursor-pointer ${
                               isSelected
-                                ? 'bg-[#D97757] border-[#D97757] text-[#141311]'
-                                : 'bg-[#141311] border-[#2C2824] text-[#9E978E] hover:border-[#D97757] hover:text-[#F2EFE9]'
+                                ? 'bg-blue-600 border-blue-500 text-white'
+                                : 'bg-[#181A26] border-[#252838] text-zinc-400 hover:border-blue-500 hover:text-white'
                             }`}
                           >
                             {isSelected ? (
@@ -5066,7 +5669,7 @@ export default function App() {
                             )}
                           </button>
 
-                          <div className="w-10 h-10 rounded-xl bg-[#24211D] border border-[#2C2824] flex items-center justify-center shrink-0 overflow-hidden">
+                          <div className="w-10 h-10 rounded-xl bg-[#181A26] border border-[#252838] flex items-center justify-center shrink-0 overflow-hidden">
                             {file.previewDataUrl && file.mimeType.startsWith('image/') ? (
                               <img
                                 src={file.previewDataUrl}
@@ -5081,28 +5684,28 @@ export default function App() {
                           <div className="min-w-0 flex-1">
                             <div className="flex items-center gap-1.5">
                               <span
-                                className="text-sm font-bold text-[#F2EFE9] group-hover:text-[#D97757] truncate transition-colors"
+                                className="text-sm font-bold text-white group-hover:text-blue-400 truncate transition-colors"
                                 title={file.name}
                               >
                                 {file.name}
                               </span>
                               {file.starred && (
                                 <Star
-                                  className="w-3.5 h-3.5 text-[#D97757] shrink-0"
-                                  fill="#D97757"
+                                  className="w-3.5 h-3.5 text-amber-400 shrink-0"
+                                  fill="currentColor"
                                 />
                               )}
                               {fileTags.map((tag) => (
                                 <span
                                   key={tag}
-                                  className="hidden sm:inline-flex items-center px-1.5 py-0.5 rounded-md text-[10px] font-semibold bg-[#141311] border border-[#2C2824] text-[#D97757] shrink-0"
+                                  className="hidden sm:inline-flex items-center px-1.5 py-0.5 rounded-md text-[10px] font-semibold bg-blue-600/15 border border-blue-500/30 text-blue-400 shrink-0"
                                 >
                                   {tag}
                                 </span>
                               ))}
                             </div>
-                            <div className="flex flex-wrap items-center gap-1.5 text-xs text-[#9E978E] tabular-nums mt-0.5">
-                              <span className="text-[#F2EFE9] font-medium">
+                            <div className="flex flex-wrap items-center gap-1.5 text-xs text-zinc-400 tabular-nums mt-0.5">
+                              <span className="text-white font-medium">
                                 {formatBytes(file.sizeBytes)}
                               </span>
                               <span>·</span>
@@ -5110,19 +5713,19 @@ export default function App() {
                               {offlineFilesMap[file.id] && (
                                 <>
                                   <span>·</span>
-                                  <span className="text-[#2E9E6B] font-semibold">Offline</span>
+                                  <span className="text-emerald-400 font-semibold">Offline</span>
                                 </>
                               )}
                               {existingShare && (
                                 <>
                                   <span>·</span>
-                                  <span className="text-[#389E6C] font-semibold">Shared</span>
+                                  <span className="text-cyan-400 font-semibold">Shared</span>
                                 </>
                               )}
                               {isLocked && (
                                 <>
                                   <span>·</span>
-                                  <span className="text-[#D99B26] font-semibold">Locked</span>
+                                  <span className="text-amber-400 font-semibold">Locked</span>
                                 </>
                               )}
                             </div>
@@ -5203,12 +5806,12 @@ export default function App() {
                           setDraggedFileId(null);
                           setDragOverFolderId(null);
                         }}
-                        className={`animate-app-card rounded-2xl p-3.5 sm:p-4 border flex items-center justify-between gap-3 select-none cursor-pointer group ${
+                        className={`animate-app-card rounded-2xl p-3.5 sm:p-4 border flex items-center justify-between gap-3 select-none cursor-pointer group transition-all ${
                           isSelected
-                            ? 'bg-[#24211D] border-[#D97757] shadow-sm'
+                            ? 'bg-blue-600/15 border-blue-500 shadow-md shadow-blue-600/10'
                             : isLocked
-                            ? 'bg-[#1C1A17] border-[#D99B26]/80'
-                            : 'bg-[#1C1A17] border-[#2C2824] hover:border-[#D97757]/70'
+                            ? 'bg-[#12131C] border-amber-500/50'
+                            : 'bg-[#12131C] border-[#212330] hover:border-blue-500/60 hover:bg-[#161724]'
                         }`}
                       >
                         <div className="flex items-center gap-3 min-w-0 flex-1">
@@ -5228,8 +5831,8 @@ export default function App() {
                             }}
                             className={`w-8 h-8 rounded-lg border flex items-center justify-center shrink-0 transition-all cursor-pointer ${
                               isSelected
-                                ? 'bg-[#D97757] border-[#D97757] text-[#141311]'
-                                : 'bg-[#141311] border-[#2C2824] text-[#9E978E] hover:border-[#D97757] hover:text-[#F2EFE9]'
+                                ? 'bg-blue-600 border-blue-500 text-white'
+                                : 'bg-[#181A26] border-[#252838] text-zinc-400 hover:border-blue-500 hover:text-white'
                             }`}
                             title={isSelected ? 'Deselect file' : 'Select file'}
                           >
@@ -5241,7 +5844,7 @@ export default function App() {
                           </button>
 
                           {/* File Thumbnail / Icon */}
-                          <div className="w-11 h-11 rounded-xl bg-[#24211D] border border-[#2C2824] flex items-center justify-center shrink-0 overflow-hidden">
+                          <div className="w-11 h-11 rounded-xl bg-[#181A26] border border-[#252838] flex items-center justify-center shrink-0 overflow-hidden">
                             {file.previewDataUrl && file.mimeType.startsWith('image/') ? (
                               <img
                                 src={file.previewDataUrl}
@@ -5257,33 +5860,33 @@ export default function App() {
                           <div className="min-w-0 flex-1">
                             <div className="flex items-center gap-1.5">
                               <span
-                                className="text-sm font-bold text-[#F2EFE9] group-hover:text-[#D97757] text-left break-all line-clamp-1 transition-colors"
+                                className="text-sm font-bold text-white group-hover:text-blue-400 text-left break-all line-clamp-1 transition-colors"
                                 title={file.name}
                               >
                                 {file.name}
                               </span>
                               {file.starred && (
                                 <Star
-                                  className="w-3.5 h-3.5 text-[#D97757] shrink-0"
-                                  fill="#D97757"
+                                  className="w-3.5 h-3.5 text-amber-400 shrink-0"
+                                  fill="currentColor"
                                 />
                               )}
                             </div>
-                            <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-[#9E978E] mt-0.5 tabular-nums">
-                              <span className="text-[#F2EFE9] font-semibold">
+                            <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-zinc-400 mt-0.5 tabular-nums">
+                              <span className="text-white font-semibold">
                                 {formatBytes(file.sizeBytes)}
                               </span>
                               <span aria-hidden="true">·</span>
                               {isLocked ? (
-                                <span className="text-[#D99B26] font-semibold">
+                                <span className="text-amber-400 font-semibold">
                                   Locked (&gt;25 GB)
                                 </span>
                               ) : offlineFilesMap[file.id] ? (
-                                <span className="text-[#2E9E6B] font-semibold">
+                                <span className="text-emerald-400 font-semibold">
                                   Offline Ready
                                 </span>
                               ) : savingOfflineFileId === file.id ? (
-                                <span className="text-[#D97757] font-semibold">
+                                <span className="text-blue-400 font-semibold">
                                   Saving {offlineProgressPct}%
                                 </span>
                               ) : (
@@ -5292,7 +5895,7 @@ export default function App() {
                               {existingShare && (
                                 <>
                                   <span aria-hidden="true">·</span>
-                                  <span className="text-[#389E6C] font-semibold">Shared</span>
+                                  <span className="text-cyan-400 font-semibold">Shared</span>
                                 </>
                               )}
                             </div>
@@ -5301,7 +5904,7 @@ export default function App() {
                                 {fileTags.map((tag) => (
                                   <span
                                     key={tag}
-                                    className="inline-flex items-center px-1.5 py-0.5 rounded-md text-[10px] font-semibold bg-[#141311] border border-[#2C2824] text-[#D97757]"
+                                    className="inline-flex items-center px-1.5 py-0.5 rounded-md text-[10px] font-semibold bg-blue-600/15 border border-blue-500/30 text-blue-400"
                                   >
                                     {tag}
                                   </span>

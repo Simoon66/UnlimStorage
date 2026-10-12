@@ -6,22 +6,22 @@
 }
 
 :root {
-  --background: #FFFFFF;
-  --foreground: #0F172A;
-  --card: #FFFFFF;
-  --card-subtle: #F8FAFC;
-  --border: #E2E8F0;
-  --border-hover: #CBD5E1;
-  --primary: #2563EB;
-  --primary-hover: #1D4ED8;
-  --muted: #64748B;
+  --background: #0A0B0E;
+  --foreground: #F3F4F6;
+  --card: #13141C;
+  --card-subtle: #181924;
+  --border: #212330;
+  --border-hover: #2E3144;
+  --primary: #3B82F6;
+  --primary-hover: #2563EB;
+  --muted: #94A3B8;
 }
 
 @layer base {
   html,
   body {
-    background-color: #FFFFFF;
-    color: #0F172A;
+    background-color: #0A0B0E;
+    color: #F3F4F6;
     font-family: var(--font-sans);
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
@@ -103,7 +103,7 @@
 @media (hover: hover) {
   .animate-app-card:hover {
     transform: translateY(-2px);
-    box-shadow: 0 10px 24px -8px rgba(15, 23, 42, 0.08), 0 4px 10px -4px rgba(37, 99, 235, 0.05);
+    box-shadow: 0 10px 24px -8px rgba(0, 0, 0, 0.4), 0 4px 12px -4px rgba(59, 130, 246, 0.12);
   }
 }
 
@@ -144,7 +144,7 @@ button:active:not(:disabled) {
   transform: scale(0.97);
 }
 
-/* Hide scrollbars on mobile horizontal filter chip rails */
+/* Hide scrollbars on horizontal filter rails */
 .no-scrollbar::-webkit-scrollbar {
   display: none;
 }
@@ -153,157 +153,18 @@ button:active:not(:disabled) {
   scrollbar-width: none;
 }
 
-/* ============================================================================
-   FULL CLEAN WHITE MINIMAL THEME OVERRIDES
-   Automatically maps legacy dark palette classes across all views and modals
-   to a crisp, high-contrast white minimal workspace.
-   ============================================================================ */
-
-/* Surfaces & Backgrounds */
-.bg-\[\#141311\] {
-  background-color: #F8FAFC !important;
-}
-.bg-\[\#141311\]\/90,
-.bg-\[\#141311\]\/80 {
-  background-color: rgba(255, 255, 255, 0.92) !important;
-}
-.bg-\[\#1C1A17\] {
-  background-color: #FFFFFF !important;
-}
-.bg-\[\#24211D\] {
-  background-color: #F1F5F9 !important;
-}
-.bg-\[\#24211D\]\/60,
-.bg-\[\#24211D\]\/50 {
-  background-color: rgba(241, 245, 249, 0.75) !important;
-}
-.bg-\[\#262420\],
-.bg-\[\#2C2824\] {
-  background-color: #E2E8F0 !important;
-}
-.hover\:bg-\[\#1C1A17\]:hover {
-  background-color: #F8FAFC !important;
-}
-.hover\:bg-\[\#24211D\]:hover,
-.hover\:bg-\[\#24211D\]\/60:hover,
-.hover\:bg-\[\#24211D\]\/50:hover,
-.hover\:bg-\[\#262420\]:hover,
-.hover\:bg-\[\#2C2824\]:hover {
-  background-color: #EFF6FF !important;
-}
-
-/* Primary Brand Accent: Clean Royal Blue (#2563EB) */
-.bg-\[\#D97757\] {
-  background-color: #2563EB !important;
-  color: #FFFFFF !important;
-}
-.hover\:bg-\[\#E08568\]:hover,
-.hover\:bg-\[\#D97757\]:hover {
-  background-color: #1D4ED8 !important;
-  color: #FFFFFF !important;
-}
-
-/* Typography */
-.text-\[\#F2EFE9\] {
-  color: #0F172A !important;
-}
-.text-\[\#F2EFE9\]\/80 {
-  color: #334155 !important;
-}
-.text-\[\#9E978E\] {
-  color: #64748B !important;
-}
-.text-\[\#D97757\] {
-  color: #2563EB !important;
-}
-.text-\[\#141311\] {
-  color: #FFFFFF !important;
-}
-.hover\:text-\[\#F2EFE9\]:hover {
-  color: #0F172A !important;
-}
-.hover\:text-\[\#D97757\]:hover,
-.group:hover .group-hover\:text-\[\#D97757\] {
-  color: #2563EB !important;
-}
-.hover\:text-\[\#141311\]:hover {
-  color: #FFFFFF !important;
-}
-.placeholder-\[\#9E978E\]::placeholder {
-  color: #94A3B8 !important;
-}
-
-/* Borders & Dividers */
-.border-\[\#2C2824\] {
-  border-color: #E2E8F0 !important;
-}
-.divide-\[\#2C2824\] > :not([hidden]) ~ :not([hidden]) {
-  border-color: #E2E8F0 !important;
-}
-.divide-\[\#2C2824\]\/50 > :not([hidden]) ~ :not([hidden]) {
-  border-color: #F1F5F9 !important;
-}
-.border-\[\#D97757\] {
-  border-color: #2563EB !important;
-}
-.border-\[\#D97757\]\/50,
-.border-\[\#D97757\]\/60,
-.border-\[\#D97757\]\/70 {
-  border-color: rgba(37, 99, 235, 0.45) !important;
-}
-.hover\:border-\[\#D97757\]:hover,
-.hover\:border-\[\#D97757\]\/70:hover,
-.hover\:border-\[\#D97757\]\/60:hover,
-.focus\:border-\[\#D97757\]:focus {
-  border-color: #2563EB !important;
-}
-
-/* Semantic Status Colors */
-.text-\[\#2E9E6B\],
-.text-\[\#389E6C\] {
-  color: #16A34A !important;
-}
-.border-\[\#2E9E6B\],
-.border-\[\#389E6C\] {
-  border-color: #16A34A !important;
-}
-.bg-\[\#2E9E6B\],
-.bg-\[\#389E6C\] {
-  background-color: #16A34A !important;
-  color: #FFFFFF !important;
-}
-.text-\[\#D99B26\] {
-  color: #D97706 !important;
-}
-.border-\[\#D99B26\] {
-  border-color: #D97706 !important;
-}
-.text-\[\#D94848\] {
-  color: #DC2626 !important;
-}
-.border-\[\#D94848\] {
-  border-color: #DC2626 !important;
-}
-.bg-\[\#D94848\] {
-  background-color: #DC2626 !important;
-  color: #FFFFFF !important;
-}
-.accent-\[\#D97757\] {
-  accent-color: #2563EB !important;
-}
-
-/* Subtle elevation & clean scrollbar */
+/* Dark sleek scrollbar */
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;
 }
 ::-webkit-scrollbar-track {
-  background: #F8FAFC;
+  background: #0A0B0E;
 }
 ::-webkit-scrollbar-thumb {
-  background: #CBD5E1;
+  background: #252837;
   border-radius: 9999px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #94A3B8;
+  background: #3B82F6;
 }

@@ -535,24 +535,30 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
 
   // Compute the active <video src="..."> URL immediately (1080p High maps to Original lossless stream)
   const activeVideoSrc = useMemo(() => {
+    // 1. If we have a local blob ready for playback, ALWAYS prioritize it for instant, stutter-free playback
+    if (effectiveLocalBlobUrl && (!isMkv || forceLocalBlobFallback || !serverTranscodeAvailable)) {
+      return effectiveLocalBlobUrl;
+    }
     if (forceLocalBlobFallback && effectiveLocalBlobUrl) {
       return effectiveLocalBlobUrl;
     }
-    if (!isMkv && (!useServerTranscode || !serverTranscodeAvailable) && effectiveLocalBlobUrl) {
-      return effectiveLocalBlobUrl;
-    }
-    if (useServerTranscode && isServerApiSource && serverTranscodeAvailable) {
+    // 2. For MKVs with server transcode, stream the transcoded feed
+    if (isMkv && useServerTranscode && isServerApiSource && serverTranscodeAvailable) {
       const serverQualityParam = selectedQuality === '1080p' ? 'Original' : selectedQuality;
       const sep = streamEndpoints.streamBaseUrl.includes('?') ? '&' : '?';
       return `${streamEndpoints.streamBaseUrl}${sep}audio=${activeAudioIndex}&quality=${encodeURIComponent(
         serverQualityParam
       )}&start=${streamStartOffset.toFixed(2)}${hydrationNonce ? `&r=${hydrationNonce}` : ''}`;
     }
-    if (!serverTranscodeAvailable && tgWorkerStreamUrl) {
-      return tgWorkerStreamUrl;
-    }
+    // 3. For MP4/WebM/MOV, prefer direct streaming URL or local blob URL
     if (effectiveLocalBlobUrl) {
       return effectiveLocalBlobUrl;
+    }
+    if (srcUrl && !srcUrl.includes('/stream')) {
+      return srcUrl;
+    }
+    if (!serverTranscodeAvailable && tgWorkerStreamUrl) {
+      return tgWorkerStreamUrl;
     }
     if (tgWorkerStreamUrl && srcUrl.startsWith('/api/files/')) {
       return tgWorkerStreamUrl;
@@ -1558,32 +1564,15 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
               if (autoPlayAfterSwitchRef.current) {
                 autoPlayAfterSwitchRef.current = false;
                 vid.play().catch(() => {
-                  // Ensure first frame is decoded and painted even if browser blocks unmuted autoplay
-                  if (vid.currentTime === 0) {
-                    try {
-                      vid.currentTime = 0.05;
-                    } catch {
-                      // ignore
-                    }
-                  }
+                  // If unmuted playback is blocked before user gesture, retry muted so visual frames paint cleanly
+                  vid.muted = true;
+                  setIsMuted(true);
+                  vid.play().catch(() => null);
                 });
-              } else if (vid.paused && vid.currentTime === 0) {
-                try {
-                  vid.currentTime = 0.05;
-                } catch {
-                  // ignore
-                }
               }
             }}
-            onLoadedData={(e) => {
+            onLoadedData={() => {
               setIsBuffering(false);
-              const vid = e.currentTarget;
-              if (!useServerTranscode && isServerApiSource && vid.videoWidth === 0) {
-                autoPlayAfterSwitchRef.current = true;
-                setIsBuffering(true);
-                setUseServerTranscode(true);
-                return;
-              }
               syncBrowserMediaTracks();
             }}
             onLoadedMetadata={(e) => {
@@ -1609,12 +1598,6 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
                     // ignore
                   }
                 }
-              }
-              if (!useServerTranscode && isServerApiSource && vid.videoWidth === 0) {
-                autoPlayAfterSwitchRef.current = true;
-                setIsBuffering(true);
-                setUseServerTranscode(true);
-                return;
               }
               syncBrowserMediaTracks();
             }}
