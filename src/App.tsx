@@ -45,6 +45,12 @@ import {
   Smartphone,
   Bell,
   Check,
+  Pencil,
+  ArrowUpDown,
+  ArrowUp,
+  ArrowDown,
+  ChevronDown,
+  CornerLeftUp,
 } from 'lucide-react';
 import {
   User,
@@ -391,6 +397,29 @@ export default function App() {
     }
   });
 
+  // Explorer Sort state (Name, Size, Date Modified, Type + Asc/Desc direction)
+  const [sortBy, setSortBy] = useState<'date' | 'name' | 'size' | 'type'>(() => {
+    try {
+      const saved = localStorage.getItem('unlimcloud_sort_by_v1');
+      if (saved === 'name' || saved === 'size' || saved === 'date' || saved === 'type') {
+        return saved;
+      }
+      return 'date';
+    } catch {
+      return 'date';
+    }
+  });
+  const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>(() => {
+    try {
+      const saved = localStorage.getItem('unlimcloud_sort_order_v1');
+      return saved === 'asc' || saved === 'desc' ? saved : 'desc';
+    } catch {
+      return 'desc';
+    }
+  });
+  const [showSortMenu, setShowSortMenu] = useState<boolean>(false);
+  const sortMenuRef = useRef<HTMLDivElement | null>(null);
+
   // Desktop 'Lasso' Drag-to-Select Marquee State
   const [lassoModeActive, setLassoModeActive] = useState<boolean>(false);
   const [lassoBox, setLassoBox] = useState<{
@@ -461,6 +490,23 @@ export default function App() {
   const [showAuthModal, setShowAuthModal] = useState(false);
   const [draggedFileId, setDraggedFileId] = useState<string | null>(null);
   const [dragOverFolderId, setDragOverFolderId] = useState<string | null>(null);
+
+  // Skeleton Loading State (Data Fetching & Navigation Transitions)
+  const [isFetchingWorkspace, setIsFetchingWorkspace] = useState<boolean>(true);
+  const [isNavigatingExplorer, setIsNavigatingExplorer] = useState<boolean>(false);
+  const navSkeletonTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const hasMountedNavRef = useRef<boolean>(false);
+
+  // Right-Click File Context Menu & Rename File Modal State
+  const [fileContextMenu, setFileContextMenu] = useState<{
+    file: FileRecord;
+    x: number;
+    y: number;
+  } | null>(null);
+  const [renameModalFile, setRenameModalFile] = useState<FileRecord | null>(null);
+  const [renameInputValue, setRenameInputValue] = useState<string>('');
+  const [renamingBusy, setRenamingBusy] = useState<boolean>(false);
+  const renameInputRef = useRef<HTMLInputElement | null>(null);
 
   // Real-time notifications & Upload AbortController + Pause/Resume Controller
   const [notifications, setNotifications] = useState<RealtimeNotification[]>([]);
@@ -537,8 +583,89 @@ export default function App() {
     return () => unsubscribe();
   }, []);
 
+  // Perceived-performance skeleton transition when navigating folders or filters
+  useEffect(() => {
+    if (!hasMountedNavRef.current) {
+      hasMountedNavRef.current = true;
+      return;
+    }
+    setIsNavigatingExplorer(true);
+    if (navSkeletonTimerRef.current) {
+      clearTimeout(navSkeletonTimerRef.current);
+    }
+    navSkeletonTimerRef.current = setTimeout(() => {
+      setIsNavigatingExplorer(false);
+      navSkeletonTimerRef.current = null;
+    }, 220);
+    return () => {
+      if (navSkeletonTimerRef.current) {
+        clearTimeout(navSkeletonTimerRef.current);
+      }
+    };
+  }, [currentFolderId, onlyStarred, onlyOffline, selectedTagFilter, activeView]);
+
+  // Dismiss right-click context menu on outside click, scroll, resize, or Escape
+  useEffect(() => {
+    if (!fileContextMenu) return;
+    const handleDismiss = () => setFileContextMenu(null);
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setFileContextMenu(null);
+    };
+    window.addEventListener('click', handleDismiss);
+    window.addEventListener('scroll', handleDismiss, true);
+    window.addEventListener('resize', handleDismiss);
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('click', handleDismiss);
+      window.removeEventListener('scroll', handleDismiss, true);
+      window.removeEventListener('resize', handleDismiss);
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [fileContextMenu]);
+
+  // Close Sort dropdown menu on outside click or Escape key
+  useEffect(() => {
+    if (!showSortMenu) return;
+    const handleOutsideClick = (e: MouseEvent) => {
+      if (sortMenuRef.current && !sortMenuRef.current.contains(e.target as Node)) {
+        setShowSortMenu(false);
+      }
+    };
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setShowSortMenu(false);
+    };
+    document.addEventListener('mousedown', handleOutsideClick);
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', handleOutsideClick);
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [showSortMenu]);
+
+  // Auto-focus and highlight filename stem when Rename modal opens
+  useEffect(() => {
+    if (!renameModalFile) return;
+    setRenameInputValue(renameModalFile.name);
+    const timer = setTimeout(() => {
+      const input = renameInputRef.current;
+      if (!input) return;
+      input.focus();
+      const lastDotIdx = renameModalFile.name.lastIndexOf('.');
+      if (lastDotIdx > 0) {
+        input.setSelectionRange(0, lastDotIdx);
+      } else {
+        input.select();
+      }
+    }, 40);
+    return () => clearTimeout(timer);
+  }, [renameModalFile]);
+
   const loadWorkspaceData = useCallback(async () => {
-    if (!firebaseUser) return;
+    if (!firebaseUser) {
+      setIsFetchingWorkspace(false);
+      return;
+    }
+    setIsFetchingWorkspace(true);
     try {
       const isAdminEmail = firebaseUser.email?.toLowerCase() === 'titumamma2425@gmail.com';
 
@@ -682,6 +809,8 @@ export default function App() {
       }
     } catch (err) {
       console.error('Error loading workspace data:', err);
+    } finally {
+      setIsFetchingWorkspace(false);
     }
   }, [authHeaders, firebaseUser]);
 
@@ -1252,6 +1381,77 @@ export default function App() {
       message: `Moved "${file.name}" to ${destName}.`,
       type: 'completed',
     });
+  };
+
+  const handleOpenFileContextMenu = (e: React.MouseEvent, file: FileRecord) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const menuWidth = 228;
+    const menuHeight = 330;
+    const safeX = Math.max(12, Math.min(e.clientX, window.innerWidth - menuWidth - 12));
+    const safeY = Math.max(12, Math.min(e.clientY, window.innerHeight - menuHeight - 12));
+    setFileContextMenu({ file, x: safeX, y: safeY });
+  };
+
+  const handleRenameFileSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!renameModalFile || renamingBusy) return;
+    const trimmedName = renameInputValue.trim();
+    if (!trimmedName || trimmedName === renameModalFile.name) {
+      setRenameModalFile(null);
+      return;
+    }
+    setRenamingBusy(true);
+    try {
+      const res = await apiFetch(`/api/files/${encodeURIComponent(renameModalFile.id)}`, {
+        method: 'PATCH',
+        headers: authHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ name: trimmedName }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data.error || 'Failed to rename file');
+      }
+      const updatedFile: FileRecord = data.file || {
+        ...renameModalFile,
+        name: trimmedName,
+        updatedAt: new Date().toISOString(),
+      };
+      setFiles((prev) => prev.map((f) => (f.id === renameModalFile.id ? updatedFile : f)));
+      if (inspectedFile?.id === renameModalFile.id) {
+        setInspectedFile(updatedFile);
+      }
+      if (shareModalFile?.id === renameModalFile.id) {
+        setShareModalFile(updatedFile);
+      }
+      syncCloudFileToFirestore(updatedFile, true).catch(() => null);
+      for (const s of shares) {
+        if (s.fileId === updatedFile.id) {
+          syncPublicShareToFirestore({
+            share: s,
+            file: updatedFile,
+          }).catch(() => null);
+        }
+      }
+      pushNotification({
+        id: `rename_${Date.now()}`,
+        timestamp: new Date().toISOString(),
+        title: 'File Renamed',
+        message: `Renamed "${renameModalFile.name}" to "${trimmedName}".`,
+        type: 'completed',
+      });
+      setRenameModalFile(null);
+    } catch (err: unknown) {
+      pushNotification({
+        id: `rename_err_${Date.now()}`,
+        timestamp: new Date().toISOString(),
+        title: 'Rename Failed',
+        message: err instanceof Error ? err.message : 'Could not rename file.',
+        type: 'error',
+      });
+    } finally {
+      setRenamingBusy(false);
+    }
   };
 
   const handleBatchMoveFiles = async (
@@ -2651,9 +2851,14 @@ export default function App() {
     currentFolderId,
   ]);
 
-  // Global Desktop Screen-Wide Drag-and-Drop File Upload Listener
+  // Global Desktop Screen-Wide Drag-and-Drop File Upload Listener (with auto-reset on cancelled drags/dialogs)
   useEffect(() => {
     if (!firebaseUser || publicShareToken) return;
+
+    const resetDragOverlay = () => {
+      dragDepthRef.current = 0;
+      setIsDraggingOver(false);
+    };
 
     const hasExternalFiles = (e: DragEvent) => {
       if (draggedFileId) return false;
@@ -2683,16 +2888,23 @@ export default function App() {
       if (!hasExternalFiles(e)) return;
       e.preventDefault();
       dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
-      if (dragDepthRef.current === 0) {
-        setIsDraggingOver(false);
+      if (
+        dragDepthRef.current === 0 ||
+        !e.relatedTarget ||
+        e.clientX <= 0 ||
+        e.clientY <= 0 ||
+        e.clientX >= window.innerWidth ||
+        e.clientY >= window.innerHeight
+      ) {
+        resetDragOverlay();
       }
     };
 
     const handleWindowDrop = (e: DragEvent) => {
-      if (!hasExternalFiles(e)) return;
+      const external = hasExternalFiles(e);
+      resetDragOverlay();
+      if (!external) return;
       e.preventDefault();
-      dragDepthRef.current = 0;
-      setIsDraggingOver(false);
       if (e.dataTransfer?.files && e.dataTransfer.files.length > 0) {
         if (activeView !== 'explorer') {
           setActiveView('explorer');
@@ -2701,15 +2913,40 @@ export default function App() {
       }
     };
 
+    const handleKeyDownReset = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        resetDragOverlay();
+      }
+    };
+
+    // Note: mousemove never fires during an active OS drag-and-drop; if it fires while isDraggingOver is true, the drag was cancelled
+    const handleMouseMoveWhileStuck = () => {
+      if (isDraggingOver) {
+        resetDragOverlay();
+      }
+    };
+
     window.addEventListener('dragenter', handleWindowDragEnter);
     window.addEventListener('dragover', handleWindowDragOver);
     window.addEventListener('dragleave', handleWindowDragLeave);
     window.addEventListener('drop', handleWindowDrop);
+    window.addEventListener('dragend', resetDragOverlay);
+    window.addEventListener('blur', resetDragOverlay);
+    window.addEventListener('focus', resetDragOverlay);
+    window.addEventListener('pointerdown', resetDragOverlay);
+    window.addEventListener('mousemove', handleMouseMoveWhileStuck);
+    window.addEventListener('keydown', handleKeyDownReset);
     return () => {
       window.removeEventListener('dragenter', handleWindowDragEnter);
       window.removeEventListener('dragover', handleWindowDragOver);
       window.removeEventListener('dragleave', handleWindowDragLeave);
       window.removeEventListener('drop', handleWindowDrop);
+      window.removeEventListener('dragend', resetDragOverlay);
+      window.removeEventListener('blur', resetDragOverlay);
+      window.removeEventListener('focus', resetDragOverlay);
+      window.removeEventListener('pointerdown', resetDragOverlay);
+      window.removeEventListener('mousemove', handleMouseMoveWhileStuck);
+      window.removeEventListener('keydown', handleKeyDownReset);
     };
   });
 
@@ -2850,7 +3087,55 @@ export default function App() {
   const activeFolder = activeFolders.find((f) => f.id === currentFolderId) || null;
   const visibleSubfolders = activeFolders.filter((f) => f.parentId === currentFolderId);
 
-  const visibleFiles = activeFiles.filter((f) => {
+  // Build ordered nested folder breadcrumb path from Root down to activeFolder
+  const folderBreadcrumbChain: FolderRecord[] = (() => {
+    const chain: FolderRecord[] = [];
+    const visited = new Set<string>();
+    let cursorId: string | null = currentFolderId;
+    while (cursorId && !visited.has(cursorId)) {
+      visited.add(cursorId);
+      const found = activeFolders.find((fl) => fl.id === cursorId);
+      if (!found) break;
+      chain.unshift(found);
+      cursorId = found.parentId || null;
+    }
+    return chain;
+  })();
+
+  const handleSelectSortField = (field: 'date' | 'name' | 'size' | 'type') => {
+    if (sortBy === field) {
+      const nextOrder = sortOrder === 'asc' ? 'desc' : 'asc';
+      setSortOrder(nextOrder);
+      try {
+        localStorage.setItem('unlimcloud_sort_order_v1', nextOrder);
+      } catch {
+        // ignore
+      }
+    } else {
+      const defaultOrder: 'asc' | 'desc' = field === 'name' || field === 'type' ? 'asc' : 'desc';
+      setSortBy(field);
+      setSortOrder(defaultOrder);
+      try {
+        localStorage.setItem('unlimcloud_sort_by_v1', field);
+        localStorage.setItem('unlimcloud_sort_order_v1', defaultOrder);
+      } catch {
+        // ignore
+      }
+    }
+    setShowSortMenu(false);
+  };
+
+  const handleSetSortOrder = (nextOrder: 'asc' | 'desc') => {
+    setSortOrder(nextOrder);
+    try {
+      localStorage.setItem('unlimcloud_sort_order_v1', nextOrder);
+    } catch {
+      // ignore
+    }
+    setShowSortMenu(false);
+  };
+
+  const filteredFiles = activeFiles.filter((f) => {
     if (selectedTagFilter) {
       const hasMatchingTag = (f.tags || []).some(
         (t) => t.toLowerCase() === selectedTagFilter.toLowerCase()
@@ -2879,6 +3164,36 @@ export default function App() {
     }
     return true;
   });
+
+  const visibleFiles: FileRecord[] = (() => {
+    const getFileTypeKey = (file: FileRecord) => {
+      const dotIdx = file.name.lastIndexOf('.');
+      const ext = dotIdx > 0 ? file.name.slice(dotIdx + 1).toLowerCase() : '';
+      return ext || (file.mimeType || 'unknown').toLowerCase();
+    };
+
+    return [...filteredFiles].sort((a, b) => {
+      let cmp = 0;
+      if (sortBy === 'name') {
+        cmp = a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' });
+      } else if (sortBy === 'size') {
+        cmp = (a.sizeBytes || 0) - (b.sizeBytes || 0);
+      } else if (sortBy === 'type') {
+        cmp = getFileTypeKey(a).localeCompare(getFileTypeKey(b), undefined, {
+          numeric: true,
+          sensitivity: 'base',
+        });
+        if (cmp === 0) {
+          cmp = a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' });
+        }
+      } else {
+        const timeA = new Date(a.createdAt || 0).getTime() || 0;
+        const timeB = new Date(b.createdAt || 0).getTime() || 0;
+        cmp = timeA - timeB;
+      }
+      return sortOrder === 'asc' ? cmp : -cmp;
+    });
+  })();
 
   const selectedFilesObjects = activeFiles.filter((f) => selectedFileIds.includes(f.id));
   const selectedTotalBytes = selectedFilesObjects.reduce((acc, f) => acc + f.sizeBytes, 0);
@@ -3400,21 +3715,7 @@ export default function App() {
             VIEW 1: MY FILES
         ================================================================== */}
         {activeView === 'explorer' && (
-          <div
-            onDragOver={(e) => {
-              e.preventDefault();
-              setIsDraggingOver(true);
-            }}
-            onDragLeave={() => setIsDraggingOver(false)}
-            onDrop={(e) => {
-              e.preventDefault();
-              setIsDraggingOver(false);
-              if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-                handleUploadFiles(e.dataTransfer.files);
-              }
-            }}
-            className="animate-app-view space-y-4 sm:space-y-5"
-          >
+          <div className="animate-app-view space-y-4 sm:space-y-5">
             {/* Expired Plan / Over-25GB Lock Warning Banner */}
             {lockedFilesCount > 0 && (
               <div className="p-3.5 sm:p-4 rounded-2xl bg-[#1C1A17] border border-[#D99B26] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
@@ -3855,84 +4156,174 @@ export default function App() {
               </form>
             )}
 
-            {/* Breadcrumb (Also acts as Drop Target to move files back to Root) */}
-            {(activeFolder || onlyStarred || selectedTagFilter) && (
-              <div className="flex flex-wrap items-center justify-between gap-2 p-3 bg-[#1C1A17] border border-[#2C2824]">
-                <div className="flex items-center gap-2 text-sm font-semibold min-w-0">
+            {/* Clickable Nested Folder Breadcrumb Path (Jump back to any parent folder or drag files onto parent segments) */}
+            <nav
+              aria-label="Folder breadcrumb path"
+              className="flex flex-wrap items-center justify-between gap-2 px-3.5 py-2.5 rounded-2xl bg-[#1C1A17] border border-[#2C2824] shadow-2xs"
+            >
+              <div className="flex flex-wrap items-center gap-1.5 text-xs sm:text-sm font-semibold min-w-0">
+                {/* Quick 'Up One Level' button when inside a subfolder */}
+                {activeFolder && !onlyStarred && !onlyOffline && !selectedTagFilter && (
                   <button
-                    onClick={() => {
-                      setCurrentFolderId(null);
-                      setOnlyStarred(false);
-                      setSelectedTagFilter(null);
-                    }}
-                    onDragOver={(e) => {
-                      if (draggedFileId) {
-                        e.preventDefault();
-                        setDragOverFolderId('root');
-                      }
-                    }}
-                    onDragLeave={() => {
-                      if (dragOverFolderId === 'root') setDragOverFolderId(null);
-                    }}
-                    onDrop={(e) => {
-                      e.preventDefault();
-                      e.stopPropagation();
-                      setDragOverFolderId(null);
-                      if (draggedFileId) {
-                        const f = files.find((item) => item.id === draggedFileId);
-                        setDraggedFileId(null);
-                        if (f) handleMoveFile(f, null).catch(() => null);
-                      }
-                    }}
-                    className={`min-h-[36px] px-2.5 text-[#9E978E] hover:text-[#F2EFE9] cursor-pointer ${
-                      dragOverFolderId === 'root' ? 'border border-[#D97757] bg-[#24211D] text-[#F2EFE9]' : ''
-                    }`}
+                    type="button"
+                    onClick={() => setCurrentFolderId(activeFolder.parentId || null)}
+                    title={
+                      activeFolder.parentId
+                        ? 'Jump up to parent folder'
+                        : 'Jump back to My Files (Root)'
+                    }
+                    className="min-h-[32px] px-2.5 py-1 rounded-xl bg-[#24211D] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center gap-1 cursor-pointer transition-colors shrink-0 mr-1"
                   >
-                    My Files (Root)
+                    <CornerLeftUp className="w-3.5 h-3.5 text-[#D97757]" />
+                    <span className="text-xs">Up</span>
                   </button>
-                  <ChevronRight className="w-4 h-4 text-[#9E978E] shrink-0" />
-                  <span className="text-[#D97757] truncate flex items-center gap-1.5">
-                    {selectedTagFilter
-                      ? `Label: ${selectedTagFilter}`
-                      : onlyStarred
-                      ? 'Starred Files'
-                      : activeFolder?.name}
-                    {activeFolder?.isPinProtected && (
-                      <span className="px-1.5 py-0.5 text-[10px] font-bold bg-[#24211D] border border-[#D97757]/50 text-[#D97757] flex items-center gap-1">
-                        <KeyRound className="w-2.5 h-2.5" />
-                        PIN Protected
-                      </span>
-                    )}
-                  </span>
-                </div>
+                )}
 
-                {activeFolder && !onlyStarred && !selectedTagFilter && (
-                  <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={() => setShareModalFolder(activeFolder)}
-                      className="min-h-[34px] px-3 py-1 text-xs font-semibold bg-[#24211D] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center gap-1.5 cursor-pointer"
-                    >
-                      <Link2 className="w-3.5 h-3.5 text-[#D97757]" />
-                      <span>Share Folder Gallery</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setFolderPinModalState({
-                          folder: activeFolder,
-                          mode: 'manage',
-                        })
-                      }
-                      className="min-h-[34px] px-3 py-1 text-xs font-semibold bg-[#24211D] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center gap-1.5 cursor-pointer"
-                    >
-                      <KeyRound className="w-3.5 h-3.5 text-[#D97757]" />
-                      <span>{activeFolder.isPinProtected ? 'Manage PIN' : 'Set PIN Lock'}</span>
-                    </button>
-                  </div>
+                {/* Root Segment */}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCurrentFolderId(null);
+                    setOnlyStarred(false);
+                    setOnlyOffline(false);
+                    setSelectedTagFilter(null);
+                  }}
+                  onDragOver={(e) => {
+                    if (draggedFileId) {
+                      e.preventDefault();
+                      setDragOverFolderId('root');
+                    }
+                  }}
+                  onDragLeave={() => {
+                    if (dragOverFolderId === 'root') setDragOverFolderId(null);
+                  }}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setDragOverFolderId(null);
+                    if (draggedFileId) {
+                      const f = files.find((item) => item.id === draggedFileId);
+                      setDraggedFileId(null);
+                      if (f) handleMoveFile(f, null).catch(() => null);
+                    }
+                  }}
+                  className={`min-h-[32px] px-2.5 py-1 rounded-xl flex items-center gap-1.5 transition-colors cursor-pointer ${
+                    dragOverFolderId === 'root'
+                      ? 'border border-[#D97757] bg-[#24211D] text-[#F2EFE9]'
+                      : !activeFolder && !onlyStarred && !onlyOffline && !selectedTagFilter
+                      ? 'bg-blue-50/90 text-[#D97757] font-bold'
+                      : 'text-[#9E978E] hover:text-[#F2EFE9] hover:bg-slate-100/80'
+                  }`}
+                >
+                  <Folder className="w-3.5 h-3.5 text-[#D97757] shrink-0" />
+                  <span>My Files</span>
+                </button>
+
+                {/* Special Filter Crumb OR Nested Folder Ancestor Chain */}
+                {selectedTagFilter ? (
+                  <>
+                    <ChevronRight className="w-3.5 h-3.5 text-[#9E978E] shrink-0" />
+                    <span className="min-h-[32px] px-2.5 py-1 rounded-xl bg-blue-50/90 text-[#D97757] font-bold flex items-center gap-1.5">
+                      <Tag className="w-3.5 h-3.5 shrink-0" />
+                      <span>Label: {selectedTagFilter}</span>
+                    </span>
+                  </>
+                ) : onlyStarred ? (
+                  <>
+                    <ChevronRight className="w-3.5 h-3.5 text-[#9E978E] shrink-0" />
+                    <span className="min-h-[32px] px-2.5 py-1 rounded-xl bg-blue-50/90 text-[#D97757] font-bold flex items-center gap-1.5">
+                      <Star className="w-3.5 h-3.5 shrink-0" fill="currentColor" />
+                      <span>Starred Files</span>
+                    </span>
+                  </>
+                ) : onlyOffline ? (
+                  <>
+                    <ChevronRight className="w-3.5 h-3.5 text-[#9E978E] shrink-0" />
+                    <span className="min-h-[32px] px-2.5 py-1 rounded-xl bg-emerald-50 text-[#2E9E6B] font-bold flex items-center gap-1.5">
+                      <Smartphone className="w-3.5 h-3.5 shrink-0" />
+                      <span>Offline Saved Files</span>
+                    </span>
+                  </>
+                ) : (
+                  folderBreadcrumbChain.map((crumb, idx) => {
+                    const isLastCrumb = idx === folderBreadcrumbChain.length - 1;
+                    const isCrumbDropTarget = dragOverFolderId === crumb.id;
+                    return (
+                      <React.Fragment key={crumb.id}>
+                        <ChevronRight className="w-3.5 h-3.5 text-[#9E978E] shrink-0" />
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setCurrentFolderId(crumb.id);
+                            setOnlyStarred(false);
+                            setOnlyOffline(false);
+                            setSelectedTagFilter(null);
+                          }}
+                          onDragOver={(e) => {
+                            if (draggedFileId && crumb.id !== currentFolderId) {
+                              e.preventDefault();
+                              setDragOverFolderId(crumb.id);
+                            }
+                          }}
+                          onDragLeave={() => {
+                            if (dragOverFolderId === crumb.id) setDragOverFolderId(null);
+                          }}
+                          onDrop={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            setDragOverFolderId(null);
+                            if (draggedFileId && crumb.id !== currentFolderId) {
+                              const f = files.find((item) => item.id === draggedFileId);
+                              setDraggedFileId(null);
+                              if (f) handleMoveFile(f, crumb.id).catch(() => null);
+                            }
+                          }}
+                          className={`min-h-[32px] px-2.5 py-1 rounded-xl flex items-center gap-1.5 max-w-[200px] sm:max-w-[260px] truncate transition-colors cursor-pointer ${
+                            isCrumbDropTarget
+                              ? 'border border-[#D97757] bg-[#24211D] text-[#F2EFE9]'
+                              : isLastCrumb
+                              ? 'bg-blue-50/90 text-[#D97757] font-bold'
+                              : 'text-[#9E978E] hover:text-[#F2EFE9] hover:bg-slate-100/80'
+                          }`}
+                          title={`Open folder "${crumb.name}"`}
+                        >
+                          <span className="truncate">{crumb.name}</span>
+                          {crumb.isPinProtected && (
+                            <KeyRound className="w-3 h-3 text-[#D97757] shrink-0" />
+                          )}
+                        </button>
+                      </React.Fragment>
+                    );
+                  })
                 )}
               </div>
-            )}
+
+              {activeFolder && !onlyStarred && !selectedTagFilter && (
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setShareModalFolder(activeFolder)}
+                    className="min-h-[32px] px-3 py-1 rounded-xl text-xs font-semibold bg-[#24211D] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Link2 className="w-3.5 h-3.5 text-[#D97757]" />
+                    <span>Share Folder Gallery</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setFolderPinModalState({
+                        folder: activeFolder,
+                        mode: 'manage',
+                      })
+                    }
+                    className="min-h-[32px] px-3 py-1 rounded-xl text-xs font-semibold bg-[#24211D] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <KeyRound className="w-3.5 h-3.5 text-[#D97757]" />
+                    <span>{activeFolder.isPinProtected ? 'Manage PIN' : 'Set PIN Lock'}</span>
+                  </button>
+                </div>
+              )}
+            </nav>
 
             {/* Folders Section (Supports Google Drive-style Drag & Drop + Content/Status Visual Indicators) */}
             {!onlyStarred && !onlyOffline && !selectedTagFilter && !searchQuery.trim() && visibleSubfolders.length > 0 && (
@@ -4286,10 +4677,118 @@ export default function App() {
                   )}
                 </div>
 
-                <div className="flex items-center gap-3">
-                  <span className="hidden lg:inline text-xs text-[#9E978E]">
-                    Click &amp; drag (Lasso) or check files to multi-select
+                <div className="flex items-center gap-2 sm:gap-2.5">
+                  <span className="hidden xl:inline text-xs text-[#9E978E]">
+                    Right-click any file for quick actions or drag (Lasso) to multi-select
                   </span>
+
+                  {/* Sort Dropdown Menu (Name, Size, Date Modified, Type) */}
+                  <div ref={sortMenuRef} className="relative">
+                    <button
+                      type="button"
+                      onClick={() => setShowSortMenu((prev) => !prev)}
+                      aria-haspopup="menu"
+                      aria-expanded={showSortMenu}
+                      aria-label="Sort files"
+                      className="min-h-[32px] px-2.5 py-1 rounded-xl text-xs font-semibold bg-[#1C1A17] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center gap-1.5 cursor-pointer transition-colors"
+                    >
+                      <ArrowUpDown className="w-3.5 h-3.5 text-[#D97757] shrink-0" />
+                      <span>
+                        Sort:{' '}
+                        {sortBy === 'name'
+                          ? 'Name'
+                          : sortBy === 'size'
+                          ? 'Size'
+                          : sortBy === 'type'
+                          ? 'Type'
+                          : 'Date Modified'}
+                      </span>
+                      {sortOrder === 'asc' ? (
+                        <ArrowUp className="w-3 h-3 text-[#9E978E] shrink-0" />
+                      ) : (
+                        <ArrowDown className="w-3 h-3 text-[#9E978E] shrink-0" />
+                      )}
+                      <ChevronDown className="w-3 h-3 text-[#9E978E] shrink-0" />
+                    </button>
+
+                    {showSortMenu && (
+                      <div
+                        role="menu"
+                        aria-label="Sort files by"
+                        className="animate-app-pop absolute right-0 top-full mt-1.5 z-40 w-52 rounded-2xl bg-white/98 backdrop-blur-md border border-slate-200/90 shadow-[0_14px_38px_rgba(15,23,42,0.16)] p-1.5 select-none"
+                      >
+                        <div className="px-2.5 py-1.5 text-[11px] font-bold uppercase tracking-wider text-slate-400">
+                          Sort Files By
+                        </div>
+                        {(
+                          [
+                            { id: 'name', label: 'Name' },
+                            { id: 'size', label: 'Size' },
+                            { id: 'date', label: 'Date Modified' },
+                            { id: 'type', label: 'Type' },
+                          ] as const
+                        ).map((opt) => {
+                          const isSelected = sortBy === opt.id;
+                          return (
+                            <button
+                              key={opt.id}
+                              type="button"
+                              role="menuitem"
+                              onClick={() => handleSelectSortField(opt.id)}
+                              className={`w-full px-2.5 py-2 rounded-xl text-xs font-semibold flex items-center justify-between gap-2 cursor-pointer transition-colors ${
+                                isSelected
+                                  ? 'bg-blue-50/90 text-[#D97757]'
+                                  : 'text-slate-700 hover:bg-slate-100/90'
+                              }`}
+                            >
+                              <span className="flex items-center gap-2">
+                                <Check
+                                  className={`w-3.5 h-3.5 ${
+                                    isSelected ? 'opacity-100 text-[#D97757]' : 'opacity-0'
+                                  }`}
+                                />
+                                <span>{opt.label}</span>
+                              </span>
+                              {isSelected && (
+                                <span className="text-[10px] font-bold text-[#D97757] flex items-center gap-0.5">
+                                  {sortOrder === 'asc' ? 'ASC ↑' : 'DESC ↓'}
+                                </span>
+                              )}
+                            </button>
+                          );
+                        })}
+
+                        <div className="my-1 border-t border-slate-100" />
+                        <div className="grid grid-cols-2 gap-1 p-0.5">
+                          <button
+                            type="button"
+                            onClick={() => handleSetSortOrder('asc')}
+                            className={`min-h-[30px] px-2 py-1 rounded-lg text-[11px] font-semibold flex items-center justify-center gap-1 cursor-pointer transition-colors ${
+                              sortOrder === 'asc'
+                                ? 'bg-[#D97757] text-[#141311]'
+                                : 'bg-slate-100 text-slate-600 hover:text-slate-900'
+                            }`}
+                          >
+                            <ArrowUp className="w-3 h-3" />
+                            <span>Ascending</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleSetSortOrder('desc')}
+                            className={`min-h-[30px] px-2 py-1 rounded-lg text-[11px] font-semibold flex items-center justify-center gap-1 cursor-pointer transition-colors ${
+                              sortOrder === 'desc'
+                                ? 'bg-[#D97757] text-[#141311]'
+                                : 'bg-slate-100 text-slate-600 hover:text-slate-900'
+                            }`}
+                          >
+                            <ArrowDown className="w-3 h-3" />
+                            <span>Descending</span>
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
                   {/* Grid / List Layout Toggle */}
                   <div className="flex items-center bg-[#1C1A17] border border-[#2C2824]">
                     <button
@@ -4322,7 +4821,71 @@ export default function App() {
                 </div>
               </div>
 
-              {visibleFiles.length === 0 ? (
+              {(isFetchingWorkspace && files.length === 0) || isNavigatingExplorer ? (
+                explorerLayout === 'list' ? (
+                  /* ============================================================
+                      SKELETON LOADING STATE — LIST VIEW
+                  ============================================================ */
+                  <div
+                    aria-busy="true"
+                    aria-label="Loading file list"
+                    className="rounded-2xl overflow-hidden bg-[#1C1A17] border border-[#2C2824] divide-y divide-[#2C2824]"
+                  >
+                    {[68, 52, 74, 46, 62, 58].map((widthPct, idx) => (
+                      <div
+                        key={idx}
+                        className="p-3 sm:px-4 flex items-center justify-between gap-3"
+                      >
+                        <div className="flex items-center gap-3 min-w-0 flex-1">
+                          <div className="w-8 h-8 rounded-lg bg-[#24211D] border border-[#2C2824] animate-pulse shrink-0" />
+                          <div className="w-10 h-10 rounded-xl bg-[#24211D] border border-[#2C2824] animate-pulse shrink-0" />
+                          <div className="min-w-0 flex-1 space-y-2">
+                            <div
+                              style={{ width: `${widthPct}%` }}
+                              className="h-3.5 max-w-xs rounded-md bg-slate-200/80 animate-pulse"
+                            />
+                            <div className="flex items-center gap-2">
+                              <div className="h-2.5 w-14 rounded-md bg-slate-200/60 animate-pulse" />
+                              <div className="h-2.5 w-20 rounded-md bg-slate-100 animate-pulse" />
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  /* ============================================================
+                      SKELETON LOADING STATE — GRID VIEW CARDS
+                  ============================================================ */
+                  <div
+                    aria-busy="true"
+                    aria-label="Loading file grid cards"
+                    className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3 sm:gap-4"
+                  >
+                    {[72, 58, 80, 64, 54, 76, 60, 68].map((widthPct, idx) => (
+                      <div
+                        key={idx}
+                        className="rounded-2xl p-3.5 sm:p-4 bg-[#1C1A17] border border-[#2C2824] flex items-center justify-between gap-3"
+                      >
+                        <div className="flex items-center gap-3 min-w-0 flex-1">
+                          <div className="w-8 h-8 rounded-lg bg-[#24211D] border border-[#2C2824] animate-pulse shrink-0" />
+                          <div className="w-11 h-11 rounded-xl bg-[#24211D] border border-[#2C2824] animate-pulse shrink-0" />
+                          <div className="min-w-0 flex-1 space-y-2">
+                            <div
+                              style={{ width: `${widthPct}%` }}
+                              className="h-3.5 rounded-md bg-slate-200/80 animate-pulse"
+                            />
+                            <div className="flex items-center gap-2">
+                              <div className="h-2.5 w-12 rounded-md bg-slate-200/60 animate-pulse" />
+                              <div className="h-2.5 w-16 rounded-md bg-slate-100 animate-pulse" />
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )
+              ) : visibleFiles.length === 0 ? (
                 <div
                   className={`p-8 sm:p-12 bg-[#1C1A17] border text-center space-y-3 ${
                     isDraggingOver ? 'border-[#D97757]' : 'border-[#2C2824]'
@@ -4400,6 +4963,7 @@ export default function App() {
                         key={file.id}
                         data-select-file-id={file.id}
                         draggable={!isLocked}
+                        onContextMenu={(e) => handleOpenFileContextMenu(e, file)}
                         onClick={() => {
                           if (isLocked) {
                             setActiveView('pricing');
@@ -4569,6 +5133,7 @@ export default function App() {
                         key={file.id}
                         data-select-file-id={file.id}
                         draggable={!isLocked && !lassoModeActive}
+                        onContextMenu={(e) => handleOpenFileContextMenu(e, file)}
                         onClick={() => {
                           if (isLocked) {
                             setActiveView('pricing');
@@ -4991,7 +5556,23 @@ export default function App() {
       ==================================================================== */}
       {isDraggingOver && !draggedFileId && (
         <div
+          onClick={() => {
+            dragDepthRef.current = 0;
+            setIsDraggingOver(false);
+          }}
           onDragOver={(e) => e.preventDefault()}
+          onDragLeave={(e) => {
+            if (
+              !e.relatedTarget ||
+              e.clientX <= 0 ||
+              e.clientY <= 0 ||
+              e.clientX >= window.innerWidth ||
+              e.clientY >= window.innerHeight
+            ) {
+              dragDepthRef.current = 0;
+              setIsDraggingOver(false);
+            }
+          }}
           onDrop={(e) => {
             e.preventDefault();
             dragDepthRef.current = 0;
@@ -5003,10 +5584,22 @@ export default function App() {
               handleUploadFiles(e.dataTransfer.files);
             }
           }}
-          className="fixed inset-0 z-50 bg-[#141311]/90 backdrop-blur-sm border-4 border-dashed border-[#D97757] m-3 flex items-center justify-center p-6 pointer-events-auto"
+          className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-xs border-4 border-dashed border-[#D97757] m-3 rounded-3xl flex items-center justify-center p-6 pointer-events-auto cursor-pointer"
         >
-          <div className="max-w-md w-full bg-[#1C1A17] border border-[#D97757] p-8 text-center space-y-4 shadow-2xl pointer-events-none">
-            <div className="w-16 h-16 mx-auto bg-[#24211D] border border-[#D97757] flex items-center justify-center">
+          <div className="relative max-w-md w-full bg-[#1C1A17] border border-[#D97757] rounded-2xl p-8 text-center space-y-4 shadow-2xl">
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                dragDepthRef.current = 0;
+                setIsDraggingOver(false);
+              }}
+              aria-label="Dismiss upload overlay"
+              className="w-8 h-8 rounded-xl bg-[#24211D] border border-[#2C2824] text-[#9E978E] hover:text-[#F2EFE9] absolute top-3.5 right-3.5 flex items-center justify-center cursor-pointer"
+            >
+              <X className="w-4 h-4" />
+            </button>
+            <div className="w-16 h-16 mx-auto rounded-2xl bg-[#24211D] border border-[#D97757] flex items-center justify-center">
               <Upload className="w-8 h-8 text-[#D97757]" />
             </div>
             <div className="space-y-1.5">
@@ -5019,6 +5612,9 @@ export default function App() {
                   {activeFolder ? activeFolder.name : 'My Cloud Drive (Root)'}
                 </strong>{' '}
                 in <strong className="text-[#D97757]">100% Original Lossless Quality</strong>
+              </p>
+              <p className="text-[11px] text-[#9E978E] pt-1">
+                Click anywhere or press Esc to cancel
               </p>
             </div>
           </div>
@@ -5562,6 +6158,273 @@ export default function App() {
           onGoogleSignIn={handleGoogleSignIn}
           onSignOut={handleSignOut}
         />
+      )}
+
+      {/* ====================================================================
+          RIGHT-CLICK FILE CONTEXT MENU (Copy, Move, Rename, Delete & Quick Actions)
+      ==================================================================== */}
+      {fileContextMenu && (
+        <div
+          style={{
+            left: `${fileContextMenu.x}px`,
+            top: `${fileContextMenu.y}px`,
+          }}
+          onClick={(e) => e.stopPropagation()}
+          onContextMenu={(e) => e.preventDefault()}
+          role="menu"
+          aria-label={`Actions for ${fileContextMenu.file.name}`}
+          className="animate-app-pop fixed z-50 w-56 rounded-2xl bg-white/98 backdrop-blur-md border border-slate-200/90 shadow-[0_14px_38px_rgba(15,23,42,0.16)] p-1.5 select-none"
+        >
+          {/* Context Menu File Header */}
+          <div className="px-2.5 py-2 border-b border-slate-100 mb-1">
+            <div className="text-xs font-bold text-slate-900 truncate" title={fileContextMenu.file.name}>
+              {fileContextMenu.file.name}
+            </div>
+            <div className="text-[11px] text-slate-500 tabular-nums mt-0.5">
+              {formatBytes(fileContextMenu.file.sizeBytes)}
+            </div>
+          </div>
+
+          {/* 1. Preview */}
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => {
+              const target = fileContextMenu.file;
+              setFileContextMenu(null);
+              if (target.lockedOverQuota) {
+                setActiveView('pricing');
+              } else {
+                setInspectedFile(target);
+              }
+            }}
+            className="w-full px-2.5 py-2 rounded-xl text-xs font-semibold text-slate-800 hover:bg-slate-100/90 flex items-center justify-between gap-2 cursor-pointer transition-colors"
+          >
+            <span className="flex items-center gap-2.5">
+              <Eye className="w-3.5 h-3.5 text-[#D97757]" />
+              <span>Preview File</span>
+            </span>
+          </button>
+
+          {/* 2. Rename */}
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => {
+              const target = fileContextMenu.file;
+              setFileContextMenu(null);
+              setRenameModalFile(target);
+            }}
+            className="w-full px-2.5 py-2 rounded-xl text-xs font-semibold text-slate-800 hover:bg-slate-100/90 flex items-center justify-between gap-2 cursor-pointer transition-colors"
+          >
+            <span className="flex items-center gap-2.5">
+              <Pencil className="w-3.5 h-3.5 text-[#D97757]" />
+              <span>Rename</span>
+            </span>
+          </button>
+
+          {/* 3. Copy */}
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => {
+              const target = fileContextMenu.file;
+              setFileContextMenu(null);
+              setMoveModalMode('copy');
+              setMoveModalFile(target);
+            }}
+            className="w-full px-2.5 py-2 rounded-xl text-xs font-semibold text-slate-800 hover:bg-slate-100/90 flex items-center justify-between gap-2 cursor-pointer transition-colors"
+          >
+            <span className="flex items-center gap-2.5">
+              <Copy className="w-3.5 h-3.5 text-[#D97757]" />
+              <span>Copy to Folder...</span>
+            </span>
+          </button>
+
+          {/* 4. Move */}
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => {
+              const target = fileContextMenu.file;
+              setFileContextMenu(null);
+              setMoveModalMode('move');
+              setMoveModalFile(target);
+            }}
+            className="w-full px-2.5 py-2 rounded-xl text-xs font-semibold text-slate-800 hover:bg-slate-100/90 flex items-center justify-between gap-2 cursor-pointer transition-colors"
+          >
+            <span className="flex items-center gap-2.5">
+              <FolderInput className="w-3.5 h-3.5 text-[#D97757]" />
+              <span>Move to Folder...</span>
+            </span>
+          </button>
+
+          {/* 5. Share */}
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => {
+              const target = fileContextMenu.file;
+              setFileContextMenu(null);
+              setShareModalFile(target);
+            }}
+            className="w-full px-2.5 py-2 rounded-xl text-xs font-semibold text-slate-800 hover:bg-slate-100/90 flex items-center justify-between gap-2 cursor-pointer transition-colors"
+          >
+            <span className="flex items-center gap-2.5">
+              <Link2 className="w-3.5 h-3.5 text-[#D97757]" />
+              <span>Share Link</span>
+            </span>
+          </button>
+
+          {/* 6. Star / Unstar */}
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => {
+              const target = fileContextMenu.file;
+              setFileContextMenu(null);
+              void handleToggleStar(target);
+            }}
+            className="w-full px-2.5 py-2 rounded-xl text-xs font-semibold text-slate-800 hover:bg-slate-100/90 flex items-center justify-between gap-2 cursor-pointer transition-colors"
+          >
+            <span className="flex items-center gap-2.5">
+              <Star
+                className="w-3.5 h-3.5 text-[#D97757]"
+                fill={fileContextMenu.file.starred ? '#D97757' : 'none'}
+              />
+              <span>{fileContextMenu.file.starred ? 'Remove Star' : 'Add to Starred'}</span>
+            </span>
+          </button>
+
+          {/* 7. Download */}
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => {
+              const target = fileContextMenu.file;
+              setFileContextMenu(null);
+              void handleDownloadFile(target);
+            }}
+            className="w-full px-2.5 py-2 rounded-xl text-xs font-semibold text-slate-800 hover:bg-slate-100/90 flex items-center justify-between gap-2 cursor-pointer transition-colors"
+          >
+            <span className="flex items-center gap-2.5">
+              <Download className="w-3.5 h-3.5 text-[#D97757]" />
+              <span>Download</span>
+            </span>
+          </button>
+
+          <div className="my-1 border-t border-slate-100" />
+
+          {/* 8. Delete */}
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => {
+              const target = fileContextMenu.file;
+              setFileContextMenu(null);
+              setDeleteTarget({
+                type: 'file',
+                id: target.id,
+                name: target.name,
+                subtitle: `Size: ${formatBytes(target.sizeBytes)}`,
+              });
+            }}
+            className="w-full px-2.5 py-2 rounded-xl text-xs font-semibold text-[#D94848] hover:bg-red-50 flex items-center justify-between gap-2 cursor-pointer transition-colors"
+          >
+            <span className="flex items-center gap-2.5">
+              <Trash2 className="w-3.5 h-3.5 text-[#D94848]" />
+              <span>Delete</span>
+            </span>
+          </button>
+        </div>
+      )}
+
+      {/* ====================================================================
+          RENAME FILE MODAL
+      ==================================================================== */}
+      {renameModalFile && (
+        <div
+          onClick={() => {
+            if (!renamingBusy) setRenameModalFile(null);
+          }}
+          className="animate-app-backdrop fixed inset-0 z-50 bg-slate-900/45 backdrop-blur-xs flex items-center justify-center p-4"
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="animate-app-modal w-full max-w-md rounded-2xl bg-[#1C1A17] border border-[#2C2824] shadow-xl overflow-hidden"
+          >
+            <div className="px-5 py-4 border-b border-[#2C2824] flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <div className="w-8 h-8 rounded-xl bg-[#24211D] border border-[#2C2824] flex items-center justify-center">
+                  <Pencil className="w-4 h-4 text-[#D97757]" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-[#F2EFE9]">Rename File</h3>
+                  <p className="text-[11px] text-[#9E978E]">
+                    Enter a new name for this file
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                disabled={renamingBusy}
+                onClick={() => setRenameModalFile(null)}
+                className="w-8 h-8 rounded-lg bg-[#24211D] border border-[#2C2824] text-[#9E978E] hover:text-[#F2EFE9] flex items-center justify-center cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleRenameFileSubmit} className="p-5 space-y-4">
+              <div className="space-y-1.5">
+                <label className="block text-xs font-semibold text-[#9E978E]">
+                  File Name
+                </label>
+                <input
+                  ref={renameInputRef}
+                  type="text"
+                  value={renameInputValue}
+                  onChange={(e) => setRenameInputValue(e.target.value)}
+                  disabled={renamingBusy}
+                  placeholder="Enter file name..."
+                  className="w-full h-11 px-3.5 rounded-xl text-sm bg-[#24211D] border border-[#2C2824] focus:border-[#D97757] text-[#F2EFE9] outline-none transition-colors"
+                />
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-1">
+                <button
+                  type="button"
+                  disabled={renamingBusy}
+                  onClick={() => setRenameModalFile(null)}
+                  className="h-10 px-4 rounded-xl text-xs font-semibold bg-[#24211D] border border-[#2C2824] text-[#F2EFE9] hover:border-[#D97757] cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={
+                    renamingBusy ||
+                    !renameInputValue.trim() ||
+                    renameInputValue.trim() === renameModalFile.name
+                  }
+                  className="h-10 px-5 rounded-xl text-xs font-bold bg-[#D97757] text-[#141311] disabled:opacity-50 flex items-center gap-1.5 cursor-pointer"
+                >
+                  {renamingBusy ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      <span>Saving...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Check className="w-3.5 h-3.5" />
+                      <span>Save Name</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
       )}
     </div>
   );

@@ -758,15 +758,17 @@ async function pushBufferToTelegram(
   chatId: string
 ): Promise<{ success: boolean; chunks: TelegramChunk[]; error?: string }> {
   const isMainAccountConfigured = Boolean(
-    (db.telegramConfig.mtprotoSession && db.telegramConfig.apiId && db.telegramConfig.apiHash) ||
-      db.telegramConfig.authMode === 'mtproto'
+    db.telegramConfig.mtprotoSession && db.telegramConfig.apiId && db.telegramConfig.apiHash
   );
   if (isMainAccountConfigured) {
-    return await pushBufferToTelegramMtproto(
+    const mtRes = await pushBufferToTelegramMtproto(
       buffer,
       fileName,
       chatId || db.telegramConfig.chatId || 'me'
     );
+    if (mtRes.success || !botToken || !chatId) {
+      return mtRes;
+    }
   }
 
   if (!botToken || !chatId) {
@@ -844,18 +846,20 @@ async function pushDiskFileToTelegram(
       return { success: false, chunks: [], error: 'File empty or missing' };
     }
 
-    // 1. Exclusively use Main Telegram Account (MTProto) when configured — never fall back to Bot API
+    // 1. Use Main Telegram Account (MTProto) when session credentials are configured, falling back to Bot API if unavailable
     const isMainAccountConfigured = Boolean(
-      (db.telegramConfig.mtprotoSession && db.telegramConfig.apiId && db.telegramConfig.apiHash) ||
-        db.telegramConfig.authMode === 'mtproto'
+      db.telegramConfig.mtprotoSession && db.telegramConfig.apiId && db.telegramConfig.apiHash
     );
     if (isMainAccountConfigured) {
-      return await pushDiskFileToTelegramMtproto(
+      const mtRes = await pushDiskFileToTelegramMtproto(
         filePath,
         fileName,
         totalSize,
         chatId || db.telegramConfig.chatId || 'me'
       );
+      if (mtRes.success || !botToken || !chatId) {
+        return mtRes;
+      }
     }
 
     if (!botToken || !chatId) {
@@ -1185,7 +1189,7 @@ function resolveEffectiveTelegramChunks(
       // ignore
     }
   }
-  if ((fileName || '').toLowerCase().endsWith('.mkv') || fileId.startsWith('file_mv')) {
+  if ((fileName || '').toLowerCase().endsWith('.mkv') || fileId === 'file_mv01') {
     return SEEDED_FALLBACK_MKV_CHUNKS;
   }
   return [];
@@ -1648,22 +1652,18 @@ async function streamTranscodedVideoWithFfmpeg(params: {
     'error',
     '-threads',
     '0',
-    '-flags2',
-    '+fast',
     '-fflags',
     '+nobuffer+fastseek+flush_packets+discardcorrupt',
     '-flags',
     'low_delay',
     '-probesize',
-    safeStart > 0 ? '512k' : '256k',
+    '2M',
     '-analyzeduration',
-    safeStart > 0 ? '400000' : '200000',
+    '2000000',
   ];
 
   if (safeStart > 0) {
     args.push('-ss', safeStart.toFixed(3));
-  } else if (!hasFullFileOnDisk) {
-    args.push('-seekable', '0');
   }
 
   if (!hasFullFileOnDisk) {
@@ -1676,24 +1676,24 @@ async function streamTranscodedVideoWithFfmpeg(params: {
   const isOriginalOrHigh =
     normQuality === 'original' || normQuality === 'auto' || normQuality === '1080p';
 
-  if (canCopyVideo && isOriginalOrHigh) {
-    // 100% lossless bit-for-bit original video stream copy without re-encoding
+  if (canCopyVideo && isOriginalOrHigh && safeStart === 0) {
+    // 100% lossless bit-for-bit original video stream copy when starting at 0s with H.264 8-bit
     args.push('-c:v', 'copy');
-  } else if (normQuality === 'original' || normQuality === 'auto') {
-    // Preserve 100% of original source resolution & high-bitrate visual fidelity when transcoding 10-bit HEVC
+  } else if (normQuality === 'original' || normQuality === 'auto' || normQuality === '1080p') {
+    // Fast, universal H.264 yuv420p stream for 1080p High / Original (decodes 10-bit HEVC cleanly on all browsers)
     args.push(
       '-c:v',
       'libx264',
       '-preset',
-      'veryfast',
+      'ultrafast',
       '-tune',
       'zerolatency',
       '-crf',
-      '18',
+      '20',
       '-maxrate',
-      probedHeight > 1080 ? '14000k' : '8500k',
+      probedHeight > 1080 ? '10000k' : '6500k',
       '-bufsize',
-      probedHeight > 1080 ? '28000k' : '17000k',
+      probedHeight > 1080 ? '20000k' : '13000k',
       '-pix_fmt',
       'yuv420p',
       '-g',
@@ -1719,31 +1719,31 @@ async function streamTranscodedVideoWithFfmpeg(params: {
         ? '23'
         : targetHeight <= 720
         ? '21'
-        : '19';
+        : '20';
     const maxRate =
       targetHeight <= 360
         ? '1200k'
         : targetHeight <= 480
         ? '2200k'
         : targetHeight <= 720
-        ? '4500k'
-        : '8000k';
+        ? '4200k'
+        : '6500k';
     const bufSize =
       targetHeight <= 360
         ? '2400k'
         : targetHeight <= 480
         ? '4400k'
         : targetHeight <= 720
-        ? '9000k'
-        : '16000k';
+        ? '8400k'
+        : '13000k';
 
     args.push(
       '-vf',
-      `scale=-2:${targetHeight}:flags=lanczos`,
+      `scale=-2:${targetHeight}:flags=fast_bilinear`,
       '-c:v',
       'libx264',
       '-preset',
-      'veryfast',
+      'ultrafast',
       '-tune',
       'zerolatency',
       '-crf',
@@ -4019,15 +4019,15 @@ async function startServer() {
 
     const fullPath = path.join(CHUNKS_DIR, fileId);
     const hasDisk = fs.existsSync(fullPath) && fs.statSync(fullPath).size > 64;
-    const effectiveChunks = resolveEffectiveTelegramChunks(
-      fileId,
-      file?.name || name || '',
-      file?.telegramChunks
+    const hasOwnTelegramChunks = Boolean(
+      (file?.telegramChunks && file.telegramChunks.length > 0) ||
+        (Array.isArray(telegramChunks) && telegramChunks.length > 0) ||
+        fileId === 'file_mv01'
     );
 
     res.json({
       ok: true,
-      hasBinaryOrChunks: hasDisk || effectiveChunks.length > 0,
+      hasBinaryOrChunks: hasDisk || hasOwnTelegramChunks,
     });
   });
 
@@ -4047,6 +4047,17 @@ async function startServer() {
         const fullPath = path.join(CHUNKS_DIR, fileId);
         fs.writeFileSync(fullPath, buf);
         mediaProbeCache.delete(fileId);
+        // Clean up any stale part/probe files so the hydrated full binary is used directly
+        try {
+          const allChunkFiles = fs.readdirSync(CHUNKS_DIR);
+          for (const entry of allChunkFiles) {
+            if (entry.startsWith(`${fileId}.`)) {
+              fs.unlinkSync(path.join(CHUNKS_DIR, entry));
+            }
+          }
+        } catch {
+          // ignore
+        }
       }
       res.json({ ok: true, size: buf.length });
     }

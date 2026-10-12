@@ -28,6 +28,7 @@ interface YouTubeIframePlayerProps {
   fileId: string;
   fileName: string;
   srcUrl: string;
+  localBlobUrl?: string | null;
   rawBlob: Blob | null;
   isMkv: boolean;
   fullViewport?: boolean;
@@ -276,6 +277,7 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
   fileId,
   fileName,
   srcUrl,
+  localBlobUrl = null,
   rawBlob,
   isMkv,
   fullViewport = false,
@@ -293,7 +295,7 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
   const seekCommitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hudTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const spinnerTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const autoPlayAfterSwitchRef = useRef<boolean>(false);
+  const autoPlayAfterSwitchRef = useRef<boolean>(true);
   const pendingSeekTargetRef = useRef<number | null>(null);
   const errorRetryCountRef = useRef<number>(0);
   const fetchedSubtitleWindowsRef = useRef<Set<string>>(new Set());
@@ -318,6 +320,7 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
   const [useServerTranscode, setUseServerTranscode] = useState<boolean>(
     () => Boolean(isMkv && isServerApiSource)
   );
+  const [forceLocalBlobFallback, setForceLocalBlobFallback] = useState<boolean>(false);
   const [streamStartOffset, setStreamStartOffset] = useState<number>(() =>
     Boolean(isMkv && isServerApiSource) ? initialResumeSeconds : 0
   );
@@ -457,6 +460,12 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
 
   // Compute the active <video src="..."> URL immediately (1080p High maps to Original lossless stream)
   const activeVideoSrc = useMemo(() => {
+    if (forceLocalBlobFallback && localBlobUrl) {
+      return localBlobUrl;
+    }
+    if (!isMkv && !useServerTranscode && localBlobUrl) {
+      return localBlobUrl;
+    }
     if (useServerTranscode && isServerApiSource) {
       const serverQualityParam = selectedQuality === '1080p' ? 'Original' : selectedQuality;
       const sep = streamEndpoints.streamBaseUrl.includes('?') ? '&' : '?';
@@ -464,8 +473,11 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
         serverQualityParam
       )}&start=${streamStartOffset.toFixed(2)}${hydrationNonce ? `&r=${hydrationNonce}` : ''}`;
     }
-    return srcUrl;
+    return localBlobUrl || srcUrl;
   }, [
+    forceLocalBlobFallback,
+    localBlobUrl,
+    isMkv,
     useServerTranscode,
     isServerApiSource,
     streamEndpoints.streamBaseUrl,
@@ -508,6 +520,9 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
                   body: clientBlob,
                 }).catch(() => null);
                 if (!cancelled) {
+                  autoPlayAfterSwitchRef.current = true;
+                  errorRetryCountRef.current = 0;
+                  setForceLocalBlobFallback(false);
                   setHydrationNonce((n) => n + 1);
                 }
               }
@@ -561,6 +576,8 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
               });
             }
             if (info.needsTranscode && isServerApiSource) {
+              autoPlayAfterSwitchRef.current = true;
+              errorRetryCountRef.current = 0;
               setUseServerTranscode(true);
             }
             return;
@@ -1112,9 +1129,9 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
     const vid = videoRef.current;
     if (!vid) return;
     if (vid.paused || vid.ended) {
+      autoPlayAfterSwitchRef.current = true;
       if (vid.ended) {
         if (useServerTranscode && streamStartOffset > 0) {
-          autoPlayAfterSwitchRef.current = true;
           setStreamStartOffset(0);
           setCurrentTime(0);
           setPendingSeekTime(null);
@@ -1122,8 +1139,14 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
         }
         vid.currentTime = 0;
       }
-      vid.play().catch(() => null);
+      vid.play().catch(() => {
+        // If unmuted play fails before user gesture, retry muted so video frames start immediately
+        vid.muted = true;
+        setIsMuted(true);
+        vid.play().catch(() => null);
+      });
     } else {
+      autoPlayAfterSwitchRef.current = false;
       vid.pause();
     }
   }, [useServerTranscode, streamStartOffset]);
@@ -1328,7 +1351,9 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
   return (
     <div
       className={`w-full bg-black overflow-hidden ${
-        fullViewport ? 'h-screen border-0' : 'border border-[#2C2824]'
+        fullViewport
+          ? 'h-screen border-0'
+          : 'rounded-2xl border border-slate-900/15 shadow-[0_8px_28px_rgba(15,23,42,0.12)]'
       }`}
     >
       <input
@@ -1352,7 +1377,7 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
         className={`relative w-full bg-black flex flex-col justify-between overflow-hidden select-none focus:outline-none ${
           fullViewport
             ? 'h-full'
-            : 'aspect-video min-h-[210px] sm:min-h-[320px] max-h-[78vh]'
+            : 'aspect-video min-h-[200px] sm:min-h-[320px] max-h-[76vh]'
         }`}
       >
         {/* ====================================================================
@@ -1377,8 +1402,8 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
             ref={videoRef}
             src={activeVideoSrc}
             playsInline
+            autoPlay
             preload="auto"
-            crossOrigin="anonymous"
             onLoadStart={() => {
               setIsBuffering(true);
             }}
@@ -1414,14 +1439,29 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
               vid.muted = isMuted;
               if (autoPlayAfterSwitchRef.current) {
                 autoPlayAfterSwitchRef.current = false;
-                vid.play().catch(() => null);
+                vid.play().catch(() => {
+                  // Ensure first frame is decoded and painted even if browser blocks unmuted autoplay
+                  if (vid.currentTime === 0) {
+                    try {
+                      vid.currentTime = 0.05;
+                    } catch {
+                      // ignore
+                    }
+                  }
+                });
+              } else if (vid.paused && vid.currentTime === 0) {
+                try {
+                  vid.currentTime = 0.05;
+                } catch {
+                  // ignore
+                }
               }
             }}
             onLoadedData={(e) => {
               setIsBuffering(false);
               const vid = e.currentTarget;
               if (!useServerTranscode && isServerApiSource && vid.videoWidth === 0) {
-                autoPlayAfterSwitchRef.current = !vid.paused;
+                autoPlayAfterSwitchRef.current = true;
                 setIsBuffering(true);
                 setUseServerTranscode(true);
                 return;
@@ -1453,7 +1493,7 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
                 }
               }
               if (!useServerTranscode && isServerApiSource && vid.videoWidth === 0) {
-                autoPlayAfterSwitchRef.current = !vid.paused;
+                autoPlayAfterSwitchRef.current = true;
                 setIsBuffering(true);
                 setUseServerTranscode(true);
                 return;
@@ -1491,12 +1531,13 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
               }
             }}
             onError={() => {
-              if (!useServerTranscode && isServerApiSource) {
+              if (!useServerTranscode && isServerApiSource && !forceLocalBlobFallback) {
+                autoPlayAfterSwitchRef.current = true;
                 setIsBuffering(true);
                 setUseServerTranscode(true);
                 return;
               }
-              if (useServerTranscode && errorRetryCountRef.current < 2) {
+              if (useServerTranscode && errorRetryCountRef.current < 1) {
                 errorRetryCountRef.current += 1;
                 const vid = videoRef.current;
                 if (vid) {
@@ -1509,8 +1550,15 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
                 }
                 return;
               }
+              if (localBlobUrl && !forceLocalBlobFallback) {
+                autoPlayAfterSwitchRef.current = true;
+                setForceLocalBlobFallback(true);
+                setUseServerTranscode(false);
+                setIsBuffering(false);
+                return;
+              }
               setIsBuffering(false);
-              if (!isMkv && onFallbackContainer) {
+              if (onFallbackContainer) {
                 onFallbackContainer();
               } else if (onPlaybackError) {
                 onPlaybackError(
@@ -1521,31 +1569,31 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
             className="w-full h-full max-h-full object-contain"
           />
 
-          {/* Center Play Button (Kept as first <button> child in video stage for Focus Mode & centered via absolute positioning) */}
+          {/* Center Play Button (Kept as first <button> child in video stage & positioned cleanly above controls) */}
           <button
             type="button"
             onClick={(e) => {
               e.stopPropagation();
               togglePlay();
             }}
-            className={`absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-10 w-16 h-16 sm:w-20 sm:h-20 rounded-full bg-black/80 hover:bg-[#D97757] text-white hover:text-[#141311] border-2 border-white/30 hover:border-[#D97757] flex items-center justify-center transition-all duration-150 cursor-pointer shadow-2xl ${
+            className={`absolute left-1/2 top-[44%] sm:top-1/2 -translate-x-1/2 -translate-y-1/2 z-10 w-13 h-13 sm:w-16 sm:h-16 rounded-full bg-black/65 backdrop-blur-md hover:bg-[#2563EB] text-white border border-white/25 hover:border-[#2563EB] flex items-center justify-center transition-all duration-200 cursor-pointer shadow-2xl ${
               !isPlaying && !showSpinner
                 ? 'opacity-100 scale-100 pointer-events-auto'
                 : 'opacity-0 scale-90 pointer-events-none'
             }`}
             aria-label={fileName ? `Play ${fileName}` : 'Play Video'}
           >
-            <Play className="w-7 h-7 sm:w-8 sm:h-8 fill-current ml-1" />
+            <Play className="w-6 h-6 sm:w-7 sm:h-7 fill-current ml-0.5" />
           </button>
 
           {/* Properly Positioned Cinema Subtitle Overlay (Never overlaps the control bar!) */}
           {activeSubtitleText && (
             <div
               className={`pointer-events-none absolute left-1/2 -translate-x-1/2 z-20 w-[90%] max-w-2xl flex flex-col items-center justify-center text-center transition-all duration-200 ${
-                controlsVisible ? 'bottom-16 sm:bottom-20' : 'bottom-4 sm:bottom-6'
+                controlsVisible ? 'bottom-14 sm:bottom-16' : 'bottom-4 sm:bottom-6'
               }`}
             >
-              <span className="inline-block px-3 py-1 bg-black/80 text-[#F2EFE9] text-xs sm:text-sm md:text-base font-medium leading-snug whitespace-pre-line shadow-lg border border-white/10">
+              <span className="inline-block px-3 py-1 rounded-lg bg-black/80 backdrop-blur-xs text-white text-xs sm:text-sm md:text-base font-medium leading-snug whitespace-pre-line shadow-lg border border-white/10">
                 {activeSubtitleText}
               </span>
             </div>
@@ -1553,7 +1601,7 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
 
           {/* On-Screen HUD Badge for Skip (-10s/+10s), Volume Up/Down, Quality & Audio Switches */}
           {hudBadgeText && (
-            <div className="pointer-events-none absolute top-4 left-1/2 -translate-x-1/2 z-20 px-3 py-1 bg-black/80 border border-white/15 text-white text-xs font-mono font-semibold tracking-wide">
+            <div className="pointer-events-none absolute top-3.5 left-1/2 -translate-x-1/2 z-20 px-3 py-1 rounded-full bg-black/80 backdrop-blur-md border border-white/15 text-white text-[11px] font-mono font-semibold tracking-wide shadow-lg">
               {hudBadgeText}
             </div>
           )}
@@ -1562,12 +1610,12 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
           {resumedBannerSeconds !== null && (
             <div
               onClick={(e) => e.stopPropagation()}
-              className="absolute top-3 left-3 z-20 flex items-center gap-2.5 px-3 py-1.5 bg-[#141311]/90 border border-[#2C2824] text-[#F2EFE9] text-xs shadow-lg"
+              className="absolute top-3 left-3 z-20 flex items-center gap-2 px-3 py-1.5 rounded-xl bg-slate-950/85 backdrop-blur-md border border-white/15 text-white text-[11px] shadow-lg"
             >
-              <span className="font-mono text-[11px] text-[#9E978E]">
-                Resumed at <strong className="text-[#F2EFE9]">{formatClock(resumedBannerSeconds)}</strong>
+              <span className="font-mono text-white/80">
+                Resumed <strong className="text-white">{formatClock(resumedBannerSeconds)}</strong>
               </span>
-              <span className="text-[#68625A]">·</span>
+              <span className="text-white/30">·</span>
               <button
                 type="button"
                 onClick={(e) => {
@@ -1576,16 +1624,16 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
                   setResumedBannerSeconds(null);
                   seekToTargetSeconds(0, true);
                 }}
-                className="text-[11px] font-semibold text-[#D97757] hover:underline cursor-pointer"
+                className="font-semibold text-blue-400 hover:underline cursor-pointer"
               >
                 Start Over
               </button>
             </div>
           )}
 
-          {/* Minimal, Unobtrusive Circular Ring Spinner (Debounced, no screen darkening or text box) */}
+          {/* Minimal, Unobtrusive Circular Ring Spinner */}
           {showSpinner && (
-            <div className="pointer-events-none absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-10 w-9 h-9 rounded-full border-2 border-white/20 border-t-[#D97757] animate-spin" />
+            <div className="pointer-events-none absolute left-1/2 top-[44%] sm:top-1/2 -translate-x-1/2 -translate-y-1/2 z-10 w-9 h-9 rounded-full border-2 border-white/20 border-t-[#2563EB] animate-spin" />
           )}
         </div>
 
@@ -1595,11 +1643,11 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
         {showQualityMenu && (
           <div
             onClick={(e) => e.stopPropagation()}
-            className="absolute bottom-14 right-3 sm:right-20 z-30 w-52 max-w-[calc(100vw-24px)] bg-[#141311]/95 border border-[#2C2824] text-[#F2EFE9] shadow-2xl py-1 max-h-60 overflow-y-auto"
+            className="animate-app-modal absolute bottom-13 right-2.5 sm:right-16 z-30 w-48 max-w-[calc(100vw-24px)] rounded-xl bg-slate-950/95 backdrop-blur-md border border-white/15 text-white shadow-2xl py-1.5 max-h-56 overflow-y-auto"
           >
-            <div className="px-3 py-1.5 text-[11px] font-semibold text-[#9E978E] border-b border-[#2C2824] flex items-center justify-between">
-              <span>Quality</span>
-              <span className="text-[10px] font-mono text-[#D97757]">
+            <div className="px-3 py-1.5 text-[11px] font-semibold text-white/60 border-b border-white/10 flex items-center justify-between">
+              <span>Video Quality</span>
+              <span className="text-[10px] font-mono text-blue-400">
                 {networkMbps.toFixed(0)} Mbps
               </span>
             </div>
@@ -1613,19 +1661,19 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
                   onClick={() => handleSelectQuality(q)}
                   className={`w-full px-3 py-2 text-xs flex items-center justify-between cursor-pointer transition-colors ${
                     active
-                      ? 'bg-[#24211D] text-[#D97757] font-semibold'
-                      : 'text-[#F2EFE9] hover:bg-[#1C1A17]'
+                      ? 'bg-white/10 text-blue-400 font-semibold'
+                      : 'text-white/90 hover:bg-white/10'
                   }`}
                 >
                   <div className="flex items-center gap-2">
                     <span>{meta.title}</span>
                     {meta.badge && (
-                      <span className="px-1 py-0.2 text-[9px] font-mono font-bold bg-[#D97757]/20 text-[#D97757] border border-[#D97757]/40">
+                      <span className="px-1.5 py-0.2 rounded text-[9px] font-mono font-bold bg-blue-500/20 text-blue-300 border border-blue-400/30">
                         {meta.badge}
                       </span>
                     )}
                   </div>
-                  {active && <Check className="w-3.5 h-3.5 text-[#D97757] shrink-0" />}
+                  {active && <Check className="w-3.5 h-3.5 text-blue-400 shrink-0" />}
                 </button>
               );
             })}
@@ -1638,10 +1686,10 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
         {showAudioMenu && audioTracks.length > 1 && (
           <div
             onClick={(e) => e.stopPropagation()}
-            className="absolute bottom-14 right-3 sm:right-28 z-30 w-56 max-w-[calc(100vw-24px)] bg-[#141311]/95 border border-[#2C2824] text-[#F2EFE9] shadow-2xl py-1 max-h-60 overflow-y-auto"
+            className="animate-app-modal absolute bottom-13 right-2.5 sm:right-24 z-30 w-52 max-w-[calc(100vw-24px)] rounded-xl bg-slate-950/95 backdrop-blur-md border border-white/15 text-white shadow-2xl py-1.5 max-h-56 overflow-y-auto"
           >
-            <div className="px-3 py-1.5 text-[11px] font-semibold text-[#9E978E] border-b border-[#2C2824] flex items-center justify-between">
-              <span>Multi-Audio Track ({audioTracks.length})</span>
+            <div className="px-3 py-1.5 text-[11px] font-semibold text-white/60 border-b border-white/10 flex items-center justify-between">
+              <span>Audio Track ({audioTracks.length})</span>
             </div>
             {audioTracks.map((track) => {
               const active = activeAudioIndex === track.index;
@@ -1652,12 +1700,12 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
                   onClick={() => handleSelectAudioTrack(track.index)}
                   className={`w-full px-3 py-2 text-xs flex items-center justify-between cursor-pointer transition-colors ${
                     active
-                      ? 'bg-[#24211D] text-[#D97757] font-semibold'
-                      : 'text-[#F2EFE9] hover:bg-[#1C1A17]'
+                      ? 'bg-white/10 text-blue-400 font-semibold'
+                      : 'text-white/90 hover:bg-white/10'
                   }`}
                 >
                   <span className="truncate">{track.label}</span>
-                  {active && <Check className="w-3.5 h-3.5 text-[#D97757] shrink-0" />}
+                  {active && <Check className="w-3.5 h-3.5 text-blue-400 shrink-0" />}
                 </button>
               );
             })}
@@ -1670,17 +1718,17 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
         {showCcMenu && (
           <div
             onClick={(e) => e.stopPropagation()}
-            className="absolute bottom-14 right-3 sm:right-5 z-30 w-56 max-w-[calc(100vw-24px)] bg-[#141311]/95 border border-[#2C2824] text-[#F2EFE9] shadow-2xl py-1 max-h-60 overflow-y-auto"
+            className="animate-app-modal absolute bottom-13 right-2.5 sm:right-4 z-30 w-52 max-w-[calc(100vw-24px)] rounded-xl bg-slate-950/95 backdrop-blur-md border border-white/15 text-white shadow-2xl py-1.5 max-h-56 overflow-y-auto"
           >
-            <div className="px-3 py-1.5 text-[11px] font-semibold text-[#9E978E] border-b border-[#2C2824] flex items-center justify-between">
+            <div className="px-3 py-1.5 text-[11px] font-semibold text-white/60 border-b border-white/10 flex items-center justify-between">
               <span>Subtitles / CC</span>
               <button
                 type="button"
                 onClick={() => subtitleInputRef.current?.click()}
-                className="text-[11px] text-[#D97757] hover:underline flex items-center gap-1 cursor-pointer"
+                className="text-[11px] text-blue-400 hover:underline flex items-center gap-1 cursor-pointer"
               >
                 <Upload className="w-3 h-3" />
-                <span>Load .SRT/.VTT</span>
+                <span>Load .SRT</span>
               </button>
             </div>
 
@@ -1689,12 +1737,12 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
               onClick={() => handleSelectSubtitle(null)}
               className={`w-full px-3 py-2 text-xs flex items-center justify-between cursor-pointer transition-colors ${
                 activeSubtitleId === null
-                  ? 'bg-[#24211D] text-[#D97757] font-semibold'
-                  : 'text-[#F2EFE9] hover:bg-[#1C1A17]'
+                  ? 'bg-white/10 text-blue-400 font-semibold'
+                  : 'text-white/90 hover:bg-white/10'
               }`}
             >
               <span>Off</span>
-              {activeSubtitleId === null && <Check className="w-3.5 h-3.5 text-[#D97757]" />}
+              {activeSubtitleId === null && <Check className="w-3.5 h-3.5 text-blue-400" />}
             </button>
 
             {subtitleTracks.map((track) => {
@@ -1706,12 +1754,12 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
                   onClick={() => handleSelectSubtitle(track.id)}
                   className={`w-full px-3 py-2 text-xs flex items-center justify-between cursor-pointer transition-colors ${
                     active
-                      ? 'bg-[#24211D] text-[#D97757] font-semibold'
-                      : 'text-[#F2EFE9] hover:bg-[#1C1A17]'
+                      ? 'bg-white/10 text-blue-400 font-semibold'
+                      : 'text-white/90 hover:bg-white/10'
                   }`}
                 >
                   <span className="truncate">{track.label}</span>
-                  {active && <Check className="w-3.5 h-3.5 text-[#D97757] shrink-0" />}
+                  {active && <Check className="w-3.5 h-3.5 text-blue-400 shrink-0" />}
                 </button>
               );
             })}
@@ -1719,12 +1767,11 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
         )}
 
         {/* ====================================================================
-            RESPONSIVE BOTTOM CONTROL BAR
-            (Play/Pause, -10s, +10s, Volume, Multi-Audio [if >1], Multi-Quality [Auto], CC, PiP, Fullscreen)
+            SLEEK SINGLE-ROW BOTTOM CONTROL BAR (Never wraps into 2 rows on mobile)
         ==================================================================== */}
         <div
           onClick={(e) => e.stopPropagation()}
-          className={`absolute bottom-0 left-0 right-0 z-20 bg-gradient-to-t from-black/95 via-black/75 to-transparent px-2.5 sm:px-4 pt-6 pb-2 sm:pb-2.5 space-y-1.5 sm:space-y-2 transition-opacity duration-200 ${
+          className={`absolute bottom-0 left-0 right-0 z-20 bg-gradient-to-t from-black/95 via-black/70 to-transparent px-2.5 sm:px-4 pt-5 pb-2 sm:pb-2.5 space-y-1 transition-opacity duration-200 ${
             controlsVisible ? 'opacity-100 pointer-events-auto' : 'opacity-0 pointer-events-none'
           }`}
         >
@@ -1733,34 +1780,34 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
             ref={timelineRef}
             onMouseMove={handleTimelineMouseMove}
             onMouseLeave={handleTimelineMouseLeave}
-            className="relative w-full h-4 flex items-center group/scrub cursor-pointer"
+            className="relative w-full h-3.5 flex items-center group/scrub cursor-pointer"
           >
             {hoverPct !== null && hoverTime !== null && effectiveDuration > 0 && (
               <div
                 style={{ left: `${Math.max(4, Math.min(96, hoverPct))}%` }}
-                className="pointer-events-none absolute -top-6 -translate-x-1/2 px-1.5 py-0.5 bg-black/90 border border-white/15 text-white text-[11px] font-mono tabular-nums whitespace-nowrap"
+                className="pointer-events-none absolute -top-6 -translate-x-1/2 px-1.5 py-0.5 rounded bg-black/90 border border-white/15 text-white text-[10px] font-mono tabular-nums whitespace-nowrap"
               >
                 {formatClock(hoverTime)}
               </div>
             )}
 
-            <div className="w-full h-1 group-hover/scrub:h-1.5 bg-white/20 relative overflow-hidden transition-all">
+            <div className="w-full h-1 group-hover/scrub:h-1.5 rounded-full bg-white/25 relative overflow-hidden transition-all">
               {/* Preload / Buffered Progress */}
               <div
                 style={{ width: `${bufferedPct}%` }}
-                className="absolute left-0 top-0 bottom-0 bg-white/40 transition-all duration-150"
+                className="absolute left-0 top-0 bottom-0 bg-white/45 transition-all duration-150"
               />
               {/* Played Progress */}
               <div
                 style={{ width: `${progressPct}%` }}
-                className="absolute left-0 top-0 bottom-0 bg-[#D97757]"
+                className="absolute left-0 top-0 bottom-0 bg-[#2563EB]"
               />
             </div>
 
             <div
               style={{ left: `${progressPct}%` }}
-              className={`pointer-events-none absolute -translate-x-1/2 w-3.5 h-3.5 rounded-full bg-[#D97757] shadow transition-transform ${
-                isScrubbing ? 'scale-110' : 'scale-0 group-hover/scrub:scale-100'
+              className={`pointer-events-none absolute -translate-x-1/2 w-3 h-3 rounded-full bg-[#2563EB] ring-2 ring-white shadow transition-transform ${
+                isScrubbing ? 'scale-125' : 'scale-100 sm:scale-0 sm:group-hover/scrub:scale-100'
               }`}
             />
 
@@ -1780,14 +1827,14 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
             />
           </div>
 
-          {/* Controls Row (Free / Responsive Wrap Layout for Any Device) */}
-          <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1 text-white">
-            {/* Left Controls: Play/Pause, Prev 10s, Next 10s, Volume, Time */}
+          {/* Single-Row Controls (Play/Pause, -10s, +10s, Mute/Volume, Time | Audio, Quality, CC, Fullscreen) */}
+          <div className="flex items-center justify-between gap-1 sm:gap-2 text-white whitespace-nowrap">
+            {/* Left Controls */}
             <div className="flex items-center gap-0.5 sm:gap-1.5 min-w-0">
               <button
                 type="button"
                 onClick={togglePlay}
-                className="w-8 h-8 flex items-center justify-center text-white/90 hover:text-[#D97757] transition-colors cursor-pointer shrink-0"
+                className="w-7 sm:w-8 h-7 sm:h-8 rounded-lg hover:bg-white/10 flex items-center justify-center text-white transition-colors cursor-pointer shrink-0"
                 title={isPlaying ? 'Pause (Space)' : 'Play (Space)'}
                 aria-label={isPlaying ? 'Pause' : 'Play'}
               >
@@ -1801,40 +1848,40 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
               <button
                 type="button"
                 onClick={() => handleSkip(-10)}
-                className="px-1.5 h-8 flex items-center justify-center gap-0.5 text-white/90 hover:text-[#D97757] transition-colors cursor-pointer shrink-0"
-                title="Previous 10 seconds (Left Arrow)"
+                className="px-1 sm:px-1.5 h-7 sm:h-8 rounded-lg hover:bg-white/10 flex items-center justify-center gap-0.5 text-white/90 hover:text-white transition-colors cursor-pointer shrink-0"
+                title="Rewind 10 seconds"
                 aria-label="Previous 10 seconds"
               >
-                <RotateCcw className="w-4 h-4" />
-                <span className="text-[10px] font-mono">10</span>
+                <RotateCcw className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
+                <span className="hidden sm:inline text-[10px] font-mono">10</span>
               </button>
 
               <button
                 type="button"
                 onClick={() => handleSkip(10)}
-                className="px-1.5 h-8 flex items-center justify-center gap-0.5 text-white/90 hover:text-[#D97757] transition-colors cursor-pointer shrink-0"
-                title="Next 10 seconds (Right Arrow)"
+                className="px-1 sm:px-1.5 h-7 sm:h-8 rounded-lg hover:bg-white/10 flex items-center justify-center gap-0.5 text-white/90 hover:text-white transition-colors cursor-pointer shrink-0"
+                title="Forward 10 seconds"
                 aria-label="Next 10 seconds"
               >
-                <RotateCw className="w-4 h-4" />
-                <span className="text-[10px] font-mono">10</span>
+                <RotateCw className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
+                <span className="hidden sm:inline text-[10px] font-mono">10</span>
               </button>
 
-              {/* Volume */}
-              <div className="flex items-center gap-1 ml-0.5 shrink-0">
+              {/* Volume (Mute button on mobile; slider on sm+ desktop so mobile bar stays 1 row) */}
+              <div className="flex items-center gap-1 shrink-0">
                 <button
                   type="button"
                   onClick={toggleMute}
-                  className="w-7 sm:w-8 h-8 flex items-center justify-center text-white/90 hover:text-[#D97757] transition-colors cursor-pointer"
+                  className="w-7 sm:w-8 h-7 sm:h-8 rounded-lg hover:bg-white/10 flex items-center justify-center text-white/90 hover:text-white transition-colors cursor-pointer"
                   title={isMuted ? 'Unmute (M)' : 'Mute (M)'}
                   aria-label={isMuted ? 'Unmute' : 'Mute'}
                 >
                   {isMuted || volume === 0 ? (
-                    <VolumeX className="w-4 h-4 text-[#D94848]" />
+                    <VolumeX className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-red-400" />
                   ) : volume < 0.5 ? (
-                    <Volume1 className="w-4 h-4" />
+                    <Volume1 className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
                   ) : (
-                    <Volume2 className="w-4 h-4" />
+                    <Volume2 className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
                   )}
                 </button>
                 <input
@@ -1844,20 +1891,20 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
                   step={0.02}
                   value={isMuted ? 0 : volume}
                   onChange={handleVolumeChange}
-                  className="w-12 sm:w-20 h-1 accent-[#D97757] cursor-pointer"
+                  className="hidden sm:block w-16 h-1 accent-[#2563EB] cursor-pointer"
                   aria-label="Volume"
                 />
               </div>
 
               {/* Time Display */}
-              <div className="pl-1 text-[11px] sm:text-xs font-mono tabular-nums text-white/85 whitespace-nowrap">
-                {formatClock(displayedCurrentTime)} <span className="text-white/35">/</span>{' '}
+              <div className="pl-1 text-[10px] sm:text-xs font-mono tabular-nums text-white/90 whitespace-nowrap">
+                {formatClock(displayedCurrentTime)} <span className="text-white/40">/</span>{' '}
                 {formatClock(effectiveDuration)}
               </div>
             </div>
 
-            {/* Right Controls: Multi-Audio (ONLY if >1 track exists), Multi-Quality (Auto default), CC, Picture-in-Picture, Fullscreen */}
-            <div className="flex items-center gap-1 sm:gap-1.5 ml-auto">
+            {/* Right Controls: Multi-Audio (if >1), Multi-Quality, CC, PiP (desktop), Fullscreen */}
+            <div className="flex items-center gap-1 sm:gap-1.5 shrink-0">
               {audioTracks.length > 1 && (
                 <button
                   type="button"
@@ -1866,24 +1913,24 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
                     setShowQualityMenu(false);
                     setShowAudioMenu((prev) => !prev);
                   }}
-                  className={`h-7 sm:h-8 px-2 flex items-center justify-center gap-1 text-xs transition-colors cursor-pointer border ${
+                  className={`h-6 sm:h-7 px-2 rounded-lg flex items-center justify-center gap-1 text-[10px] sm:text-[11px] font-semibold transition-all cursor-pointer border ${
                     showAudioMenu
-                      ? 'border-[#D97757] bg-[#24211D] text-[#D97757]'
-                      : 'border-white/15 bg-black/50 text-white/90 hover:border-[#D97757] hover:text-[#D97757]'
+                      ? 'border-blue-400 bg-blue-600/30 text-white'
+                      : 'border-white/20 bg-white/15 backdrop-blur-xs text-white hover:bg-white/25'
                   }`}
                   title="Switch Audio Track"
                   aria-label="Switch Audio Track"
                 >
-                  <Headphones className="w-3.5 h-3.5 shrink-0" />
-                  <span className="text-[10px] sm:text-[11px] font-semibold truncate max-w-[68px] sm:max-w-[84px]">
+                  <Headphones className="w-3 h-3 shrink-0" />
+                  <span className="truncate max-w-[48px] sm:max-w-[76px]">
                     {activeAudioTrackObj
                       ? activeAudioTrackObj.label.split(' ')[0]
-                      : `Audio (${audioTracks.length})`}
+                      : `Audio`}
                   </span>
                 </button>
               )}
 
-              {/* Multi-Quality Selector Button (Defaults to Auto) */}
+              {/* Multi-Quality Selector Pill */}
               <button
                 type="button"
                 onClick={() => {
@@ -1891,18 +1938,16 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
                   setShowCcMenu(false);
                   setShowQualityMenu((prev) => !prev);
                 }}
-                className={`h-7 sm:h-8 px-2 flex items-center justify-center gap-1 text-xs transition-colors cursor-pointer border ${
+                className={`h-6 sm:h-7 px-2 rounded-lg flex items-center justify-center gap-1 text-[10px] sm:text-[11px] font-mono font-bold transition-all cursor-pointer border ${
                   showQualityMenu
-                    ? 'border-[#D97757] bg-[#24211D] text-[#D97757]'
-                    : 'border-white/15 bg-black/50 text-white/90 hover:border-[#D97757] hover:text-[#D97757]'
+                    ? 'border-blue-400 bg-blue-600/30 text-white'
+                    : 'border-white/20 bg-white/15 backdrop-blur-xs text-white hover:bg-white/25'
                 }`}
-                title="Video Quality (Auto / 1080p / 720p / 480p / 360p)"
+                title="Video Quality (1080p High / 720p / 480p)"
                 aria-label="Video Quality"
               >
                 <SlidersHorizontal className="w-3 h-3 shrink-0" />
-                <span className="text-[10px] sm:text-[11px] font-mono font-bold">
-                  {selectedQuality}
-                </span>
+                <span>{selectedQuality}</span>
               </button>
 
               <button
@@ -1912,22 +1957,22 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
                   setShowQualityMenu(false);
                   setShowCcMenu((prev) => !prev);
                 }}
-                className={`w-7 sm:w-8 h-8 flex items-center justify-center transition-colors cursor-pointer ${
+                className={`w-7 sm:w-8 h-7 sm:h-8 rounded-lg hover:bg-white/10 flex items-center justify-center transition-colors cursor-pointer ${
                   activeSubtitleId !== null || showCcMenu
-                    ? 'text-[#D97757]'
-                    : 'text-white/90 hover:text-[#D97757]'
+                    ? 'text-blue-400'
+                    : 'text-white/90 hover:text-white'
                 }`}
                 title="Subtitles / CC"
                 aria-label="Subtitles / CC"
               >
-                <Subtitles className="w-4 h-4" />
+                <Subtitles className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
               </button>
 
               <button
                 type="button"
                 onClick={togglePictureInPicture}
-                className={`w-7 sm:w-8 h-8 flex items-center justify-center transition-colors cursor-pointer ${
-                  isPip ? 'text-[#D97757]' : 'text-white/90 hover:text-[#D97757]'
+                className={`hidden sm:flex w-8 h-8 rounded-lg hover:bg-white/10 items-center justify-center transition-colors cursor-pointer ${
+                  isPip ? 'text-blue-400' : 'text-white/90 hover:text-white'
                 }`}
                 title="Picture in Picture (P)"
                 aria-label="Picture in Picture"
@@ -1938,14 +1983,14 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
               <button
                 type="button"
                 onClick={toggleFullscreen}
-                className="w-7 sm:w-8 h-8 flex items-center justify-center text-white/90 hover:text-[#D97757] transition-colors cursor-pointer"
+                className="w-7 sm:w-8 h-7 sm:h-8 rounded-lg hover:bg-white/10 flex items-center justify-center text-white/90 hover:text-white transition-colors cursor-pointer"
                 title={isFullscreen ? 'Exit Fullscreen (F)' : 'Fullscreen (F)'}
                 aria-label={isFullscreen ? 'Exit Fullscreen' : 'Fullscreen'}
               >
                 {isFullscreen ? (
-                  <Minimize className="w-4 h-4" />
+                  <Minimize className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
                 ) : (
-                  <Maximize className="w-4 h-4" />
+                  <Maximize className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
                 )}
               </button>
             </div>
