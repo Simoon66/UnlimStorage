@@ -16,8 +16,12 @@ import {
   Check,
   Upload,
 } from 'lucide-react';
-import { TelegramChunk } from '../types';
-import { getClientBinaryBlob } from '../services/clientCloudFallback';
+import { TelegramChunk, FileRecord } from '../types';
+import {
+  getClientBinaryBlob,
+  buildTelegramStreamManifestUrl,
+  resolveClientMimeType,
+} from '../services/clientCloudFallback';
 import {
   getVideoProgress,
   saveVideoProgress,
@@ -320,7 +324,9 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
   const [useServerTranscode, setUseServerTranscode] = useState<boolean>(
     () => Boolean(isMkv && isServerApiSource)
   );
+  const [serverTranscodeAvailable, setServerTranscodeAvailable] = useState<boolean>(true);
   const [forceLocalBlobFallback, setForceLocalBlobFallback] = useState<boolean>(false);
+  const [selfBlobUrl, setSelfBlobUrl] = useState<string | null>(null);
   const [streamStartOffset, setStreamStartOffset] = useState<number>(() =>
     Boolean(isMkv && isServerApiSource) ? initialResumeSeconds : 0
   );
@@ -330,6 +336,75 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
       : 0
   );
   const [hydrationNonce, setHydrationNonce] = useState<number>(0);
+
+  const effectiveLocalBlobUrl = localBlobUrl || selfBlobUrl;
+
+  const tgWorkerStreamUrl = useMemo(
+    () =>
+      buildTelegramStreamManifestUrl({
+        fileName,
+        mimeType: fileMimeType,
+        sizeBytes: fileSizeBytes,
+        telegramChunks,
+        inline: true,
+      }),
+    [fileName, fileMimeType, fileSizeBytes, telegramChunks]
+  );
+
+  // Self-resolve local IndexedDB / Telegram chunk blob if parent hasn't provided localBlobUrl yet
+  useEffect(() => {
+    if (localBlobUrl) return;
+    let cancelled = false;
+    let createdObjUrl: string | null = null;
+
+    const metaHint: FileRecord | undefined =
+      telegramChunks && telegramChunks.length > 0
+        ? ({
+            id: fileId,
+            name: fileName,
+            folderId: null,
+            ownerId: '',
+            ownerName: '',
+            sizeBytes: fileSizeBytes || 0,
+            mimeType: fileMimeType || (isMkv ? 'video/x-matroska' : 'video/mp4'),
+            sha256: '',
+            storageDriver: 'telegram',
+            telegramChunks,
+            starred: false,
+            downloadCount: 0,
+            createdAt: '',
+            updatedAt: '',
+          } as FileRecord)
+        : undefined;
+
+    getClientBinaryBlob(fileId, metaHint)
+      .then((blob) => {
+        if (cancelled || !blob || blob.size <= 64) return;
+        const targetType = isMkv
+          ? 'video/webm'
+          : resolveClientMimeType(fileName, fileMimeType || blob.type);
+        const playable =
+          blob.type === targetType ? blob : new Blob([blob], { type: targetType });
+        createdObjUrl = URL.createObjectURL(playable);
+        setSelfBlobUrl(createdObjUrl);
+      })
+      .catch(() => null);
+
+    return () => {
+      cancelled = true;
+      if (createdObjUrl) {
+        URL.revokeObjectURL(createdObjUrl);
+      }
+    };
+  }, [fileId, fileName, fileMimeType, fileSizeBytes, isMkv, localBlobUrl, telegramChunks]);
+
+  // Whenever a local blob URL arrives for a standard MP4/WebM/MOV video, ensure we don't stay stuck on a failed server transcode URL
+  useEffect(() => {
+    if (effectiveLocalBlobUrl && !isMkv && selectedQuality === '1080p' && activeAudioIndex === 0) {
+      errorRetryCountRef.current = 0;
+      setUseServerTranscode(false);
+    }
+  }, [effectiveLocalBlobUrl, isMkv]);
 
   const [isPlaying, setIsPlaying] = useState(false);
   const [isBuffering, setIsBuffering] = useState(true);
@@ -460,31 +535,42 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
 
   // Compute the active <video src="..."> URL immediately (1080p High maps to Original lossless stream)
   const activeVideoSrc = useMemo(() => {
-    if (forceLocalBlobFallback && localBlobUrl) {
-      return localBlobUrl;
+    if (forceLocalBlobFallback && effectiveLocalBlobUrl) {
+      return effectiveLocalBlobUrl;
     }
-    if (!isMkv && !useServerTranscode && localBlobUrl) {
-      return localBlobUrl;
+    if (!isMkv && (!useServerTranscode || !serverTranscodeAvailable) && effectiveLocalBlobUrl) {
+      return effectiveLocalBlobUrl;
     }
-    if (useServerTranscode && isServerApiSource) {
+    if (useServerTranscode && isServerApiSource && serverTranscodeAvailable) {
       const serverQualityParam = selectedQuality === '1080p' ? 'Original' : selectedQuality;
       const sep = streamEndpoints.streamBaseUrl.includes('?') ? '&' : '?';
       return `${streamEndpoints.streamBaseUrl}${sep}audio=${activeAudioIndex}&quality=${encodeURIComponent(
         serverQualityParam
       )}&start=${streamStartOffset.toFixed(2)}${hydrationNonce ? `&r=${hydrationNonce}` : ''}`;
     }
-    return localBlobUrl || srcUrl;
+    if (!serverTranscodeAvailable && tgWorkerStreamUrl) {
+      return tgWorkerStreamUrl;
+    }
+    if (effectiveLocalBlobUrl) {
+      return effectiveLocalBlobUrl;
+    }
+    if (tgWorkerStreamUrl && srcUrl.startsWith('/api/files/')) {
+      return tgWorkerStreamUrl;
+    }
+    return srcUrl;
   }, [
     forceLocalBlobFallback,
-    localBlobUrl,
+    effectiveLocalBlobUrl,
     isMkv,
     useServerTranscode,
+    serverTranscodeAvailable,
     isServerApiSource,
     streamEndpoints.streamBaseUrl,
     activeAudioIndex,
     selectedQuality,
     streamStartOffset,
     hydrationNonce,
+    tgWorkerStreamUrl,
     srcUrl,
   ]);
 
@@ -506,12 +592,32 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
               telegramChunks: telegramChunks || [],
             }),
           });
-          if (ensureRes.ok) {
+          const ensureContentType = ensureRes.headers.get('content-type') || '';
+          if (
+            ensureRes.status === 404 ||
+            ensureRes.status === 405 ||
+            ensureContentType.includes('text/html')
+          ) {
+            if (!cancelled) {
+              setServerTranscodeAvailable(false);
+              setUseServerTranscode(false);
+            }
+          } else if (ensureRes.ok) {
             const ensureJson = (await ensureRes.json()) as {
               ok?: boolean;
               hasBinaryOrChunks?: boolean;
+              staticWorker?: boolean;
             };
-            if (ensureJson && ensureJson.hasBinaryOrChunks === false && streamEndpoints.hydrateUrl) {
+            if (ensureJson?.staticWorker) {
+              if (!cancelled) {
+                setServerTranscodeAvailable(false);
+                setUseServerTranscode(false);
+              }
+            } else if (
+              ensureJson &&
+              ensureJson.hasBinaryOrChunks === false &&
+              streamEndpoints.hydrateUrl
+            ) {
               const clientBlob = rawBlob || (await getClientBinaryBlob(fileId));
               if (clientBlob && clientBlob.size > 64 && !cancelled) {
                 await fetch(streamEndpoints.hydrateUrl, {
@@ -537,9 +643,21 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
 
       try {
         const res = await fetch(streamEndpoints.mediaInfoUrl);
-        if (res.ok) {
-          const info = (await res.json()) as ServerMediaInfoResponse;
-          if (!cancelled && info && info.ok) {
+        const mediaContentType = res.headers.get('content-type') || '';
+        if (res.status === 404 || mediaContentType.includes('text/html')) {
+          if (!cancelled) {
+            setServerTranscodeAvailable(false);
+            setUseServerTranscode(false);
+          }
+        } else if (res.ok) {
+          const info = (await res.json()) as ServerMediaInfoResponse & { staticWorker?: boolean };
+          if (info?.staticWorker) {
+            if (!cancelled) {
+              setServerTranscodeAvailable(false);
+              setUseServerTranscode(false);
+            }
+          } else if (!cancelled && info && info.ok) {
+            setServerTranscodeAvailable(true);
             if (info.duration > 0) {
               setProbedDuration(info.duration);
             }
@@ -1531,31 +1649,45 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
               }
             }}
             onError={() => {
-              if (!useServerTranscode && isServerApiSource && !forceLocalBlobFallback) {
-                autoPlayAfterSwitchRef.current = true;
-                setIsBuffering(true);
-                setUseServerTranscode(true);
-                return;
-              }
-              if (useServerTranscode && errorRetryCountRef.current < 1) {
-                errorRetryCountRef.current += 1;
-                const vid = videoRef.current;
-                if (vid) {
-                  setTimeout(() => {
-                    vid.load();
-                    if (autoPlayAfterSwitchRef.current) {
-                      vid.play().catch(() => null);
-                    }
-                  }, 250);
-                }
-                return;
-              }
-              if (localBlobUrl && !forceLocalBlobFallback) {
+              // 1. If we have a local blob URL ready and aren't using it yet, switch to it immediately!
+              if (
+                effectiveLocalBlobUrl &&
+                activeVideoSrc !== effectiveLocalBlobUrl &&
+                (!isMkv || !serverTranscodeAvailable || useServerTranscode)
+              ) {
                 autoPlayAfterSwitchRef.current = true;
                 setForceLocalBlobFallback(true);
                 setUseServerTranscode(false);
                 setIsBuffering(false);
                 return;
+              }
+              // 2. If server transcode is available and hasn't been tried yet, try FFmpeg transcode
+              if (
+                !useServerTranscode &&
+                isServerApiSource &&
+                serverTranscodeAvailable &&
+                !forceLocalBlobFallback
+              ) {
+                autoPlayAfterSwitchRef.current = true;
+                setIsBuffering(true);
+                setUseServerTranscode(true);
+                return;
+              }
+              // 3. If server transcode failed (e.g. on Cloudflare Pages or missing server binary), fall back to Worker tg-stream or local blob
+              if (useServerTranscode) {
+                setServerTranscodeAvailable(false);
+                setUseServerTranscode(false);
+                if (effectiveLocalBlobUrl) {
+                  autoPlayAfterSwitchRef.current = true;
+                  setForceLocalBlobFallback(true);
+                  setIsBuffering(false);
+                  return;
+                }
+                if (tgWorkerStreamUrl && activeVideoSrc !== tgWorkerStreamUrl) {
+                  autoPlayAfterSwitchRef.current = true;
+                  setIsBuffering(true);
+                  return;
+                }
               }
               setIsBuffering(false);
               if (onFallbackContainer) {

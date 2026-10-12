@@ -3365,16 +3365,29 @@ async function startServer() {
     res.json({ file: record, user: sanitizeUser(user) });
 
     // Sync to Telegram asynchronously in the background without blocking user UI
-    if (hasLiveTelegram && finalSize <= 2000 * 1024 * 1024) {
-      const botTokenSnap = db.telegramConfig.botToken;
-      const chatIdSnap = db.telegramConfig.chatId;
+    const effectiveBotToken = db.telegramConfig.botToken || DEFAULT_FALLBACK_BOT_TOKEN;
+    const effectiveChatId =
+      db.telegramConfig.chatId && db.telegramConfig.chatId !== 'me'
+        ? db.telegramConfig.chatId
+        : '-5328657910';
+    if (
+      (hasLiveTelegram || (effectiveBotToken && effectiveChatId)) &&
+      finalSize > 0 &&
+      finalSize <= 2000 * 1024 * 1024
+    ) {
       setImmediate(() => {
-        pushDiskFileToTelegram(finalChunkPath, cleanName, finalSize, botTokenSnap, chatIdSnap)
+        pushDiskFileToTelegram(
+          finalChunkPath,
+          cleanName,
+          finalSize,
+          effectiveBotToken,
+          effectiveChatId
+        )
           .then((tgResult) => {
             if (tgResult.success) {
               record.storageDriver = 'telegram';
               record.telegramChunks = tgResult.chunks;
-              record.telegramChatId = chatIdSnap;
+              record.telegramChatId = effectiveChatId;
               saveDb();
               broadcast('file:updated', { file: record });
             }
@@ -5155,6 +5168,74 @@ async function startServer() {
     }
   });
 
+  // PUBLIC MULTI-CHUNK STREAM & HTTP 206 RANGE VIDEO STREAM (/api/public/tg-stream)
+  app.all('/api/public/tg-stream', async (req, res) => {
+    try {
+      let chunks: TelegramChunk[] = [];
+      let botToken = db.telegramConfig.botToken || DEFAULT_FALLBACK_BOT_TOKEN;
+      let fileName = 'video.mp4';
+      let mimeType = 'video/mp4';
+      let totalSize = 0;
+      const isInline = req.query.inline === '1';
+
+      if (req.method === 'POST' && req.body) {
+        chunks = Array.isArray(req.body.chunks) ? req.body.chunks : [];
+        botToken = req.body.botToken || botToken;
+        fileName = req.body.fileName || 'video.mp4';
+        mimeType = req.body.mimeType || 'video/mp4';
+        totalSize = Number(req.body.totalSize) || 0;
+      } else {
+        const rawManifest = String(req.query.m || '').trim();
+        if (rawManifest) {
+          let base64 = rawManifest.replace(/-/g, '+').replace(/_/g, '/');
+          while (base64.length % 4 !== 0) base64 += '=';
+          const decoded = JSON.parse(Buffer.from(base64, 'base64').toString('utf-8'));
+          const rawChunks = Array.isArray(decoded.chunks) ? decoded.chunks : [];
+          chunks = rawChunks.map((c: any, idx: number) => ({
+            partIndex: Number(c.partIndex ?? c.p ?? idx),
+            messageId: Number(c.messageId ?? 0),
+            fileId: String(c.fileId || c.f || ''),
+            sizeBytes: Number(c.sizeBytes ?? c.s) || TELEGRAM_CHUNK_SIZE,
+            sha256Part: '',
+          }));
+          botToken = decoded.botToken || botToken;
+          fileName = decoded.fileName || 'video.mp4';
+          mimeType = decoded.mimeType || 'video/mp4';
+          totalSize = Number(decoded.totalSize) || 0;
+        }
+      }
+
+      if (!chunks.length) {
+        res.status(400).send('No chunks provided');
+        return;
+      }
+
+      const contentType =
+        isInline && (fileName.toLowerCase().endsWith('.mkv') || mimeType === 'video/x-matroska')
+          ? 'video/webm'
+          : resolveEffectiveMimeType(fileName, mimeType);
+
+      const served = await serveTelegramChunksFastRange({
+        req,
+        res,
+        fileId: `tg_stream_${chunks[0].fileId.slice(-12)}`,
+        fileName,
+        contentType,
+        totalSizeHint: totalSize,
+        chunks,
+        botToken,
+        isInline,
+      });
+      if (!served && !res.headersSent) {
+        res.status(502).send('Could not stream Telegram chunks');
+      }
+    } catch {
+      if (!res.headersSent) {
+        res.status(500).send('Telegram stream error');
+      }
+    }
+  });
+
   function resolveTargetShareFile(share: StoredShareLink, queryFileId?: string) {
     if (
       (share.targetType === 'folder' || share.fileMimeType === 'application/x-unlim-folder') &&
@@ -5228,6 +5309,8 @@ async function startServer() {
         }));
     }
 
+    const targetInfo = resolveTargetShareFile(share);
+
     res.json({
       share: {
         token: share.token,
@@ -5248,6 +5331,7 @@ async function startServer() {
         bandwidthCapBytes: share.bandwidthCapBytes,
         bandwidthUsedBytes: share.bandwidthUsedBytes,
         createdAt: share.createdAt,
+        telegramChunks: targetInfo.telegramChunks,
       },
     });
   });

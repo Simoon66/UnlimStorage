@@ -25,7 +25,7 @@ import {
 import { formatBytes, formatShortDate } from '../utils/format';
 import { apiFetch } from '../services/clientCloudFallback';
 import { YouTubeIframePlayer } from './YouTubeIframePlayer';
-import { SharedFolderFileEntry, FolderRecord } from '../types';
+import { SharedFolderFileEntry, FolderRecord, TelegramChunk } from '../types';
 import { buildZipBlob, getWatchPercentage } from '../utils/mediaProgressAndZip';
 import { PWAInstallButton } from './PWAInstallButton';
 
@@ -49,6 +49,7 @@ interface PublicShareMetadata {
   bandwidthUsedBytes: number;
   createdAt: string;
   hasDirectStream?: boolean;
+  telegramChunks?: TelegramChunk[];
 }
 
 interface DownloadProgressState {
@@ -611,6 +612,14 @@ export const PublicSharePortal: React.FC<PublicSharePortalProps> = ({
         isFolderShare && activeFolderVideo ? activeFolderVideo.name : share.fileName;
       const targetId =
         isFolderShare && activeFolderVideo ? activeFolderVideo.id : share.fileId || share.token;
+      const targetSize =
+        isFolderShare && activeFolderVideo ? activeFolderVideo.sizeBytes : share.fileSizeBytes;
+      const targetMime =
+        isFolderShare && activeFolderVideo ? activeFolderVideo.mimeType : share.fileMimeType;
+      const targetChunks =
+        isFolderShare && activeFolderVideo
+          ? activeFolderVideo.telegramChunks
+          : share.telegramChunks;
       return (
         <div className="w-screen h-screen bg-black overflow-hidden">
           <YouTubeIframePlayer
@@ -620,6 +629,9 @@ export const PublicSharePortal: React.FC<PublicSharePortalProps> = ({
             rawBlob={null}
             isMkv={targetName.toLowerCase().endsWith('.mkv')}
             fullViewport={true}
+            fileSizeBytes={targetSize}
+            fileMimeType={targetMime}
+            telegramChunks={targetChunks}
             onFallbackContainer={handlePublicVideoFallback}
           />
         </div>
@@ -821,7 +833,7 @@ export const PublicSharePortal: React.FC<PublicSharePortalProps> = ({
                       telegramChunks={
                         isFolderShare && activeFolderVideo
                           ? activeFolderVideo.telegramChunks
-                          : undefined
+                          : share.telegramChunks
                       }
                       onFallbackContainer={handlePublicVideoFallback}
                     />

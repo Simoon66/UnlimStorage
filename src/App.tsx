@@ -868,7 +868,42 @@ export default function App() {
       },
     });
 
+    const handleChunksSynced = (ev: Event) => {
+      const custom = ev as CustomEvent<{
+        fileId: string;
+        telegramChunks: FileRecord['telegramChunks'];
+        telegramChatId?: string;
+      }>;
+      const detail = custom.detail;
+      if (!detail?.fileId || !Array.isArray(detail.telegramChunks)) return;
+      setFiles((prev) =>
+        prev.map((f) =>
+          f.id === detail.fileId
+            ? {
+                ...f,
+                storageDriver: 'telegram',
+                telegramChunks: detail.telegramChunks,
+                telegramChatId: detail.telegramChatId || f.telegramChatId,
+              }
+            : f
+        )
+      );
+      setInspectedFile((prev) =>
+        prev && prev.id === detail.fileId
+          ? {
+              ...prev,
+              storageDriver: 'telegram',
+              telegramChunks: detail.telegramChunks,
+              telegramChatId: detail.telegramChatId || prev.telegramChatId,
+            }
+          : prev
+      );
+    };
+
+    window.addEventListener('unlim:file-chunks-synced', handleChunksSynced);
+
     return () => {
+      window.removeEventListener('unlim:file-chunks-synced', handleChunksSynced);
       unsubscribe();
     };
   }, [firebaseUser, authHeaders]);

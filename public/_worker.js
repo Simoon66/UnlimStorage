@@ -20,16 +20,48 @@ async function resolveTelegramFileUrl(fileId, botToken) {
   return `https://api.telegram.org/file/bot${token}/${metaJson.result.file_path}`;
 }
 
+function decodeManifestBase64(raw) {
+  let base64 = raw.replace(/-/g, '+').replace(/_/g, '/');
+  while (base64.length % 4 !== 0) {
+    base64 += '=';
+  }
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return JSON.parse(new TextDecoder('utf-8').decode(bytes));
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
 
-    if (request.method === 'OPTIONS' && url.pathname.startsWith('/api/public/')) {
+    if (request.method === 'OPTIONS' && url.pathname.startsWith('/api/')) {
       return new Response(null, { status: 204, headers: CORS_HEADERS });
     }
 
+    // Graceful no-op responses for FFprobe / hydration endpoints on Cloudflare Pages static deployment
+    if (
+      url.pathname.endsWith('/media-info') ||
+      url.pathname.endsWith('/ensure-streamable') ||
+      url.pathname.endsWith('/preload')
+    ) {
+      return new Response(
+        JSON.stringify({
+          ok: false,
+          hasBinaryOrChunks: true,
+           staticWorker: true,
+        }),
+        {
+          status: 200,
+          headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
+        }
+      );
+    }
+
     // 1. Single-chunk binary proxy (/api/public/tg-chunk?fileId=...&botToken=...)
-    if (url.pathname === '/api/public/tg-chunk' && request.method === 'GET') {
+    if (url.pathname === '/api/public/tg-chunk' && (request.method === 'GET' || request.method === 'HEAD')) {
       const fileId = url.searchParams.get('fileId') || '';
       const botToken = url.searchParams.get('botToken') || DEFAULT_BOT_TOKEN;
       if (!fileId) {
@@ -59,7 +91,10 @@ export default {
         if (len) headers.set('Content-Length', len);
         const cr = fileRes.headers.get('content-range');
         if (cr) headers.set('Content-Range', cr);
-        return new Response(fileRes.body, { status: fileRes.status, headers });
+        return new Response(request.method === 'HEAD' ? null : fileRes.body, {
+          status: fileRes.status,
+          headers,
+        });
       } catch (err) {
         return new Response(
           JSON.stringify({ error: err instanceof Error ? err.message : 'Chunk proxy error' }),
@@ -76,8 +111,8 @@ export default {
       try {
         let chunks = [];
         let botToken = DEFAULT_BOT_TOKEN;
-        let fileName = 'download.bin';
-        let mimeType = 'application/octet-stream';
+        let fileName = 'video.mp4';
+        let mimeType = 'video/mp4';
         let totalSize = 0;
         const isInline = url.searchParams.get('inline') === '1';
 
@@ -85,23 +120,30 @@ export default {
           const body = await request.json();
           chunks = Array.isArray(body.chunks) ? body.chunks : [];
           botToken = body.botToken || DEFAULT_BOT_TOKEN;
-          fileName = body.fileName || 'download.bin';
-          mimeType = body.mimeType || 'application/octet-stream';
+          fileName = body.fileName || 'video.mp4';
+          mimeType = body.mimeType || 'video/mp4';
           totalSize = Number(body.totalSize) || 0;
         } else {
           const rawManifest = url.searchParams.get('m') || '';
           if (rawManifest) {
-            const decoded = JSON.parse(atob(rawManifest));
+            const decoded = decodeManifestBase64(rawManifest);
             chunks = Array.isArray(decoded.chunks) ? decoded.chunks : [];
             botToken = decoded.botToken || DEFAULT_BOT_TOKEN;
-            fileName = decoded.fileName || 'download.bin';
-            mimeType = decoded.mimeType || 'application/octet-stream';
+            fileName = decoded.fileName || 'video.mp4';
+            mimeType = decoded.mimeType || 'video/mp4';
             totalSize = Number(decoded.totalSize) || 0;
           }
         }
 
         if (!chunks.length) {
           return new Response('No chunks provided', { status: 400, headers: CORS_HEADERS });
+        }
+
+        const lowerName = String(fileName || '').toLowerCase();
+        if (isInline && (lowerName.endsWith('.mkv') || mimeType === 'video/x-matroska')) {
+          mimeType = 'video/webm';
+        } else if (lowerName.endsWith('.mp4') || lowerName.endsWith('.m4v')) {
+          mimeType = 'video/mp4';
         }
 
         const sorted = [...chunks].sort(
@@ -125,12 +167,24 @@ export default {
         const effectiveTotal = runningOffset > 0 ? runningOffset : totalSize;
         const rangeHeader = request.headers.get('Range');
 
+        if (request.method === 'HEAD') {
+          const headers = new Headers(CORS_HEADERS);
+          headers.set('Accept-Ranges', 'bytes');
+          headers.set('Content-Type', mimeType);
+          if (effectiveTotal > 0) {
+            headers.set('Content-Length', String(effectiveTotal));
+          }
+          return new Response(null, { status: 200, headers });
+        }
+
         if (rangeHeader && effectiveTotal > 0) {
           const parts = rangeHeader.replace(/bytes=/, '').split('-');
           const start = parseInt(parts[0], 10) || 0;
-          const reqEnd = parts[1]
-            ? Math.min(effectiveTotal - 1, parseInt(parts[1], 10))
-            : effectiveTotal - 1;
+          if (start >= effectiveTotal) {
+            const headers = new Headers(CORS_HEADERS);
+            headers.set('Content-Range', `bytes */${effectiveTotal}`);
+            return new Response(null, { status: 416, headers });
+          }
 
           const target =
             offsets.find((o) => start >= o.start && start <= o.end) ||
@@ -138,28 +192,38 @@ export default {
           const fid = target.chunk.fileId || target.chunk.f;
           const tgUrl = await resolveTelegramFileUrl(fid, botToken);
 
+          // For open-ended browser video range requests (e.g. "bytes=0-"), serve up to the end of the current chunk
+          // (or 8 MB window for instant first-frame playback) and stream body directly without arrayBuffer delay.
+          const hasExplicitEnd = Boolean(parts[1] && parts[1].trim() !== '');
+          const maxWindowEnd = isInline && !hasExplicitEnd
+            ? Math.min(target.end, start + 8 * 1024 * 1024 - 1)
+            : target.end;
+          const reqEnd = hasExplicitEnd
+            ? Math.min(effectiveTotal - 1, parseInt(parts[1], 10))
+            : maxWindowEnd;
+
           const effectiveEnd = Math.min(reqEnd, target.end);
           const subStart = Math.max(0, start - target.start);
           const subEnd = Math.max(subStart, effectiveEnd - target.start);
+          const expectedLen = subEnd - subStart + 1;
 
           const partRes = await fetch(tgUrl, {
             headers: { Range: `bytes=${subStart}-${subEnd}` },
           });
 
           if (partRes.ok || partRes.status === 206) {
-            const arrBuf = await partRes.arrayBuffer();
-            const actualLen = arrBuf.byteLength;
-            const finalEnd = start + Math.max(0, actualLen - 1);
+            const upstreamLen = Number(partRes.headers.get('content-length')) || expectedLen;
+            const finalEnd = Math.min(effectiveTotal - 1, start + Math.max(0, upstreamLen - 1));
             const headers = new Headers(CORS_HEADERS);
             headers.set('Accept-Ranges', 'bytes');
             headers.set('Content-Type', mimeType);
             headers.set('Content-Range', `bytes ${start}-${finalEnd}/${effectiveTotal}`);
-            headers.set('Content-Length', String(actualLen));
+            headers.set('Content-Length', String(upstreamLen));
             headers.set(
               'Content-Disposition',
               `${isInline ? 'inline' : 'attachment'}; filename="${encodeURIComponent(fileName)}"`
             );
-            return new Response(arrBuf, { status: 206, headers });
+            return new Response(partRes.body, { status: 206, headers });
           }
         }
 

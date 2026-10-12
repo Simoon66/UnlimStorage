@@ -314,6 +314,44 @@ export async function resolveDirectTelegramDownloadUrl(
   }
 }
 
+export function buildTelegramStreamManifestUrl(params: {
+  fileName: string;
+  mimeType?: string;
+  sizeBytes?: number;
+  telegramChunks?: TelegramChunk[];
+  inline?: boolean;
+}): string | null {
+  const chunks = params.telegramChunks;
+  if (!Array.isArray(chunks) || chunks.length === 0) return null;
+  try {
+    const compactChunks = [...chunks]
+      .sort((a, b) => a.partIndex - b.partIndex)
+      .map((c) => ({
+        p: c.partIndex,
+        f: c.fileId,
+        s: c.sizeBytes,
+      }));
+    const payload = JSON.stringify({
+      fileName: params.fileName || 'video.mp4',
+      mimeType: resolveClientMimeType(params.fileName || 'video.mp4', params.mimeType),
+      totalSize: params.sizeBytes || 0,
+      chunks: compactChunks,
+    });
+    const utf8Bytes = new TextEncoder().encode(payload);
+    let binary = '';
+    for (let i = 0; i < utf8Bytes.length; i++) {
+      binary += String.fromCharCode(utf8Bytes[i]);
+    }
+    const encoded = btoa(binary)
+      .replace(/\+/g, '-')
+      .replace(/\//g, '_')
+      .replace(/=+$/, '');
+    return `/api/public/tg-stream?${params.inline !== false ? 'inline=1&' : ''}m=${encodeURIComponent(encoded)}`;
+  } catch {
+    return null;
+  }
+}
+
 async function fetchBlobFromTelegramChunksClient(
   chunks: TelegramChunk[],
   botToken: string,
@@ -1580,8 +1618,12 @@ async function handleClientApi(urlStr: string, init?: RequestInit): Promise<Resp
     const blobs = getBlobStore();
     const envToken = (import.meta as any).env?.VITE_TELEGRAM_BOT_TOKEN || '';
     const envChat = (import.meta as any).env?.VITE_TELEGRAM_CHAT_ID || '';
-    const activeBotToken = db.telegramConfig.botToken || envToken;
-    const activeChatId = db.telegramConfig.chatId || envChat;
+    const activeBotToken =
+      db.telegramConfig.botToken || envToken || DEFAULT_STORAGE_NODE_BOT_TOKEN;
+    const activeChatId =
+      db.telegramConfig.chatId && db.telegramConfig.chatId !== 'me'
+        ? db.telegramConfig.chatId
+        : envChat || DEFAULT_STORAGE_NODE_CHAT_ID;
 
     for (const f of uploadedFiles) {
       const fileId = `file_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
@@ -1636,15 +1678,8 @@ async function handleClientApi(urlStr: string, init?: RequestInit): Promise<Resp
         lockedOverQuota: false,
       };
 
-      // Sync to Telegram Storage Node in background only if explicitly in bot mode and not main account MTProto
-      if (
-        db.telegramConfig.authMode === 'bot' &&
-        !db.telegramConfig.mtprotoSession &&
-        activeBotToken &&
-        activeBotToken !== DEFAULT_STORAGE_NODE_BOT_TOKEN &&
-        activeChatId &&
-        f.size <= 500 * 1024 * 1024
-      ) {
+      // Always sync uploaded files on static hosts (like Cloudflare Pages) to Telegram Storage Node so cross-device streaming & sharing work!
+      if (activeBotToken && activeChatId && f.size > 0 && f.size <= 500 * 1024 * 1024) {
         void pushBlobToTelegramClient(f, f.name, activeBotToken, activeChatId)
           .then((tgResult) => {
             if (tgResult.success) {
@@ -1656,6 +1691,17 @@ async function handleClientApi(urlStr: string, init?: RequestInit): Promise<Resp
                 target.telegramChatId = activeChatId;
                 saveClientDb(latestDb);
                 void syncCloudFileToFirestore(target, true).catch(() => null);
+                if (typeof window !== 'undefined') {
+                  window.dispatchEvent(
+                    new CustomEvent('unlim:file-chunks-synced', {
+                      detail: {
+                        fileId,
+                        telegramChunks: tgResult.chunks,
+                        telegramChatId: activeChatId,
+                      },
+                    })
+                  );
+                }
                 const relatedShares = latestDb.shares.filter((s) => s.fileId === fileId);
                 for (const sh of relatedShares) {
                   sh.storageDriver = 'telegram';
@@ -3246,6 +3292,55 @@ export async function syncClientDbWithFirestoreDrive(params: {
       // ignore if on static host
     }
   }
+
+  // 7. Auto-backfill any local IndexedDB files that are missing telegramChunks (e.g. files uploaded before storage node sync)
+  void (async () => {
+    const candidates = db.files.filter(
+      (f) =>
+        f.ownerId === params.uid &&
+        !isStarter(f.id) &&
+        !f.trashed &&
+        (!f.telegramChunks || f.telegramChunks.length === 0) &&
+        f.sizeBytes > 64 &&
+        f.sizeBytes <= 500 * 1024 * 1024
+    );
+    if (candidates.length === 0) return;
+
+    const botToken = db.telegramConfig.botToken || DEFAULT_STORAGE_NODE_BOT_TOKEN;
+    const chatId =
+      db.telegramConfig.chatId && db.telegramConfig.chatId !== 'me'
+        ? db.telegramConfig.chatId
+        : DEFAULT_STORAGE_NODE_CHAT_ID;
+    if (!botToken || !chatId) return;
+
+    for (const cand of candidates) {
+      const localBlob = await getClientBinaryBlob(cand.id);
+      if (!localBlob || localBlob.size <= 64) continue;
+      const tgResult = await pushBlobToTelegramClient(localBlob, cand.name, botToken, chatId);
+      if (tgResult.success && tgResult.chunks.length > 0) {
+        const latestDb = loadClientDb();
+        const target = latestDb.files.find((item) => item.id === cand.id);
+        if (target) {
+          target.storageDriver = 'telegram';
+          target.telegramChunks = tgResult.chunks;
+          target.telegramChatId = chatId;
+          saveClientDb(latestDb);
+          await syncCloudFileToFirestore(target, true).catch(() => null);
+          if (typeof window !== 'undefined') {
+            window.dispatchEvent(
+              new CustomEvent('unlim:file-chunks-synced', {
+                detail: {
+                  fileId: cand.id,
+                  telegramChunks: tgResult.chunks,
+                  telegramChatId: chatId,
+                },
+              })
+            );
+          }
+        }
+      }
+    }
+  })();
 
   return {
     unsyncedLocalFiles,

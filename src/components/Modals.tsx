@@ -36,6 +36,7 @@ import {
   getClientBinaryBlob,
   getMemoryBinaryBlobSync,
   resolveClientMimeType,
+  buildTelegramStreamManifestUrl,
 } from '../services/clientCloudFallback';
 import { YouTubeIframePlayer } from './YouTubeIframePlayer';
 
@@ -702,8 +703,11 @@ export const FileDetailDrawer: React.FC<FileDetailDrawerProps> = ({
       applyBlob(memBlob);
     } else {
       setLoadingTextPreview(isTextOrCode && !file.previewText);
-      // First check fast local IndexedDB cache (<2ms) for all files including videos
-      getClientBinaryBlob(file.id, isVideo && !isSavedOffline ? undefined : file)
+      // First check fast local IndexedDB cache (<2ms) for all files including videos, and fetch Telegram chunks for files <= 60 MB
+      getClientBinaryBlob(
+        file.id,
+        isVideo && !isSavedOffline && file.sizeBytes > 60 * 1024 * 1024 ? undefined : file
+      )
         .then((blob) => {
           if (cancelled || !blob || blob.size <= 64) return;
           applyBlob(blob);
@@ -739,11 +743,23 @@ export const FileDetailDrawer: React.FC<FileDetailDrawerProps> = ({
     firebaseUid || ''
   )}&email=${encodeURIComponent(firebaseEmail || '')}&name=${encodeURIComponent(file.name)}`;
 
+  const tgManifestInlineUrl = React.useMemo(
+    () =>
+      buildTelegramStreamManifestUrl({
+        fileName: file.name,
+        mimeType: file.mimeType,
+        sizeBytes: file.sizeBytes,
+        telegramChunks: file.telegramChunks,
+        inline: true,
+      }),
+    [file.name, file.mimeType, file.sizeBytes, file.telegramChunks]
+  );
+
   const inlineUrl: string = isVideo
     ? !isMkv && localBlobUrl
       ? localBlobUrl
       : serverInlineUrl
-    : localBlobUrl || serverInlineUrl || file.previewDataUrl || '';
+    : localBlobUrl || tgManifestInlineUrl || file.previewDataUrl || serverInlineUrl || '';
 
   // Fetch text preview from serverInlineUrl if not cached in IndexedDB
   useEffect(() => {
