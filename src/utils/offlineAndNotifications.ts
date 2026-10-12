@@ -181,6 +181,7 @@ export interface OfflineSavedFileMeta {
   savedAt: string;
   folderId: string | null;
   previewDataUrl?: string;
+  fileRecord?: FileRecord;
 }
 
 const OFFLINE_INDEX_KEY = 'unlim_offline_files_v1';
@@ -194,6 +195,35 @@ export function getOfflineSavedFilesMap(): Record<string, OfflineSavedFileMeta> 
   } catch {
     return {};
   }
+}
+
+export function getOfflineSavedFileRecords(): FileRecord[] {
+  const map = getOfflineSavedFilesMap();
+  return Object.values(map).map((item): FileRecord => {
+    if (item.fileRecord) {
+      return {
+        ...item.fileRecord,
+        previewDataUrl: item.previewDataUrl || item.fileRecord.previewDataUrl,
+      };
+    }
+    return {
+      id: item.id,
+      ownerId: 'offline_local',
+      ownerName: 'Offline Device Storage',
+      folderId: item.folderId || null,
+      name: item.name,
+      sizeBytes: item.sizeBytes,
+      mimeType: item.mimeType || 'application/octet-stream',
+      sha256: item.id,
+      storageDriver: 'local_vault',
+      telegramChunks: [],
+      starred: false,
+      createdAt: item.savedAt,
+      updatedAt: item.savedAt,
+      downloadCount: 0,
+      previewDataUrl: item.previewDataUrl,
+    };
+  });
 }
 
 function saveOfflineFilesMap(map: Record<string, OfflineSavedFileMeta>): void {
@@ -290,6 +320,10 @@ export async function saveFileOfflineToDevice(
     savedAt: new Date().toISOString(),
     folderId: file.folderId,
     previewDataUrl,
+    fileRecord: {
+      ...file,
+      previewDataUrl: previewDataUrl || file.previewDataUrl,
+    },
   };
   saveOfflineFilesMap(map);
   onProgress?.(100);

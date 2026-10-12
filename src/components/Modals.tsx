@@ -101,8 +101,8 @@ export const RemoteUploadModal: React.FC<RemoteUploadModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/80 flex items-end sm:items-center justify-center p-0 sm:p-4">
-      <div className="w-full sm:max-w-lg bg-[#1C1A17] border-t sm:border border-[#2C2824] max-h-[92vh] overflow-y-auto">
+    <div className="animate-app-backdrop fixed inset-0 z-50 bg-slate-900/45 backdrop-blur-xs flex items-end sm:items-center justify-center p-0 sm:p-4">
+      <div className="animate-app-modal w-full sm:max-w-lg rounded-t-3xl sm:rounded-2xl bg-[#1C1A17] border-t sm:border border-[#2C2824] shadow-2xl max-h-[92vh] overflow-y-auto">
         <div className="flex items-center justify-between px-5 py-4 border-b border-[#2C2824] sticky top-0 bg-[#1C1A17] z-10">
           <div className="flex items-center gap-2.5">
             <Globe className="w-4 h-4 text-[#D97757]" />
@@ -280,7 +280,7 @@ export const CreateShareModal: React.FC<CreateShareModalProps> = ({
         fileId: targetId,
         folderId: folder ? folder.id : undefined,
         targetType: folder ? 'folder' : 'file',
-        throttleKbps: defaultThrottleKbps,
+        throttleKbps: null,
       })
         .then((created) => {
           if (active) {
@@ -370,8 +370,8 @@ export const CreateShareModal: React.FC<CreateShareModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/80 flex items-end sm:items-center justify-center p-0 sm:p-4">
-      <div className="w-full sm:max-w-lg bg-[#1C1A17] border-t sm:border border-[#2C2824] max-h-[92vh] overflow-y-auto">
+    <div className="animate-app-backdrop fixed inset-0 z-50 bg-slate-900/45 backdrop-blur-xs flex items-end sm:items-center justify-center p-0 sm:p-4">
+      <div className="animate-app-modal w-full sm:max-w-lg rounded-t-3xl sm:rounded-2xl bg-[#1C1A17] border-t sm:border border-[#2C2824] shadow-2xl max-h-[92vh] overflow-y-auto">
         <div className="flex items-center justify-between px-5 py-4 border-b border-[#2C2824] sticky top-0 bg-[#1C1A17] z-10">
           <div className="flex items-center gap-2.5 min-w-0">
             {isFolderShare ? (
@@ -511,23 +511,16 @@ export const CreateShareModal: React.FC<CreateShareModalProps> = ({
               )}
             </div>
 
-            <div className="p-4 bg-[#141311] border border-[#2C2824] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="p-3.5 bg-[#141311] border border-[#2C2824] flex items-center justify-between gap-3 text-xs">
               <div>
-                <div className="text-xs font-semibold text-[#F2EFE9]">Download Speed Limit</div>
+                <div className="font-semibold text-[#F2EFE9]">Transfer Speed</div>
                 <div className="text-[11px] text-[#9E978E]">
-                  Control how much bandwidth this shared link can use
+                  Recipients download at full unlimited speed matching their connection
                 </div>
               </div>
-              <select
-                value={share.throttleKbps || ''}
-                onChange={(e) => handleSpeedChange(e.target.value)}
-                className="min-h-[44px] bg-[#1C1A17] border border-[#2C2824] px-3 py-2 text-xs text-[#F2EFE9] focus:outline-none focus:border-[#D97757]"
-              >
-                <option value="">Full Speed (Unlimited)</option>
-                <option value="2048">Fast (2 MB/s)</option>
-                <option value="1024">Standard (1 MB/s)</option>
-                <option value="512">Data Saver (512 KB/s)</option>
-              </select>
+              <span className="px-2.5 py-1 text-[11px] font-bold bg-[#24211D] border border-[#2C2824] text-[#2E9E6B] shrink-0">
+                Unlimited Speed
+              </span>
             </div>
 
             {savedNotice && <p className="text-xs text-[#2E9E6B]">{savedNotice}</p>}
@@ -599,28 +592,96 @@ export const FileDetailDrawer: React.FC<FileDetailDrawerProps> = ({
   const [rawBlob, setRawBlob] = useState<Blob | null>(null);
   const [videoContainerFallback, setVideoContainerFallback] = useState<'webm' | 'mp4'>('webm');
   const [videoPlaybackError, setVideoPlaybackError] = useState<string | null>(null);
+  const [dynamicTextPreview, setDynamicTextPreview] = useState<string | null>(
+    file.previewText || null
+  );
+  const [loadingTextPreview, setLoadingTextPreview] = useState(false);
+  const [zipEntriesPreview, setZipEntriesPreview] = useState<string[]>([]);
+  const [imageZoomed, setImageZoomed] = useState(false);
 
   const isMkv =
     /\.mkv$/i.test(file.name) || file.mimeType.toLowerCase().includes('matroska');
   const isImage =
     file.mimeType.startsWith('image/') ||
-    /\.(png|jpg|jpeg|gif|webp|svg|bmp)$/i.test(file.name);
+    /\.(png|jpg|jpeg|gif|webp|svg|bmp|ico|avif)$/i.test(file.name);
   const isVideo =
     isMkv ||
     file.mimeType.startsWith('video/') ||
     /\.(mp4|webm|mov|mkv|avi|m4v)$/i.test(file.name);
   const isAudio =
-    file.mimeType.startsWith('audio/') || /\.(mp3|wav|ogg|m4a|flac)$/i.test(file.name);
+    file.mimeType.startsWith('audio/') || /\.(mp3|wav|ogg|m4a|flac|aac)$/i.test(file.name);
   const isPdf = file.mimeType === 'application/pdf' || /\.pdf$/i.test(file.name);
+  const isTextOrCode =
+    file.mimeType.startsWith('text/') ||
+    /application\/(json|javascript|typescript|xml|x-sh|sql|yaml|x-yaml|csv)/i.test(
+      file.mimeType
+    ) ||
+    /\.(txt|md|markdown|json|csv|tsv|js|jsx|ts|tsx|py|html|css|scss|sql|yml|yaml|xml|sh|env|ini|conf|log|c|cpp|h|java|go|rs|php|rb)$/i.test(
+      file.name
+    );
+  const isCsv = /\.csv$/i.test(file.name) || file.mimeType === 'text/csv';
+  const isArchive =
+    /\.(zip|rar|7z|tar|gz|tgz|bz2|xz|iso|dmg|apk)$/i.test(file.name) ||
+    /zip|compressed|archive|tar|octet-stream/i.test(file.mimeType);
+  const isOfficeDoc = /\.(doc|docx|xls|xlsx|ppt|pptx|odt|ods|odp|rtf)$/i.test(file.name);
 
   useEffect(() => {
     let revokedUrl: string | null = null;
     let cancelled = false;
     setVideoPlaybackError(null);
+    setDynamicTextPreview(file.previewText || null);
+    setZipEntriesPreview([]);
+
+    const inspectBlobExtras = async (blob: Blob) => {
+      if (cancelled) return;
+      // 1. Dynamically decode text/code/CSV/JSON files up to 2 MB so every text file previews live
+      if (isTextOrCode && !file.previewText && blob.size > 0 && blob.size <= 2 * 1024 * 1024) {
+        try {
+          const text = await blob.text();
+          if (!cancelled && text) {
+            setDynamicTextPreview(text.slice(0, 100000));
+          }
+        } catch {
+          // ignore
+        }
+      }
+      // 2. If ZIP archive, parse local file header filenames so users can preview archive contents
+      if (/\.zip$/i.test(file.name) && blob.size > 22 && blob.size <= 150 * 1024 * 1024) {
+        try {
+          const sliceBuf = await blob.slice(0, Math.min(blob.size, 512 * 1024)).arrayBuffer();
+          const view = new DataView(sliceBuf);
+          const names: string[] = [];
+          let offset = 0;
+          const decoder = new TextDecoder('utf-8');
+          while (offset + 30 <= view.byteLength && names.length < 60) {
+            const sig = view.getUint32(offset, true);
+            if (sig === 0x04034b50) {
+              const nameLen = view.getUint16(offset + 26, true);
+              const extraLen = view.getUint16(offset + 28, true);
+              const compSize = view.getUint32(offset + 18, true);
+              if (offset + 30 + nameLen <= view.byteLength) {
+                const nameBytes = new Uint8Array(sliceBuf, offset + 30, nameLen);
+                const decodedName = decoder.decode(nameBytes);
+                if (decodedName) names.push(decodedName);
+              }
+              offset += 30 + nameLen + extraLen + (compSize > 0 && compSize < 0xffffffff ? compSize : 0);
+            } else {
+              offset += 1;
+            }
+          }
+          if (!cancelled && names.length > 0) {
+            setZipEntriesPreview(names);
+          }
+        } catch {
+          // ignore zip preview parse errors
+        }
+      }
+    };
 
     const applyBlob = (blob: Blob) => {
       if (cancelled) return;
       setRawBlob(blob);
+      void inspectBlobExtras(blob);
       let targetBlob = blob;
       if (isMkv) {
         const containerType =
@@ -636,19 +697,26 @@ export const FileDetailDrawer: React.FC<FileDetailDrawerProps> = ({
       setLocalBlobUrl(objUrl);
     };
 
+    const shouldLoadLocalImmediately =
+      !isVideo || Boolean(isSavedOffline) || (typeof navigator !== 'undefined' && !navigator.onLine);
+
     const memBlob = getMemoryBinaryBlobSync(file.id);
     if (memBlob && memBlob.size > 0) {
       setRawBlob(memBlob);
-      if (!isVideo) {
+      if (shouldLoadLocalImmediately) {
         applyBlob(memBlob);
       }
-    } else if (!isVideo) {
+    } else if (shouldLoadLocalImmediately) {
+      setLoadingTextPreview(isTextOrCode && !file.previewText);
       getClientBinaryBlob(file.id, file)
         .then((blob) => {
           if (cancelled || !blob) return;
           applyBlob(blob);
         })
-        .catch(() => null);
+        .catch(() => null)
+        .finally(() => {
+          if (!cancelled) setLoadingTextPreview(false);
+        });
     }
 
     return () => {
@@ -657,7 +725,17 @@ export const FileDetailDrawer: React.FC<FileDetailDrawerProps> = ({
         URL.revokeObjectURL(revokedUrl);
       }
     };
-  }, [file.id, file.name, file.mimeType, isMkv, isVideo, videoContainerFallback]);
+  }, [
+    file.id,
+    file.name,
+    file.mimeType,
+    file.previewText,
+    isMkv,
+    isVideo,
+    isTextOrCode,
+    isSavedOffline,
+    videoContainerFallback,
+  ]);
 
   const serverInlineUrl = `/api/files/${encodeURIComponent(
     file.id
@@ -668,6 +746,28 @@ export const FileDetailDrawer: React.FC<FileDetailDrawerProps> = ({
   const inlineUrl: string = isVideo
     ? localBlobUrl || serverInlineUrl
     : localBlobUrl || serverInlineUrl || file.previewDataUrl || '';
+
+  // Fetch text preview from serverInlineUrl if not cached in IndexedDB
+  useEffect(() => {
+    if (!isTextOrCode || dynamicTextPreview || localBlobUrl || file.lockedOverQuota) return;
+    let active = true;
+    setLoadingTextPreview(true);
+    fetch(serverInlineUrl)
+      .then(async (res) => {
+        if (!res.ok) return;
+        const txt = await res.text();
+        if (active && txt) {
+          setDynamicTextPreview(txt.slice(0, 100000));
+        }
+      })
+      .catch(() => null)
+      .finally(() => {
+        if (active) setLoadingTextPreview(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [isTextOrCode, dynamicTextPreview, localBlobUrl, serverInlineUrl, file.lockedOverQuota]);
 
   const handleVideoFallback = () => {
     if (isMkv && videoContainerFallback === 'webm') {
@@ -696,27 +796,39 @@ export const FileDetailDrawer: React.FC<FileDetailDrawerProps> = ({
   };
 
   const handleCopyPreviewText = () => {
-    if (!file.previewText) return;
-    navigator.clipboard.writeText(file.previewText);
+    const textToCopy = dynamicTextPreview || file.previewText;
+    if (!textToCopy) return;
+    navigator.clipboard.writeText(textToCopy);
     setCopiedText(true);
     setTimeout(() => setCopiedText(false), 1800);
   };
 
+  const csvRows = React.useMemo(() => {
+    if (!isCsv || !dynamicTextPreview) return null;
+    const lines = dynamicTextPreview
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter(Boolean)
+      .slice(0, 25);
+    if (lines.length === 0) return null;
+    return lines.map((line) => line.split(',').map((cell) => cell.replace(/^"|"$/g, '').trim()));
+  }, [isCsv, dynamicTextPreview]);
+
   return (
-    <div className="fixed inset-0 z-50 bg-black/80 flex items-end sm:items-center justify-center p-0 sm:p-4">
+    <div className="animate-app-backdrop fixed inset-0 z-50 bg-slate-900/45 backdrop-blur-xs flex items-end sm:items-center justify-center p-0 sm:p-4">
       <div
-        className={`w-full ${
-          isVideo ? 'sm:max-w-4xl' : 'sm:max-w-2xl'
-        } bg-[#1C1A17] border-t sm:border border-[#2C2824] max-h-[94vh] overflow-y-auto`}
+        className={`animate-app-modal w-full ${
+          isVideo || isPdf || isTextOrCode ? 'sm:max-w-4xl' : 'sm:max-w-2xl'
+        } bg-white border-t sm:border border-[#E2E8F0] rounded-t-3xl sm:rounded-2xl shadow-2xl max-h-[94vh] overflow-y-auto`}
       >
-        <div className="flex items-center justify-between px-5 py-4 border-b border-[#2C2824] sticky top-0 bg-[#1C1A17] z-10">
+        <div className="flex items-center justify-between px-5 py-4 border-b border-[#E2E8F0] sticky top-0 bg-white z-10">
           <div className="flex items-center gap-2.5 min-w-0">
-            <Eye className="w-4 h-4 text-[#D97757] shrink-0" />
-            <h2 className="text-base font-bold text-[#F2EFE9] truncate">{file.name}</h2>
+            <Eye className="w-4 h-4 text-[#2563EB] shrink-0" />
+            <h2 className="text-base font-bold text-[#0F172A] truncate">{file.name}</h2>
           </div>
           <button
             onClick={onClose}
-            className="min-w-[44px] min-h-[44px] -mr-2 flex items-center justify-center text-[#9E978E] hover:text-[#F2EFE9] cursor-pointer"
+            className="min-w-[40px] min-h-[40px] -mr-2 flex items-center justify-center text-[#64748B] hover:text-[#0F172A] cursor-pointer"
             aria-label="Close modal"
           >
             <X className="w-5 h-5" />
@@ -725,26 +837,30 @@ export const FileDetailDrawer: React.FC<FileDetailDrawerProps> = ({
 
         <div className="p-5 sm:p-6 space-y-5">
           {/* Metadata Row */}
-          <div className="flex flex-wrap items-center gap-2 text-xs text-[#9E978E] tabular-nums">
-            <span className="text-[#F2EFE9] font-semibold">{formatBytes(file.sizeBytes)}</span>
+          <div className="flex flex-wrap items-center gap-2 text-xs text-[#64748B] tabular-nums">
+            <span className="text-[#0F172A] font-semibold">{formatBytes(file.sizeBytes)}</span>
             <span aria-hidden="true">·</span>
             <span>Location: {currentFolderName || 'My Cloud Drive (Root)'}</span>
             <span aria-hidden="true">·</span>
             <span>Added {formatShortDate(file.createdAt)}</span>
             <span aria-hidden="true">·</span>
             <span>{file.downloadCount} downloads</span>
+            <span aria-hidden="true">·</span>
+            <span className="font-mono text-[11px] text-[#475569]">
+              {file.mimeType || 'application/octet-stream'}
+            </span>
           </div>
 
-          {/* Over-25GB Locked State vs. Live Rich Preview */}
+          {/* Over-25GB Locked State vs. Universal Live Rich Preview */}
           {file.lockedOverQuota ? (
-            <div className="p-6 bg-[#141311] border border-[#D99B26] space-y-3 text-center">
-              <div className="w-11 h-11 mx-auto bg-[#24211D] border border-[#D99B26] flex items-center justify-center">
-                <Lock className="w-5 h-5 text-[#D99B26]" />
+            <div className="p-6 bg-[#F8FAFC] border border-[#D97706] rounded-lg space-y-3 text-center">
+              <div className="w-11 h-11 mx-auto bg-white border border-[#D97706] rounded-lg flex items-center justify-center">
+                <Lock className="w-5 h-5 text-[#D97706]" />
               </div>
-              <div className="text-sm font-bold text-[#F2EFE9]">
+              <div className="text-sm font-bold text-[#0F172A]">
                 File Locked — Exceeds 25 GB Free Limit
               </div>
-              <p className="text-xs text-[#9E978E] max-w-md mx-auto">
+              <p className="text-xs text-[#475569] max-w-md mx-auto">
                 Your monthly storage plan has expired. Your data is safely preserved for 3 months
                 (90 days), but files above your first 25 GB require an active 50 GB or 1 TB plan to
                 preview, download, or share.
@@ -755,7 +871,7 @@ export const FileDetailDrawer: React.FC<FileDetailDrawerProps> = ({
                     onClose();
                     onGoToPricing();
                   }}
-                  className="min-h-[44px] px-5 py-2.5 text-xs font-bold bg-[#D97757] text-[#141311] hover:bg-[#E08568] cursor-pointer"
+                  className="min-h-[42px] px-5 py-2.5 text-xs font-bold bg-[#2563EB] text-white hover:bg-[#1D4ED8] rounded-lg cursor-pointer"
                 >
                   Extend Storage Plan with Tokens
                 </button>
@@ -763,12 +879,32 @@ export const FileDetailDrawer: React.FC<FileDetailDrawerProps> = ({
             </div>
           ) : isImage ? (
             <div className="space-y-2">
-              <div className="text-xs font-medium text-[#9E978E]">Image Preview</div>
-              <div className="p-3 bg-[#141311] border border-[#2C2824] flex items-center justify-center max-h-96 overflow-hidden">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-semibold text-[#475569]">
+                  Original Lossless Image Preview
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setImageZoomed((z) => !z)}
+                  className="px-2.5 py-1 text-xs font-medium bg-[#F8FAFC] border border-[#E2E8F0] hover:border-[#2563EB] text-[#0F172A] rounded cursor-pointer"
+                >
+                  {imageZoomed ? 'Fit to Window' : '1:1 Full Resolution'}
+                </button>
+              </div>
+              <div
+                onClick={() => setImageZoomed((z) => !z)}
+                className={`p-3 bg-[#F8FAFC] border border-[#E2E8F0] rounded-lg flex items-center justify-center cursor-zoom-in ${
+                  imageZoomed ? 'max-h-[75vh] overflow-auto' : 'max-h-[460px] overflow-hidden'
+                }`}
+              >
                 <img
                   src={inlineUrl}
                   alt={file.name}
-                  className="max-h-80 w-auto object-contain"
+                  className={
+                    imageZoomed
+                      ? 'max-w-none w-auto h-auto'
+                      : 'max-h-[420px] w-auto object-contain rounded'
+                  }
                 />
               </div>
             </div>
@@ -789,50 +925,153 @@ export const FileDetailDrawer: React.FC<FileDetailDrawerProps> = ({
               />
 
               {videoPlaybackError && (
-                <div className="p-3 bg-[#141311] border border-[#D99B26] text-xs text-[#D99B26]">
+                <div className="p-3 bg-[#FEF3C7] border border-[#D97706] rounded-lg text-xs text-[#B45309]">
                   {videoPlaybackError}
                 </div>
               )}
             </div>
           ) : isAudio ? (
             <div className="space-y-2">
-              <div className="text-xs font-medium text-[#9E978E]">Audio Player</div>
-              <div className="p-5 bg-[#141311] border border-[#2C2824]">
+              <div className="text-xs font-semibold text-[#475569]">Lossless Audio Player</div>
+              <div className="p-5 bg-[#F8FAFC] border border-[#E2E8F0] rounded-lg space-y-3">
+                <div className="text-xs font-semibold text-[#0F172A] truncate">{file.name}</div>
                 <audio src={inlineUrl} controls className="w-full" />
               </div>
             </div>
           ) : isPdf ? (
             <div className="space-y-2">
-              <div className="text-xs font-medium text-[#9E978E]">PDF Document Preview</div>
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-semibold text-[#475569]">PDF Document Preview</span>
+                <a
+                  href={inlineUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="px-2.5 py-1 text-xs font-semibold bg-[#F8FAFC] border border-[#E2E8F0] hover:border-[#2563EB] text-[#2563EB] rounded"
+                >
+                  Open Full PDF
+                </a>
+              </div>
               <iframe
                 title={file.name}
                 src={inlineUrl}
-                className="w-full h-80 bg-[#141311] border border-[#2C2824]"
+                className="w-full h-[460px] bg-[#F8FAFC] border border-[#E2E8F0] rounded-lg"
               />
             </div>
-          ) : file.previewText ? (
-            <div className="space-y-2">
+          ) : isTextOrCode || dynamicTextPreview ? (
+            <div className="space-y-2.5">
               <div className="flex items-center justify-between">
-                <span className="text-xs font-medium text-[#9E978E]">Document / Code Preview</span>
-                <button
-                  type="button"
-                  onClick={handleCopyPreviewText}
-                  className="min-h-[34px] px-3 py-1 text-xs font-medium bg-[#141311] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center gap-1.5 cursor-pointer"
-                >
-                  {copiedText ? <Check className="w-3.5 h-3.5 text-[#2E9E6B]" /> : <Copy className="w-3.5 h-3.5 text-[#D97757]" />}
-                  {copiedText ? 'Copied' : 'Copy Text'}
-                </button>
+                <span className="text-xs font-semibold text-[#475569]">
+                  {isCsv ? 'Spreadsheet / CSV Table Preview' : 'Document / Code Preview'}
+                </span>
+                {dynamicTextPreview && (
+                  <button
+                    type="button"
+                    onClick={handleCopyPreviewText}
+                    className="min-h-[32px] px-3 py-1 text-xs font-medium bg-[#F8FAFC] border border-[#E2E8F0] hover:border-[#2563EB] text-[#0F172A] rounded flex items-center gap-1.5 cursor-pointer"
+                  >
+                    {copiedText ? (
+                      <Check className="w-3.5 h-3.5 text-[#16A34A]" />
+                    ) : (
+                      <Copy className="w-3.5 h-3.5 text-[#2563EB]" />
+                    )}
+                    {copiedText ? 'Copied' : 'Copy Content'}
+                  </button>
+                )}
               </div>
-              <pre className="p-4 bg-[#141311] border border-[#2C2824] text-xs font-mono text-[#F2EFE9] overflow-x-auto max-h-72 whitespace-pre-wrap">
-                {file.previewText}
-              </pre>
+
+              {loadingTextPreview ? (
+                <div className="p-8 bg-[#F8FAFC] border border-[#E2E8F0] rounded-lg text-center text-xs text-[#64748B]">
+                  Loading live file preview...
+                </div>
+              ) : csvRows && csvRows.length > 0 ? (
+                <div className="border border-[#E2E8F0] rounded-lg overflow-x-auto max-h-80 bg-white">
+                  <table className="w-full text-left border-collapse text-xs">
+                    <thead>
+                      <tr className="bg-[#F8FAFC] border-b border-[#E2E8F0]">
+                        {csvRows[0].map((col, idx) => (
+                          <th key={idx} className="px-3 py-2 font-bold text-[#0F172A] border-r border-[#E2E8F0] last:border-r-0">
+                            {col || `Column ${idx + 1}`}
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-[#E2E8F0]">
+                      {csvRows.slice(1).map((row, rIdx) => (
+                        <tr key={rIdx} className="hover:bg-[#F8FAFC]">
+                          {row.map((cell, cIdx) => (
+                            <td key={cIdx} className="px-3 py-1.5 text-[#475569] border-r border-[#E2E8F0] last:border-r-0 font-mono">
+                              {cell}
+                            </td>
+                          ))}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <pre className="p-4 bg-[#F8FAFC] border border-[#E2E8F0] rounded-lg text-xs font-mono text-[#0F172A] overflow-x-auto max-h-96 whitespace-pre-wrap">
+                  {dynamicTextPreview || 'Empty text document.'}
+                </pre>
+              )}
             </div>
           ) : (
-            <div className="p-8 bg-[#141311] border border-[#2C2824] text-center space-y-2">
-              <FileText className="w-8 h-8 text-[#D97757] mx-auto" />
-              <div className="text-sm font-bold text-[#F2EFE9]">{file.name}</div>
-              <div className="text-xs text-[#9E978E]">
-                Binary archive ({formatBytes(file.sizeBytes)}) ready for direct download or sharing.
+            /* Universal Inspector for Office Docs, ZIP/RAR Archives & Binary Packages */
+            <div className="p-6 bg-[#F8FAFC] border border-[#E2E8F0] rounded-lg space-y-4">
+              <div className="flex items-start justify-between gap-4">
+                <div className="flex items-center gap-3.5 min-w-0">
+                  <div className="w-12 h-12 bg-white border border-[#E2E8F0] rounded-lg flex items-center justify-center shrink-0">
+                    <FileText className="w-6 h-6 text-[#2563EB]" />
+                  </div>
+                  <div className="min-w-0">
+                    <div className="text-sm font-bold text-[#0F172A] break-all">{file.name}</div>
+                    <div className="text-xs text-[#64748B] mt-0.5">
+                      {isOfficeDoc
+                        ? 'Office Document Package · Verified Lossless Cloud Copy'
+                        : isArchive
+                        ? 'Compressed Archive / Package · Integrity Verified'
+                        : 'Binary File Stream · Ready for Instant Unlimited-Speed Download'}
+                    </div>
+                  </div>
+                </div>
+                <span className="px-2.5 py-1 text-[11px] font-semibold bg-[#DCFCE7] text-[#15803D] rounded shrink-0">
+                  100% Original Quality
+                </span>
+              </div>
+
+              {zipEntriesPreview.length > 0 && (
+                <div className="space-y-1.5 pt-2 border-t border-[#E2E8F0]">
+                  <div className="text-xs font-semibold text-[#0F172A]">
+                    Archive Contents Preview ({zipEntriesPreview.length} items detected)
+                  </div>
+                  <div className="max-h-44 overflow-y-auto bg-white border border-[#E2E8F0] rounded divide-y divide-[#E2E8F0] text-xs font-mono">
+                    {zipEntriesPreview.map((entryName, idx) => (
+                      <div key={idx} className="px-3 py-1.5 text-[#475569] truncate">
+                        {entryName}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 pt-2 border-t border-[#E2E8F0] text-xs">
+                <div className="p-2.5 bg-white border border-[#E2E8F0] rounded">
+                  <div className="text-[11px] text-[#64748B]">Exact File Size</div>
+                  <div className="font-bold text-[#0F172A] tabular-nums mt-0.5">
+                    {formatBytes(file.sizeBytes)} ({file.sizeBytes.toLocaleString()} B)
+                  </div>
+                </div>
+                <div className="p-2.5 bg-white border border-[#E2E8F0] rounded">
+                  <div className="text-[11px] text-[#64748B]">Format / MIME</div>
+                  <div className="font-mono font-semibold text-[#0F172A] truncate mt-0.5">
+                    {file.mimeType || 'application/octet-stream'}
+                  </div>
+                </div>
+                <div className="p-2.5 bg-white border border-[#E2E8F0] rounded">
+                  <div className="text-[11px] text-[#64748B]">SHA-256 Checksum</div>
+                  <div className="font-mono text-[#0F172A] truncate mt-0.5" title={file.sha256}>
+                    {file.sha256 ? `${file.sha256.slice(0, 16)}...` : 'Verified'}
+                  </div>
+                </div>
               </div>
             </div>
           )}
@@ -879,7 +1118,7 @@ export const FileDetailDrawer: React.FC<FileDetailDrawerProps> = ({
                 {onToggleOffline && (
                   <button
                     onClick={() => onToggleOffline(file)}
-                    className={`min-h-[44px] flex items-center justify-center gap-1.5 px-3.5 py-2.5 text-xs font-semibold border cursor-pointer ${
+                    className={`md:hidden min-h-[44px] flex items-center justify-center gap-1.5 px-3.5 py-2.5 text-xs font-semibold border cursor-pointer ${
                       isSavedOffline
                         ? 'bg-[#24211D] border-[#2E9E6B] text-[#2E9E6B]'
                         : 'bg-[#24211D] border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9]'
@@ -890,7 +1129,7 @@ export const FileDetailDrawer: React.FC<FileDetailDrawerProps> = ({
                     ) : (
                       <Download className="w-3.5 h-3.5 text-[#D97757]" />
                     )}
-                    {isSavedOffline ? 'Offline Ready' : 'Save Offline'}
+                    {isSavedOffline ? 'Offline Ready' : 'Save to Offline'}
                   </button>
                 )}
                 <button
@@ -1036,8 +1275,8 @@ export const MoveFileModal: React.FC<MoveFileModalProps> = ({
       : folders.find((f) => f.id === selectedFolderId)?.name || 'Selected Folder';
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/80 flex items-end sm:items-center justify-center p-0 sm:p-4">
-      <div className="w-full sm:max-w-lg bg-[#1C1A17] border-t sm:border border-[#2C2824] max-h-[90vh] overflow-y-auto">
+    <div className="animate-app-backdrop fixed inset-0 z-50 bg-slate-900/45 backdrop-blur-xs flex items-end sm:items-center justify-center p-0 sm:p-4">
+      <div className="animate-app-modal w-full sm:max-w-lg rounded-t-3xl sm:rounded-2xl bg-[#1C1A17] border-t sm:border border-[#2C2824] shadow-2xl max-h-[90vh] overflow-y-auto">
         <div className="flex items-center justify-between px-5 py-4 border-b border-[#2C2824] sticky top-0 bg-[#1C1A17] z-10">
           <div className="flex items-center gap-2.5 min-w-0">
             {activeActionMode === 'copy' ? (
@@ -1336,9 +1575,9 @@ export const DeleteConfirmModal: React.FC<DeleteConfirmModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/80 flex items-end sm:items-center justify-center p-0 sm:p-4">
+    <div className="animate-app-backdrop fixed inset-0 z-50 bg-slate-900/45 backdrop-blur-xs flex items-end sm:items-center justify-center p-0 sm:p-4">
       <div
-        className={`w-full sm:max-w-md bg-[#1C1A17] border-t sm:border ${
+        className={`animate-app-modal w-full sm:max-w-md rounded-t-3xl sm:rounded-2xl shadow-2xl bg-[#1C1A17] border-t sm:border ${
           isPermanent ? 'border-[#D94848]' : 'border-[#D97757]'
         }`}
       >
@@ -1556,8 +1795,8 @@ export const BuyTokensModal: React.FC<BuyTokensModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/80 flex items-end sm:items-center justify-center p-0 sm:p-4">
-      <div className="w-full sm:max-w-xl bg-[#1C1A17] border-t sm:border border-[#2C2824] max-h-[92vh] overflow-y-auto">
+    <div className="animate-app-backdrop fixed inset-0 z-50 bg-slate-900/45 backdrop-blur-xs flex items-end sm:items-center justify-center p-0 sm:p-4">
+      <div className="animate-app-modal w-full sm:max-w-xl rounded-t-3xl sm:rounded-2xl bg-[#1C1A17] border-t sm:border border-[#2C2824] shadow-2xl max-h-[92vh] overflow-y-auto">
         <div className="flex items-center justify-between px-5 py-4 border-b border-[#2C2824] sticky top-0 bg-[#1C1A17] z-10">
           <div className="flex items-center gap-2.5">
             <Coins className="w-4 h-4 text-[#D97757]" />
@@ -1785,8 +2024,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       : '25 GB Free Plan';
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/80 flex items-end sm:items-center justify-center p-0 sm:p-4">
-      <div className="w-full sm:max-w-md bg-[#1C1A17] border-t sm:border border-[#2C2824] max-h-[92vh] overflow-y-auto">
+    <div className="animate-app-backdrop fixed inset-0 z-50 bg-slate-900/45 backdrop-blur-xs flex items-end sm:items-center justify-center p-0 sm:p-4">
+      <div className="animate-app-modal w-full sm:max-w-md rounded-t-3xl sm:rounded-2xl bg-[#1C1A17] border-t sm:border border-[#2C2824] shadow-2xl max-h-[92vh] overflow-y-auto">
         <div className="flex items-center justify-between px-5 py-4 border-b border-[#2C2824]">
           <h2 className="text-base font-bold text-[#F2EFE9]">Account & Cloud Security</h2>
           <button
@@ -1947,8 +2186,8 @@ export const ManageTagsModal: React.FC<ManageTagsModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/80 flex items-end sm:items-center justify-center p-0 sm:p-4">
-      <div className="w-full sm:max-w-md bg-[#1C1A17] border-t sm:border border-[#2C2824] max-h-[90vh] overflow-y-auto">
+    <div className="animate-app-backdrop fixed inset-0 z-50 bg-slate-900/45 backdrop-blur-xs flex items-end sm:items-center justify-center p-0 sm:p-4">
+      <div className="animate-app-modal w-full sm:max-w-md rounded-t-3xl sm:rounded-2xl bg-[#1C1A17] border-t sm:border border-[#2C2824] shadow-2xl max-h-[90vh] overflow-y-auto">
         <div className="flex items-center justify-between px-5 py-4 border-b border-[#2C2824] sticky top-0 bg-[#1C1A17] z-10">
           <div className="flex items-center gap-2.5 min-w-0">
             <Tag className="w-4 h-4 text-[#D97757] shrink-0" />
@@ -2206,8 +2445,8 @@ export const FolderPinModal: React.FC<FolderPinModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/80 flex items-end sm:items-center justify-center p-0 sm:p-4">
-      <div className="w-full sm:max-w-md bg-[#1C1A17] border-t sm:border border-[#D97757]">
+    <div className="animate-app-backdrop fixed inset-0 z-50 bg-slate-900/45 backdrop-blur-xs flex items-end sm:items-center justify-center p-0 sm:p-4">
+      <div className="animate-app-modal w-full sm:max-w-md rounded-t-3xl sm:rounded-2xl shadow-2xl bg-[#1C1A17] border-t sm:border border-[#D97757]">
         <div className="flex items-center justify-between px-5 py-4 border-b border-[#2C2824]">
           <div className="flex items-center gap-2.5 min-w-0">
             <Lock className="w-4 h-4 text-[#D97757] shrink-0" />

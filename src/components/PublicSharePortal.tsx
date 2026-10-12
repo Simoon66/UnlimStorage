@@ -141,6 +141,29 @@ export const PublicSharePortal: React.FC<PublicSharePortalProps> = ({
     return isMediaVideoFile(share.fileName, share.fileMimeType);
   }, [share, isFolderShare]);
 
+  const isImageShare = React.useMemo(() => {
+    if (!share || isFolderShare) return false;
+    return (
+      (share.fileMimeType || '').startsWith('image/') ||
+      /\.(png|jpg|jpeg|gif|webp|svg|bmp|ico|avif)$/i.test(share.fileName || '')
+    );
+  }, [share, isFolderShare]);
+
+  const isAudioShare = React.useMemo(() => {
+    if (!share || isFolderShare) return false;
+    return (
+      (share.fileMimeType || '').startsWith('audio/') ||
+      /\.(mp3|wav|ogg|m4a|flac|aac)$/i.test(share.fileName || '')
+    );
+  }, [share, isFolderShare]);
+
+  const isPdfShare = React.useMemo(() => {
+    if (!share || isFolderShare) return false;
+    return (
+      share.fileMimeType === 'application/pdf' || /\.pdf$/i.test(share.fileName || '')
+    );
+  }, [share, isFolderShare]);
+
   useEffect(() => {
     let active = true;
     setLoading(true);
@@ -806,7 +829,7 @@ export const PublicSharePortal: React.FC<PublicSharePortalProps> = ({
 
                   <div className="flex items-center justify-between gap-2 pt-1">
                     <span className="text-[11px] text-[#9E978E]">
-                      Direct multi-quality stream (Auto / 1080p / 720p / 480p / 360p) · Auto-resume enabled
+                      Adaptive Network Stream (1080p High / 720p / 480p) · Auto-resume enabled
                     </span>
                     <button
                       type="button"
@@ -830,6 +853,49 @@ export const PublicSharePortal: React.FC<PublicSharePortalProps> = ({
                     </button>
                   </div>
                 </div>
+              )}
+
+              {/* Universal Preview for Single Image / Audio / PDF Shares */}
+              {!isFolderShare && !isVideoShare && unlockedKey && (
+                <>
+                  {isImageShare && (
+                    <div className="p-3 bg-[#141311] border border-[#2C2824] flex items-center justify-center max-h-96 overflow-hidden">
+                      <img
+                        src={`/api/public/share/${encodeURIComponent(
+                          share.token
+                        )}/download?inline=1&key=${encodeURIComponent(
+                          unlockedKey
+                        )}&password=${encodeURIComponent(passwordInput)}`}
+                        alt={share.fileName}
+                        className="max-h-80 w-auto object-contain"
+                      />
+                    </div>
+                  )}
+                  {isAudioShare && (
+                    <div className="p-4 bg-[#141311] border border-[#2C2824]">
+                      <audio
+                        controls
+                        src={`/api/public/share/${encodeURIComponent(
+                          share.token
+                        )}/download?inline=1&key=${encodeURIComponent(
+                          unlockedKey
+                        )}&password=${encodeURIComponent(passwordInput)}`}
+                        className="w-full"
+                      />
+                    </div>
+                  )}
+                  {isPdfShare && (
+                    <iframe
+                      title={share.fileName}
+                      src={`/api/public/share/${encodeURIComponent(
+                        share.token
+                      )}/download?inline=1&key=${encodeURIComponent(
+                        unlockedKey
+                      )}&password=${encodeURIComponent(passwordInput)}`}
+                      className="w-full h-96 bg-[#141311] border border-[#2C2824]"
+                    />
+                  )}
+                </>
               )}
 
               {/* Shared Folder Gallery View with Search Bar & Media Type Filter */}
@@ -1400,10 +1466,8 @@ export const PublicSharePortal: React.FC<PublicSharePortalProps> = ({
                           ? 'Direct streaming, gallery search & copy to drive enabled'
                           : 'Ready for direct download or copy to your drive'}
                       </span>
-                      <span>
-                        {share.throttleKbps
-                          ? `Speed limit: ${share.throttleKbps} KB/s`
-                          : 'Full speed enabled'}
+                      <span className="font-semibold text-[#2E9E6B]">
+                        Unlimited Full Speed Enabled
                       </span>
                     </div>
                   </div>

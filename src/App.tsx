@@ -84,6 +84,8 @@ import {
   syncPublicShareToFirestore,
   deletePublicShareFromFirestore,
   syncPublicShareBinaryChunksToFirestore,
+  subscribeToGlobalUploadPolicy,
+  GlobalUploadPolicy,
   FirebaseUser,
 } from './firebase';
 import { PublicSharePortal } from './components/PublicSharePortal';
@@ -124,6 +126,7 @@ import {
   playTransferCompletionChime,
   triggerBrowserPushNotification,
   getOfflineSavedFilesMap,
+  getOfflineSavedFileRecords,
   saveFileOfflineToDevice,
   removeFileFromOffline,
   clearAllOfflineFiles,
@@ -370,6 +373,8 @@ export default function App() {
   );
   const [savingOfflineFileId, setSavingOfflineFileId] = useState<string | null>(null);
   const [offlineProgressPct, setOfflineProgressPct] = useState<number>(0);
+  const touchDragSelectActiveRef = useRef<boolean>(false);
+  const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     const syncOffline = () => setOfflineFilesMap(getOfflineSavedFilesMap());
@@ -385,6 +390,37 @@ export default function App() {
       return 'grid';
     }
   });
+
+  // Desktop 'Lasso' Drag-to-Select Marquee State
+  const [lassoModeActive, setLassoModeActive] = useState<boolean>(false);
+  const [lassoBox, setLassoBox] = useState<{
+    startX: number;
+    startY: number;
+    currentX: number;
+    currentY: number;
+  } | null>(null);
+  const lassoContainerRef = useRef<HTMLDivElement | null>(null);
+  const lassoBaselineSelectionRef = useRef<string[]>([]);
+
+  // Global Upload Policy & User Restriction State (5B-Scale Admin Governance)
+  const [globalUploadPolicy, setGlobalUploadPolicyState] = useState<GlobalUploadPolicy>({
+    uploadsEnabled: true,
+    uploadDisabledReason: '',
+  });
+  const [userProfileFlags, setUserProfileFlags] = useState<{
+    isRestricted: boolean;
+    uploadDisabled: boolean;
+  }>({
+    isRestricted: false,
+    uploadDisabled: false,
+  });
+
+  useEffect(() => {
+    const unsub = subscribeToGlobalUploadPolicy((policy) => {
+      setGlobalUploadPolicyState(policy);
+    });
+    return () => unsub();
+  }, []);
 
   // Folder PIN Lock session state
   const [unlockedFolderIds, setUnlockedFolderIds] = useState<string[]>([]);
@@ -512,6 +548,13 @@ export default function App() {
           fetchUserCloudDriveFromFirestore(firebaseUser),
           fetchStorageNodeConfigFromFirestore(),
         ]);
+
+        if (cloudDrive.profile) {
+          setUserProfileFlags({
+            isRestricted: Boolean(cloudDrive.profile.isRestricted),
+            uploadDisabled: Boolean(cloudDrive.profile.uploadDisabled),
+          });
+        }
 
         const { unsyncedLocalFiles, unsyncedLocalFolders, unsyncedLocalShares } =
           await syncClientDbWithFirestoreDrive({
@@ -869,6 +912,46 @@ export default function App() {
   const handleUploadFiles = async (fileList: FileList | File[]) => {
     const arr = Array.from(fileList);
     if (arr.length === 0) return;
+
+    const isAdminAccount =
+      firebaseUser?.email?.toLowerCase() === 'titumamma2425@gmail.com' ||
+      currentUser?.role === 'admin';
+
+    if (!isAdminAccount && userProfileFlags.isRestricted) {
+      pushNotification({
+        id: `restrict_${Date.now()}`,
+        timestamp: new Date().toISOString(),
+        title: 'Account Restricted by Administrator',
+        message:
+          'Your account or data access has been restricted by the administrator. File uploads are disabled.',
+        type: 'error',
+      });
+      return;
+    }
+
+    if (!isAdminAccount && userProfileFlags.uploadDisabled) {
+      pushNotification({
+        id: `up_user_off_${Date.now()}`,
+        timestamp: new Date().toISOString(),
+        title: 'Uploads Disabled for Your Account',
+        message: 'File uploads have been turned off for your User ID by the administrator.',
+        type: 'error',
+      });
+      return;
+    }
+
+    if (!isAdminAccount && !globalUploadPolicy.uploadsEnabled) {
+      pushNotification({
+        id: `up_global_off_${Date.now()}`,
+        timestamp: new Date().toISOString(),
+        title: 'File Uploads Temporarily Paused',
+        message:
+          globalUploadPolicy.uploadDisabledReason ||
+          'File uploads are currently turned off by the administrator.',
+        type: 'error',
+      });
+      return;
+    }
 
     const totalBatchBytes = arr.reduce((acc, f) => acc + f.size, 0);
     const label =
@@ -1294,7 +1377,7 @@ export default function App() {
         id: `offline_rm_${Date.now()}`,
         timestamp: new Date().toISOString(),
         title: 'Removed from Offline Storage',
-        message: `"${file.name}" was removed from local offline storage.`,
+        message: `"${file.name}" was removed from mobile offline storage.`,
         type: 'info',
       });
       return;
@@ -1310,10 +1393,10 @@ export default function App() {
       pushNotification({
         id: `offline_save_${Date.now()}`,
         timestamp: new Date().toISOString(),
-        title: 'Saved Offline on Device',
+        title: 'Saved to Offline Storage',
         message: `"${file.name}" (${formatBytes(
           file.sizeBytes
-        )}) is now saved in your device's local storage for offline use.`,
+        )}) is now saved locally on your phone for offline access.`,
         type: 'completed',
         bytes: file.sizeBytes,
       });
@@ -1326,6 +1409,77 @@ export default function App() {
           err instanceof Error
             ? err.message
             : 'Failed to store file in local device storage.',
+        type: 'error',
+      });
+    } finally {
+      setSavingOfflineFileId(null);
+      setOfflineProgressPct(0);
+    }
+  };
+
+  const handleBatchSaveOffline = async (targetFilesList: FileRecord[]) => {
+    if (targetFilesList.length === 0 || savingOfflineFileId) return;
+    const allAlreadyOffline = targetFilesList.every((f) => Boolean(offlineFilesMap[f.id]));
+
+    if (allAlreadyOffline) {
+      for (const f of targetFilesList) {
+        await removeFileFromOffline(f.id);
+      }
+      setOfflineFilesMap(getOfflineSavedFilesMap());
+      pushNotification({
+        id: `offline_batch_rm_${Date.now()}`,
+        timestamp: new Date().toISOString(),
+        title: 'Removed from Offline',
+        message: `${targetFilesList.length} ${
+          targetFilesList.length === 1 ? 'file was' : 'files were'
+        } removed from mobile offline storage.`,
+        type: 'info',
+      });
+      setSelectedFileIds([]);
+      return;
+    }
+
+    const toSave = targetFilesList.filter((f) => !offlineFilesMap[f.id] && !f.lockedOverQuota);
+    if (toSave.length === 0) return;
+
+    try {
+      let savedCount = 0;
+      let totalBytesSaved = 0;
+      for (let i = 0; i < toSave.length; i++) {
+        const f = toSave[i];
+        setSavingOfflineFileId(f.id);
+        setOfflineProgressPct(5);
+        await saveFileOfflineToDevice(f, authHeaders(), (pct) => {
+          const overall = Math.round(((i + pct / 100) / toSave.length) * 100);
+          setOfflineProgressPct(Math.max(5, Math.min(99, overall)));
+        });
+        savedCount++;
+        totalBytesSaved += f.sizeBytes;
+      }
+      setOfflineFilesMap(getOfflineSavedFilesMap());
+      pushNotification({
+        id: `offline_batch_save_${Date.now()}`,
+        timestamp: new Date().toISOString(),
+        title: 'Saved to Offline Storage',
+        message:
+          savedCount === 1
+            ? `"${toSave[0].name}" is saved in local storage and ready to open offline.`
+            : `${savedCount} files (${formatBytes(
+                totalBytesSaved
+              )}) saved in local storage for offline access.`,
+        type: 'completed',
+        bytes: totalBytesSaved,
+      });
+      setSelectedFileIds([]);
+    } catch (err: unknown) {
+      pushNotification({
+        id: `offline_batch_err_${Date.now()}`,
+        timestamp: new Date().toISOString(),
+        title: 'Offline Save Failed',
+        message:
+          err instanceof Error
+            ? err.message
+            : 'Could not save selected files to local storage.',
         type: 'error',
       });
     } finally {
@@ -2680,9 +2834,16 @@ export default function App() {
     Boolean(firebaseUser) &&
     firebaseUser.email?.toLowerCase() === 'titumamma2425@gmail.com';
 
+  const offlineRecords = getOfflineSavedFileRecords();
+  const serverFileIdSet = new Set(files.map((f) => f.id));
+  const mergedFilesWithOffline = [
+    ...files,
+    ...offlineRecords.filter((of) => !serverFileIdSet.has(of.id)),
+  ];
+
   const activeFolders = folders.filter((f) => !f.trashed);
   const trashedFolders = folders.filter((f) => Boolean(f.trashed));
-  const activeFiles = files.filter((f) => !f.trashed);
+  const activeFiles = mergedFilesWithOffline.filter((f) => !f.trashed);
   const trashedFiles = files.filter((f) => Boolean(f.trashed));
   const totalTrashCount = trashedFiles.length + trashedFolders.length;
 
@@ -2877,10 +3038,10 @@ export default function App() {
       />
 
       {/* ====================================================================
-          TOP BAR CONTRACT (Single Clean Navigation Bar — 3 Zones)
+          CLEAN MINIMAL TOP BAR (Brand + Streamlined Nav + Side Trash Icon & Upload)
       ==================================================================== */}
-      <header className="sticky top-0 z-30 flex items-center justify-between gap-4 sm:gap-8 px-4 sm:px-6 py-3 border-b border-[#2C2824] bg-[#1C1A17]">
-        {/* Zone 1: Brand Title */}
+      <header className="sticky top-0 z-30 flex items-center justify-between gap-3 sm:gap-6 px-3.5 sm:px-6 h-14 sm:h-16 border-b border-[#2C2824] bg-white/95 backdrop-blur-md shadow-[0_1px_3px_rgba(15,23,42,0.03)]">
+        {/* Zone 1: Brand Title with Clean Favicon Mark */}
         <a
           href="#my-files"
           onClick={(e) => {
@@ -2889,12 +3050,17 @@ export default function App() {
             setCurrentFolderId(null);
             setOnlyStarred(false);
           }}
-          className="text-lg font-bold tracking-tight text-[#F2EFE9] whitespace-nowrap shrink-0"
+          className="flex items-center gap-2 text-base sm:text-lg font-bold tracking-tight text-[#F2EFE9] whitespace-nowrap shrink-0"
         >
-          UnlimStorage
+          <img
+            src="/icon.svg"
+            alt="UnlimStorage"
+            className="w-7 h-7 sm:w-8 sm:h-8 rounded-lg border border-[#E2E8F0] shadow-2xs shrink-0"
+          />
+          <span>UnlimStorage</span>
         </a>
 
-        {/* Zone 2: Desktop Navigation Links (Admin Storage Node tab hidden from regular users) */}
+        {/* Zone 2: Minimal Desktop Navigation Links */}
         <nav className="hidden md:flex items-center gap-5 text-sm font-medium text-[#9E978E]">
           <a
             href="#my-files"
@@ -2904,10 +3070,10 @@ export default function App() {
               setOnlyStarred(false);
               setOnlyOffline(false);
             }}
-            className={`transition-colors whitespace-nowrap shrink-0 py-1 ${
+            className={`transition-all whitespace-nowrap shrink-0 px-2.5 py-1.5 rounded-xl ${
               activeView === 'explorer'
-                ? 'text-[#F2EFE9] border-b-2 border-[#D97757] font-semibold'
-                : 'hover:text-[#F2EFE9]'
+                ? 'text-[#D97757] bg-blue-50/80 font-semibold'
+                : 'hover:text-[#F2EFE9] hover:bg-slate-100/70'
             }`}
           >
             My Files ({activeFiles.length})
@@ -2918,32 +3084,13 @@ export default function App() {
               e.preventDefault();
               setActiveView('gallery');
             }}
-            className={`transition-colors whitespace-nowrap shrink-0 py-1 ${
+            className={`transition-all whitespace-nowrap shrink-0 px-2.5 py-1.5 rounded-xl ${
               activeView === 'gallery'
-                ? 'text-[#F2EFE9] border-b-2 border-[#D97757] font-semibold'
-                : 'hover:text-[#F2EFE9]'
+                ? 'text-[#D97757] bg-blue-50/80 font-semibold'
+                : 'hover:text-[#F2EFE9] hover:bg-slate-100/70'
             }`}
           >
             Gallery
-          </a>
-          <a
-            href="#trash"
-            onClick={(e) => {
-              e.preventDefault();
-              setActiveView('trash');
-            }}
-            className={`transition-colors whitespace-nowrap shrink-0 py-1 flex items-center gap-1.5 ${
-              activeView === 'trash'
-                ? 'text-[#F2EFE9] border-b-2 border-[#D97757] font-semibold'
-                : 'hover:text-[#F2EFE9]'
-            }`}
-          >
-            <span>Trash Bin</span>
-            {totalTrashCount > 0 && (
-              <span className="px-1.5 py-0.2 text-[11px] font-bold bg-[#24211D] border border-[#2C2824] text-[#D97757] tabular-nums">
-                {totalTrashCount}
-              </span>
-            )}
           </a>
           <a
             href="#shared-links"
@@ -2951,13 +3098,13 @@ export default function App() {
               e.preventDefault();
               setActiveView('shares');
             }}
-            className={`transition-colors whitespace-nowrap shrink-0 py-1 ${
+            className={`transition-all whitespace-nowrap shrink-0 px-2.5 py-1.5 rounded-xl ${
               activeView === 'shares'
-                ? 'text-[#F2EFE9] border-b-2 border-[#D97757] font-semibold'
-                : 'hover:text-[#F2EFE9]'
+                ? 'text-[#D97757] bg-blue-50/80 font-semibold'
+                : 'hover:text-[#F2EFE9] hover:bg-slate-100/70'
             }`}
           >
-            Shared Links ({shares.length})
+            Shared ({shares.length})
           </a>
           <a
             href="#pricing"
@@ -2965,27 +3112,13 @@ export default function App() {
               e.preventDefault();
               setActiveView('pricing');
             }}
-            className={`transition-colors whitespace-nowrap shrink-0 py-1 ${
+            className={`transition-all whitespace-nowrap shrink-0 px-2.5 py-1.5 rounded-xl ${
               activeView === 'pricing'
-                ? 'text-[#F2EFE9] border-b-2 border-[#D97757] font-semibold'
-                : 'hover:text-[#F2EFE9]'
+                ? 'text-[#D97757] bg-blue-50/80 font-semibold'
+                : 'hover:text-[#F2EFE9] hover:bg-slate-100/70'
             }`}
           >
             Plans ({tokenBalance.toLocaleString()} T)
-          </a>
-          <a
-            href="#settings"
-            onClick={(e) => {
-              e.preventDefault();
-              setActiveView('settings');
-            }}
-            className={`transition-colors whitespace-nowrap shrink-0 py-1 ${
-              activeView === 'settings'
-                ? 'text-[#F2EFE9] border-b-2 border-[#D97757] font-semibold'
-                : 'hover:text-[#F2EFE9]'
-            }`}
-          >
-            Alerts &amp; Offline ({Object.keys(offlineFilesMap).length})
           </a>
           {isAdminUser && (
             <a
@@ -2994,26 +3127,68 @@ export default function App() {
                 e.preventDefault();
                 setActiveView('telegram_settings');
               }}
-              className={`transition-colors whitespace-nowrap shrink-0 py-1 ${
+              className={`transition-all whitespace-nowrap shrink-0 px-2.5 py-1.5 rounded-xl ${
                 activeView === 'telegram_settings'
-                  ? 'text-[#F2EFE9] border-b-2 border-[#D97757] font-semibold'
-                  : 'hover:text-[#F2EFE9]'
+                  ? 'text-[#D97757] bg-blue-50/80 font-semibold'
+                  : 'hover:text-[#F2EFE9] hover:bg-slate-100/70'
               }`}
             >
-              Storage Node (Admin)
+              Admin Panel
             </a>
           )}
         </nav>
 
-        {/* Zone 3: PWA Install + Primary Action */}
-        <div className="flex items-center gap-2 shrink-0">
+        {/* Zone 3: Clean App Actions (Side Trash Icon + Account Pill on Mobile + Desktop Upload) */}
+        <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
+          {/* Side Trash Bin Icon Button */}
+          <button
+            type="button"
+            onClick={() => setActiveView('trash')}
+            title={`Trash Bin (${totalTrashCount} items)`}
+            aria-label="Open Trash Bin"
+            className={`relative min-h-[38px] min-w-[38px] px-2.5 py-1.5 rounded-xl border flex items-center justify-center gap-1.5 text-xs font-semibold transition-all cursor-pointer ${
+              activeView === 'trash'
+                ? 'bg-[#24211D] border-[#D97757] text-[#D97757]'
+                : 'bg-[#141311] border-[#2C2824] text-[#9E978E] hover:border-[#D97757] hover:text-[#F2EFE9]'
+            }`}
+          >
+            <Trash2 className="w-4 h-4 shrink-0" />
+            {totalTrashCount > 0 && (
+              <span className="text-[11px] font-bold tabular-nums">{totalTrashCount}</span>
+            )}
+          </button>
+
           <PWAInstallButton compact />
+
+          {/* Mobile Compact Account / Sign-In Button in App Header */}
+          {!firebaseUser ? (
+            <button
+              onClick={handleGoogleSignIn}
+              disabled={signingInGoogle}
+              className="md:hidden min-h-[38px] px-3 py-1.5 rounded-xl text-xs font-bold bg-[#D97757] text-[#141311] flex items-center gap-1.5 cursor-pointer"
+            >
+              <LogIn className="w-3.5 h-3.5" />
+              <span>{signingInGoogle ? '...' : 'Sign In'}</span>
+            </button>
+          ) : currentUser ? (
+            <button
+              onClick={() => setShowAuthModal(true)}
+              className="md:hidden min-h-[38px] px-2.5 py-1.5 rounded-xl text-xs font-semibold bg-[#24211D] border border-[#2C2824] text-[#F2EFE9] flex items-center gap-1.5 cursor-pointer"
+              title="Account Profile"
+            >
+              <UserIcon className="w-3.5 h-3.5 text-[#D97757] shrink-0" />
+              <span className="max-w-[76px] truncate">{currentUser.name.split(' ')[0]}</span>
+            </button>
+          ) : null}
+
+          {/* Primary Upload Button on Desktop (Mobile uses the floating '+' FAB at bottom-right) */}
           <button
             onClick={() => fileInputRef.current?.click()}
             disabled={uploadingFiles}
-            className="min-h-[40px] sm:min-h-[38px] px-4 py-2 text-xs font-bold bg-[#D97757] text-[#141311] hover:bg-[#E08568] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            className="hidden md:inline-flex items-center gap-1.5 min-h-[38px] px-4 py-2 rounded-xl text-xs font-bold bg-[#D97757] text-[#141311] hover:bg-[#E08568] shadow-xs transition-all whitespace-nowrap shrink-0 cursor-pointer"
           >
-            {uploadingFiles ? (uploadPaused ? 'Upload Paused' : 'Uploading...') : '+ Upload Files'}
+            <Upload className="w-3.5 h-3.5" />
+            <span>{uploadingFiles ? (uploadPaused ? 'Upload Paused' : 'Uploading...') : 'Upload Files'}</span>
           </button>
         </div>
       </header>
@@ -3021,32 +3196,35 @@ export default function App() {
       {/* ====================================================================
           MAIN CONTAINER
       ==================================================================== */}
-      <main className="flex-1 w-full max-w-7xl mx-auto px-4 sm:px-6 py-4 sm:py-6 pb-24 md:pb-8 space-y-5 sm:space-y-6">
-        {/* Storage Quota & Account Bar (Zero Telegram mention) */}
-        <div className="p-3.5 sm:p-4 bg-[#1C1A17] border border-[#2C2824] flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+      <main className="flex-1 w-full max-w-7xl mx-auto px-3.5 sm:px-6 py-3.5 sm:py-6 pb-28 md:pb-10 space-y-4 sm:space-y-6">
+        {/* Compact App Storage & Wallet Bar (Sleek single-card summary on mobile, full bar on desktop) */}
+        <div className="p-3 sm:p-4 rounded-2xl bg-[#1C1A17] border border-[#2C2824] shadow-2xs flex flex-col lg:flex-row lg:items-center justify-between gap-2.5 sm:gap-4 transition-all">
           <div className="flex items-center gap-3 flex-1 min-w-0">
-            <div className="w-10 h-10 bg-[#24211D] border border-[#2C2824] flex items-center justify-center shrink-0">
-              <Cloud className="w-5 h-5 text-[#D97757]" />
+            <div className="w-9 h-9 sm:w-10 sm:h-10 rounded-xl bg-[#24211D] border border-[#2C2824] flex items-center justify-center shrink-0">
+              <Cloud className="w-4 h-4 sm:w-5 sm:h-5 text-[#D97757]" />
             </div>
             <div className="min-w-0 flex-1 space-y-1.5">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div className="text-sm font-bold text-[#F2EFE9] truncate">
-                  UnlimStorage Encrypted Vault ({planBadge})
+              <div className="flex items-center justify-between gap-2">
+                <div className="text-xs sm:text-sm font-bold text-[#F2EFE9] truncate flex items-center gap-1.5">
+                  <span className="truncate">Cloud Vault</span>
+                  <span className="px-2 py-0.5 text-[10px] font-bold rounded-full bg-[#24211D] border border-[#2C2824] text-[#D97757] shrink-0">
+                    {planBadge}
+                  </span>
                 </div>
-                <div className="text-xs text-[#9E978E] tabular-nums">
-                  <strong className="text-[#F2EFE9]">{formatBytes(totalStorageBytes)}</strong> used
-                  of{' '}
+                <div className="text-[11px] sm:text-xs text-[#9E978E] tabular-nums shrink-0">
+                  <strong className="text-[#F2EFE9]">{formatBytes(totalStorageBytes)}</strong>
+                  {' / '}
                   {isUnlimitedAdmin ? (
-                    <strong className="text-[#2E9E6B]">Unlimited Storage</strong>
+                    <strong className="text-[#2E9E6B]">Unlimited</strong>
                   ) : (
                     <strong className="text-[#F2EFE9]">{formatBytes(quotaLimitBytes)}</strong>
                   )}
                 </div>
               </div>
-              <div className="h-2 w-full bg-[#141311] border border-[#2C2824]">
+              <div className="h-1.5 sm:h-2 w-full rounded-full bg-[#141311] border border-[#2C2824] overflow-hidden">
                 <div
-                  style={{ width: `${quotaPct}%` }}
-                  className={`h-full transition-all duration-300 ${
+                  style={{ width: `${Math.max(2, quotaPct)}%` }}
+                  className={`h-full rounded-full transition-all duration-500 ease-out ${
                     lockedFilesCount > 0 ? 'bg-[#D99B26]' : 'bg-[#D97757]'
                   }`}
                 />
@@ -3054,10 +3232,10 @@ export default function App() {
             </div>
           </div>
 
-          <div className="flex flex-wrap items-center justify-between sm:justify-end gap-2.5 pt-2.5 lg:pt-0 border-t lg:border-t-0 border-[#2C2824]">
+          <div className="hidden md:flex flex-wrap items-center justify-end gap-2 shrink-0">
             <button
               onClick={() => setShowBuyTokensModal(true)}
-              className="min-h-[40px] px-3.5 py-2 text-xs font-semibold bg-[#24211D] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center gap-1.5 cursor-pointer"
+              className="min-h-[38px] px-3.5 py-1.5 rounded-xl text-xs font-semibold bg-[#24211D] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center gap-1.5 cursor-pointer"
             >
               <Coins className="w-3.5 h-3.5 text-[#D97757]" />
               <span className="tabular-nums">{tokenBalance.toLocaleString()} Tokens</span>
@@ -3068,7 +3246,7 @@ export default function App() {
               <button
                 onClick={handleGoogleSignIn}
                 disabled={signingInGoogle}
-                className="min-h-[40px] px-3.5 py-2 text-xs font-bold bg-[#D97757] text-[#141311] hover:bg-[#E08568] flex items-center gap-1.5 cursor-pointer"
+                className="min-h-[38px] px-3.5 py-1.5 rounded-xl text-xs font-bold bg-[#D97757] text-[#141311] hover:bg-[#E08568] flex items-center gap-1.5 cursor-pointer"
               >
                 <LogIn className="w-3.5 h-3.5" />
                 {signingInGoogle ? 'Signing in...' : 'Google Sign In'}
@@ -3078,7 +3256,7 @@ export default function App() {
             {currentUser && (
               <button
                 onClick={() => setShowAuthModal(true)}
-                className="min-h-[40px] px-3.5 py-2 text-xs font-medium bg-[#24211D] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center gap-1.5 shrink-0 cursor-pointer"
+                className="min-h-[38px] px-3.5 py-1.5 rounded-xl text-xs font-medium bg-[#24211D] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center gap-1.5 shrink-0 cursor-pointer"
               >
                 <UserIcon className="w-3.5 h-3.5 text-[#D97757]" />
                 <span className="max-w-[130px] truncate">{currentUser.name}</span>
@@ -3235,11 +3413,11 @@ export default function App() {
                 handleUploadFiles(e.dataTransfer.files);
               }
             }}
-            className="space-y-5 sm:space-y-6"
+            className="animate-app-view space-y-4 sm:space-y-5"
           >
             {/* Expired Plan / Over-25GB Lock Warning Banner */}
             {lockedFilesCount > 0 && (
-              <div className="p-4 bg-[#1C1A17] border border-[#D99B26] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="p-3.5 sm:p-4 rounded-2xl bg-[#1C1A17] border border-[#D99B26] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                 <div className="flex items-center gap-2.5 text-xs">
                   <Lock className="w-4 h-4 text-[#D99B26] shrink-0" />
                   <span>
@@ -3253,66 +3431,17 @@ export default function App() {
                 </div>
                 <button
                   onClick={() => setActiveView('pricing')}
-                  className="min-h-[38px] px-4 py-1.5 text-xs font-bold bg-[#D97757] text-[#141311] shrink-0 cursor-pointer"
+                  className="min-h-[38px] px-4 py-1.5 rounded-xl text-xs font-bold bg-[#D97757] text-[#141311] shrink-0 cursor-pointer"
                 >
                   Extend Plan with Tokens
                 </button>
               </div>
             )}
 
-            {/* Action Grid + Search */}
-            <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
-              <div className="grid grid-cols-2 sm:flex sm:flex-wrap items-center gap-2">
-                <button
-                  onClick={() => fileInputRef.current?.click()}
-                  className="min-h-[44px] flex items-center justify-center gap-2 px-4 py-2.5 text-xs font-bold bg-[#D97757] text-[#141311] hover:bg-[#E08568] cursor-pointer"
-                >
-                  <Upload className="w-4 h-4 shrink-0" />
-                  <span>Upload Files</span>
-                </button>
-
-                <button
-                  onClick={() => setShowRemoteModal(true)}
-                  className="min-h-[44px] flex items-center justify-center gap-2 px-4 py-2.5 text-xs font-semibold bg-[#1C1A17] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] cursor-pointer"
-                >
-                  <Globe className="w-4 h-4 text-[#D97757] shrink-0" />
-                  <span>Upload URL</span>
-                </button>
-
-                <button
-                  onClick={() => setCreatingFolder((prev) => !prev)}
-                  className="min-h-[44px] flex items-center justify-center gap-2 px-4 py-2.5 text-xs font-semibold bg-[#1C1A17] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] cursor-pointer"
-                >
-                  <FolderPlus className="w-4 h-4 text-[#D97757] shrink-0" />
-                  <span>New Folder</span>
-                </button>
-
-                <button
-                  onClick={() => setOnlyStarred((prev) => !prev)}
-                  className={`min-h-[44px] flex items-center justify-center gap-1.5 px-3.5 py-2.5 text-xs font-semibold border cursor-pointer ${
-                    onlyStarred
-                      ? 'bg-[#24211D] border-[#D97757] text-[#D97757]'
-                      : 'bg-[#1C1A17] border-[#2C2824] text-[#9E978E] hover:text-[#F2EFE9]'
-                  }`}
-                >
-                  <Star className="w-4 h-4 shrink-0" fill={onlyStarred ? '#D97757' : 'none'} />
-                  <span>Starred</span>
-                </button>
-
-                <button
-                  onClick={() => setOnlyOffline((prev) => !prev)}
-                  className={`min-h-[44px] flex items-center justify-center gap-1.5 px-3.5 py-2.5 text-xs font-semibold border cursor-pointer ${
-                    onlyOffline
-                      ? 'bg-[#24211D] border-[#2E9E6B] text-[#2E9E6B]'
-                      : 'bg-[#1C1A17] border-[#2C2824] text-[#9E978E] hover:text-[#F2EFE9]'
-                  }`}
-                >
-                  <Smartphone className="w-4 h-4 shrink-0" />
-                  <span>Offline ({Object.keys(offlineFilesMap).length})</span>
-                </button>
-              </div>
-
-              <div ref={searchContainerRef} className="relative w-full lg:w-80">
+            {/* Clean App Search Bar + Desktop Actions */}
+            <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
+              {/* Search Bar (First on Mobile like Google Drive / Apple Files, Right on Desktop) */}
+              <div ref={searchContainerRef} className="relative w-full md:w-80 md:order-2">
                 <Search className="w-4 h-4 text-[#9E978E] absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
                 <input
                   ref={searchInputRef}
@@ -3329,8 +3458,8 @@ export default function App() {
                       setShowSearchHistory(false);
                     }
                   }}
-                  placeholder="Search files or labels... (Press /)"
-                  className="w-full min-h-[44px] bg-[#1C1A17] border border-[#2C2824] pl-10 pr-9 py-2.5 text-xs text-[#F2EFE9] focus:outline-none focus:border-[#D97757]"
+                  placeholder="Search files, folders, or labels..."
+                  className="w-full min-h-[44px] rounded-2xl bg-[#1C1A17] border border-[#2C2824] shadow-2xs pl-10 pr-9 py-2.5 text-xs sm:text-sm text-[#F2EFE9] focus:outline-none focus:border-[#D97757]"
                 />
                 {searchQuery && (
                   <button
@@ -3342,7 +3471,7 @@ export default function App() {
                       setSearchQuery('');
                       searchInputRef.current?.focus();
                     }}
-                    className="w-7 h-7 absolute right-1.5 top-1/2 -translate-y-1/2 flex items-center justify-center text-[#9E978E] hover:text-[#F2EFE9] cursor-pointer"
+                    className="w-7 h-7 rounded-full absolute right-2 top-1/2 -translate-y-1/2 flex items-center justify-center text-[#9E978E] hover:text-[#F2EFE9] cursor-pointer"
                     title="Clear search"
                     aria-label="Clear search"
                   >
@@ -3352,8 +3481,8 @@ export default function App() {
 
                 {/* Persistent Search History Dropdown */}
                 {showSearchHistory && searchHistory.length > 0 && (
-                  <div className="absolute left-0 right-0 top-full mt-1 z-30 bg-[#1C1A17] border border-[#2C2824] shadow-2xl py-1">
-                    <div className="px-3 py-1.5 border-b border-[#2C2824] flex items-center justify-between text-[11px] text-[#9E978E]">
+                  <div className="animate-app-modal absolute left-0 right-0 top-full mt-1.5 z-30 rounded-2xl bg-[#1C1A17] border border-[#2C2824] shadow-xl py-1 overflow-hidden">
+                    <div className="px-3.5 py-2 border-b border-[#2C2824] flex items-center justify-between text-[11px] text-[#9E978E]">
                       <span className="font-semibold flex items-center gap-1.5">
                         <Clock className="w-3 h-3 text-[#D97757]" />
                         Recent Searches
@@ -3373,7 +3502,7 @@ export default function App() {
                       {searchHistory.map((item) => (
                         <div
                           key={item}
-                          className="flex items-center justify-between px-3 py-2 hover:bg-[#24211D] transition-colors group"
+                          className="flex items-center justify-between px-3.5 py-2.5 hover:bg-[#24211D] transition-colors group"
                         >
                           <button
                             type="button"
@@ -3405,70 +3534,155 @@ export default function App() {
                   </div>
                 )}
               </div>
-            </div>
 
-            {/* Tag / Label Filter Bar */}
-            <div className="p-3 bg-[#1C1A17] border border-[#2C2824] flex flex-wrap items-center justify-between gap-2.5">
-              <div className="flex flex-wrap items-center gap-1.5">
-                <span className="text-[11px] font-semibold text-[#9E978E] uppercase tracking-wider mr-1.5 flex items-center gap-1">
-                  <Tag className="w-3.5 h-3.5 text-[#D97757]" />
-                  Labels:
-                </span>
+              {/* Desktop Action Toolbar (Hidden on mobile because mobile has the floating '+' sheet & horizontal chip rail) */}
+              <div className="hidden md:flex flex-wrap items-center gap-2 md:order-1">
                 <button
-                  type="button"
-                  onClick={() => setSelectedTagFilter(null)}
-                  className={`min-h-[32px] px-3 py-1 text-xs font-semibold border transition-colors cursor-pointer ${
-                    selectedTagFilter === null
-                      ? 'bg-[#D97757] border-[#D97757] text-[#141311]'
-                      : 'bg-[#141311] border-[#2C2824] text-[#9E978E] hover:border-[#D97757] hover:text-[#F2EFE9]'
+                  onClick={() => fileInputRef.current?.click()}
+                  className="min-h-[42px] rounded-xl flex items-center justify-center gap-2 px-4 py-2 text-xs font-bold bg-[#D97757] text-[#141311] hover:bg-[#E08568] shadow-xs cursor-pointer"
+                >
+                  <Upload className="w-4 h-4 shrink-0" />
+                  <span>Upload Files</span>
+                </button>
+
+                <button
+                  onClick={() => setShowRemoteModal(true)}
+                  className="min-h-[42px] rounded-xl flex items-center justify-center gap-2 px-3.5 py-2 text-xs font-semibold bg-[#1C1A17] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] cursor-pointer"
+                >
+                  <Globe className="w-4 h-4 text-[#D97757] shrink-0" />
+                  <span>Upload URL</span>
+                </button>
+
+                <button
+                  onClick={() => setCreatingFolder((prev) => !prev)}
+                  className="min-h-[42px] rounded-xl flex items-center justify-center gap-2 px-3.5 py-2 text-xs font-semibold bg-[#1C1A17] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] cursor-pointer"
+                >
+                  <FolderPlus className="w-4 h-4 text-[#D97757] shrink-0" />
+                  <span>New Folder</span>
+                </button>
+
+                <button
+                  onClick={() => setOnlyStarred((prev) => !prev)}
+                  className={`min-h-[42px] rounded-xl flex items-center justify-center gap-1.5 px-3.5 py-2 text-xs font-semibold border cursor-pointer ${
+                    onlyStarred
+                      ? 'bg-[#24211D] border-[#D97757] text-[#D97757]'
+                      : 'bg-[#1C1A17] border-[#2C2824] text-[#9E978E] hover:text-[#F2EFE9]'
                   }`}
                 >
-                  All Files ({files.length})
+                  <Star className="w-4 h-4 shrink-0" fill={onlyStarred ? '#D97757' : 'none'} />
+                  <span>Starred</span>
                 </button>
-                {allFilterTags.map((tagItem) => {
-                  const isActive =
-                    selectedTagFilter?.toLowerCase() === tagItem.label.toLowerCase();
-                  return (
-                    <button
-                      key={tagItem.label}
-                      type="button"
-                      onClick={() =>
-                        setSelectedTagFilter(isActive ? null : tagItem.label)
-                      }
-                      className={`min-h-[32px] px-3 py-1 text-xs font-semibold border transition-colors flex items-center gap-1.5 cursor-pointer ${
-                        isActive
-                          ? 'bg-[#D97757] border-[#D97757] text-[#141311]'
-                          : 'bg-[#141311] border-[#2C2824] text-[#9E978E] hover:border-[#D97757] hover:text-[#F2EFE9]'
+              </div>
+            </div>
+
+            {/* Single-Row Swipeable Filter & Quick Action Rail (Replaces cluttered mobile boxes) */}
+            <div className="no-scrollbar flex items-center gap-2 overflow-x-auto py-0.5">
+              <button
+                type="button"
+                onClick={() => {
+                  setSelectedTagFilter(null);
+                  setOnlyStarred(false);
+                  setOnlyOffline(false);
+                }}
+                className={`min-h-[34px] px-3.5 py-1.5 rounded-xl text-xs font-semibold border whitespace-nowrap shrink-0 transition-all cursor-pointer ${
+                  selectedTagFilter === null && !onlyStarred && !onlyOffline
+                    ? 'bg-[#D97757] border-[#D97757] text-[#141311] shadow-2xs'
+                    : 'bg-[#1C1A17] border-[#2C2824] text-[#9E978E] hover:border-[#D97757] hover:text-[#F2EFE9]'
+                }`}
+              >
+                All Files ({activeFiles.length})
+              </button>
+
+              {/* Mobile Quick Chips: Starred, Offline, New Folder, URL */}
+              <button
+                type="button"
+                onClick={() => setOnlyStarred((prev) => !prev)}
+                className={`md:hidden min-h-[34px] px-3 py-1.5 rounded-xl text-xs font-semibold border whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer ${
+                  onlyStarred
+                    ? 'bg-[#D97757] border-[#D97757] text-[#141311]'
+                    : 'bg-[#1C1A17] border-[#2C2824] text-[#9E978E]'
+                }`}
+              >
+                <Star className="w-3.5 h-3.5 shrink-0" fill={onlyStarred ? 'currentColor' : 'none'} />
+                <span>Starred</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setOnlyOffline((prev) => !prev)}
+                className={`md:hidden min-h-[34px] px-3 py-1.5 rounded-xl text-xs font-semibold border whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer ${
+                  onlyOffline
+                    ? 'bg-[#2E9E6B] border-[#2E9E6B] text-[#141311]'
+                    : 'bg-[#1C1A17] border-[#2C2824] text-[#9E978E]'
+                }`}
+              >
+                <Smartphone className="w-3.5 h-3.5 shrink-0" />
+                <span>Offline ({Object.keys(offlineFilesMap).length})</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setCreatingFolder((prev) => !prev)}
+                className="md:hidden min-h-[34px] px-3 py-1.5 rounded-xl text-xs font-semibold bg-[#1C1A17] border border-[#2C2824] text-[#F2EFE9] whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer"
+              >
+                <FolderPlus className="w-3.5 h-3.5 text-[#D97757] shrink-0" />
+                <span>New Folder</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setShowRemoteModal(true)}
+                className="md:hidden min-h-[34px] px-3 py-1.5 rounded-xl text-xs font-semibold bg-[#1C1A17] border border-[#2C2824] text-[#F2EFE9] whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer"
+              >
+                <Globe className="w-3.5 h-3.5 text-[#D97757] shrink-0" />
+                <span>Web URL</span>
+              </button>
+
+              {/* Custom Label / Tag Filter Chips */}
+              {allFilterTags.map((tagItem) => {
+                const isActive =
+                  selectedTagFilter?.toLowerCase() === tagItem.label.toLowerCase();
+                return (
+                  <button
+                    key={tagItem.label}
+                    type="button"
+                    onClick={() =>
+                      setSelectedTagFilter(isActive ? null : tagItem.label)
+                    }
+                    className={`min-h-[34px] px-3 py-1.5 rounded-xl text-xs font-semibold border whitespace-nowrap shrink-0 transition-all flex items-center gap-1.5 cursor-pointer ${
+                      isActive
+                        ? 'bg-[#D97757] border-[#D97757] text-[#141311]'
+                        : 'bg-[#1C1A17] border-[#2C2824] text-[#9E978E] hover:border-[#D97757] hover:text-[#F2EFE9]'
+                    }`}
+                  >
+                    <Tag className="w-3 h-3 shrink-0" />
+                    <span>{tagItem.label}</span>
+                    <span
+                      className={`text-[11px] tabular-nums ${
+                        isActive ? 'text-[#141311]/80 font-bold' : 'text-[#9E978E]'
                       }`}
                     >
-                      <span>{tagItem.label}</span>
-                      <span
-                        className={`text-[11px] tabular-nums ${
-                          isActive ? 'text-[#141311]/80 font-bold' : 'text-[#9E978E]'
-                        }`}
-                      >
-                        ({tagItem.count})
-                      </span>
-                    </button>
-                  );
-                })}
-              </div>
+                      ({tagItem.count})
+                    </span>
+                  </button>
+                );
+              })}
 
               {selectedTagFilter && (
                 <button
                   type="button"
                   onClick={() => setSelectedTagFilter(null)}
-                  className="min-h-[30px] px-2.5 py-1 text-xs text-[#D97757] hover:underline flex items-center gap-1 cursor-pointer"
+                  className="min-h-[34px] px-2.5 py-1 text-xs text-[#D97757] hover:underline whitespace-nowrap shrink-0 flex items-center gap-1 cursor-pointer"
                 >
                   <X className="w-3.5 h-3.5" />
-                  Clear Filter
+                  <span>Reset</span>
                 </button>
               )}
             </div>
 
-            {/* Batch Actions Bar (Appears when 1 or more files are checked) */}
+            {/* Desktop Batch Actions Bar (Hidden on mobile; mobile uses the bottom selection menu) */}
             {selectedFileIds.length > 0 && (
-              <div className="p-3.5 bg-[#24211D] border border-[#D97757] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="animate-app-modal hidden md:flex p-3.5 rounded-2xl bg-[#24211D] border border-[#D97757] flex-row items-center justify-between gap-3 shadow-sm">
                 <div className="flex items-center gap-2.5 text-xs">
                   <CheckSquare className="w-4 h-4 text-[#D97757] shrink-0" />
                   <span className="font-bold text-[#F2EFE9]">
@@ -3480,14 +3694,53 @@ export default function App() {
                   </span>
                 </div>
 
-                <div className="grid grid-cols-2 sm:flex sm:flex-wrap items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (selectedFilesObjects[0]) {
+                        setShareModalFile(selectedFilesObjects[0]);
+                      }
+                    }}
+                    className="min-h-[38px] px-3 py-1.5 rounded-xl text-xs font-semibold bg-[#1C1A17] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center justify-center gap-1.5 cursor-pointer"
+                  >
+                    <Link2 className="w-3.5 h-3.5 text-[#D97757]" />
+                    <span>Share</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      selectedFilesObjects.forEach((f) => {
+                        void handleToggleStar(f);
+                      });
+                    }}
+                    className="min-h-[38px] px-3 py-1.5 rounded-xl text-xs font-semibold bg-[#1C1A17] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center justify-center gap-1.5 cursor-pointer"
+                  >
+                    <Star
+                      className="w-3.5 h-3.5 text-[#D97757]"
+                      fill={
+                        selectedFilesObjects.length > 0 &&
+                        selectedFilesObjects.every((f) => f.starred)
+                          ? '#D97757'
+                          : 'none'
+                      }
+                    />
+                    <span>
+                      {selectedFilesObjects.length > 0 &&
+                      selectedFilesObjects.every((f) => f.starred)
+                        ? 'Unstar'
+                        : 'Star'}
+                    </span>
+                  </button>
+
                   <button
                     type="button"
                     onClick={() => setTagModalFiles(selectedFilesObjects)}
-                    className="min-h-[38px] px-3 py-1.5 text-xs font-semibold bg-[#1C1A17] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center justify-center gap-1.5 cursor-pointer"
+                    className="min-h-[38px] px-3 py-1.5 rounded-xl text-xs font-semibold bg-[#1C1A17] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center justify-center gap-1.5 cursor-pointer"
                   >
                     <Tag className="w-3.5 h-3.5 text-[#D97757]" />
-                    <span>Label ({selectedFileIds.length})</span>
+                    <span>Label</span>
                   </button>
 
                   <button
@@ -3496,7 +3749,7 @@ export default function App() {
                       setMoveModalMode('move');
                       setBatchMoveFiles(selectedFilesObjects);
                     }}
-                    className="min-h-[38px] px-3 py-1.5 text-xs font-semibold bg-[#1C1A17] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center justify-center gap-1.5 cursor-pointer"
+                    className="min-h-[38px] px-3 py-1.5 rounded-xl text-xs font-semibold bg-[#1C1A17] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center justify-center gap-1.5 cursor-pointer"
                   >
                     <FolderInput className="w-3.5 h-3.5 text-[#D97757]" />
                     <span>Move</span>
@@ -3508,17 +3761,17 @@ export default function App() {
                       setMoveModalMode('copy');
                       setBatchMoveFiles(selectedFilesObjects);
                     }}
-                    className="min-h-[38px] px-3 py-1.5 text-xs font-semibold bg-[#1C1A17] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center justify-center gap-1.5 cursor-pointer"
+                    className="min-h-[38px] px-3 py-1.5 rounded-xl text-xs font-semibold bg-[#1C1A17] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center justify-center gap-1.5 cursor-pointer"
                   >
                     <Copy className="w-3.5 h-3.5 text-[#D97757]" />
-                    <span>Copy to Folder</span>
+                    <span>Copy</span>
                   </button>
 
                   <button
                     type="button"
                     disabled={zipDownloading}
                     onClick={handleBatchZipDownload}
-                    className="min-h-[38px] px-3 py-1.5 text-xs font-bold bg-[#1C1A17] border border-[#D97757] text-[#D97757] hover:bg-[#D97757] hover:text-[#141311] disabled:opacity-50 flex items-center justify-center gap-1.5 cursor-pointer"
+                    className="min-h-[38px] px-3 py-1.5 rounded-xl text-xs font-bold bg-[#1C1A17] border border-[#D97757] text-[#D97757] hover:bg-[#D97757] hover:text-[#141311] disabled:opacity-50 flex items-center justify-center gap-1.5 cursor-pointer"
                   >
                     {zipDownloading ? (
                       <>
@@ -3528,7 +3781,7 @@ export default function App() {
                     ) : (
                       <>
                         <FolderArchive className="w-3.5 h-3.5" />
-                        <span>Download ZIP ({selectedFileIds.length})</span>
+                        <span>ZIP ({selectedFileIds.length})</span>
                       </>
                     )}
                   </button>
@@ -3536,7 +3789,7 @@ export default function App() {
                   <button
                     type="button"
                     onClick={handleBatchDownload}
-                    className="min-h-[38px] px-3 py-1.5 text-xs font-bold bg-[#D97757] text-[#141311] hover:bg-[#E08568] flex items-center justify-center gap-1.5 cursor-pointer"
+                    className="min-h-[38px] px-3 py-1.5 rounded-xl text-xs font-bold bg-[#D97757] text-[#141311] hover:bg-[#E08568] flex items-center justify-center gap-1.5 cursor-pointer"
                   >
                     <Download className="w-3.5 h-3.5" />
                     <span>Download ({selectedFileIds.length})</span>
@@ -3553,18 +3806,18 @@ export default function App() {
                         fileIds: [...selectedFileIds],
                       })
                     }
-                    className="min-h-[38px] px-3 py-1.5 text-xs font-semibold bg-[#141311] border border-[#D94848] text-[#D94848] hover:bg-[#D94848] hover:text-[#F2EFE9] flex items-center justify-center gap-1.5 cursor-pointer"
+                    className="min-h-[38px] px-3 py-1.5 rounded-xl text-xs font-semibold bg-[#141311] border border-[#D94848] text-[#D94848] hover:bg-[#D94848] hover:text-[#F2EFE9] flex items-center justify-center gap-1.5 cursor-pointer"
                   >
                     <Trash2 className="w-3.5 h-3.5" />
-                    <span>Move to Trash ({selectedFileIds.length})</span>
+                    <span>Delete</span>
                   </button>
 
                   <button
                     type="button"
                     onClick={() => setSelectedFileIds([])}
-                    className="col-span-2 sm:col-span-1 min-h-[38px] px-3 py-1.5 text-xs text-[#9E978E] hover:text-[#F2EFE9] border border-[#2C2824] bg-[#141311] cursor-pointer"
+                    className="min-h-[38px] px-3 py-1.5 rounded-xl text-xs text-[#9E978E] hover:text-[#F2EFE9] border border-[#2C2824] bg-[#141311] cursor-pointer"
                   >
-                    Clear Selection
+                    Clear
                   </button>
                 </div>
               </div>
@@ -3685,14 +3938,14 @@ export default function App() {
             {!onlyStarred && !onlyOffline && !selectedTagFilter && !searchQuery.trim() && visibleSubfolders.length > 0 && (
               <div className="space-y-2.5">
                 <div className="flex items-center justify-between">
-                  <h2 className="text-xs font-semibold text-[#9E978E] uppercase tracking-wider">
-                    Folders
+                  <h2 className="text-xs font-bold text-[#9E978E] uppercase tracking-wider">
+                    Folders ({visibleSubfolders.length})
                   </h2>
-                  <span className="text-[11px] text-[#9E978E]">
+                  <span className="hidden sm:inline text-[11px] text-[#9E978E]">
                     Visual indicators show folder media type, starred/shared items &amp; PIN status
                   </span>
                 </div>
-                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
+                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2.5 sm:gap-3">
                   {visibleSubfolders.map((folder) => {
                     const summary = analyzeFolderVisualIndicators(
                       folder,
@@ -3766,14 +4019,14 @@ export default function App() {
                             if (f) handleMoveFile(f, folder.id).catch(() => null);
                           }
                         }}
-                        className={`min-h-[72px] p-4 bg-[#1C1A17] border transition-colors flex items-center justify-between gap-2 cursor-pointer group ${
+                        className={`animate-app-card rounded-2xl min-h-[68px] p-3.5 sm:p-4 bg-[#1C1A17] border flex items-center justify-between gap-2 cursor-pointer group ${
                           isDropTarget
                             ? 'border-[#D97757] bg-[#24211D]'
                             : 'border-[#2C2824] hover:border-[#D97757]'
                         }`}
                       >
                         <div className="flex items-center gap-3 min-w-0">
-                          <div className="relative w-10 h-10 bg-[#24211D] border border-[#2C2824] flex items-center justify-center shrink-0">
+                          <div className="relative w-10 h-10 rounded-xl bg-[#24211D] border border-[#2C2824] flex items-center justify-center shrink-0">
                             <Folder
                               className={`w-5 h-5 ${
                                 summary.category === 'video'
@@ -3786,7 +4039,7 @@ export default function App() {
                               }`}
                             />
                             {badgeIcon && (
-                              <span className="absolute -bottom-1 -right-1 w-4 h-4 bg-[#141311] border border-[#2C2824] flex items-center justify-center">
+                              <span className="absolute -bottom-1 -right-1 w-4 h-4 rounded-md bg-[#141311] border border-[#2C2824] flex items-center justify-center">
                                 {badgeIcon}
                               </span>
                             )}
@@ -3822,7 +4075,7 @@ export default function App() {
                                 </span>
                               )}
                               {summary.hasOffline && (
-                                <span className="text-[10px] text-[#2E9E6B] font-semibold">
+                                <span className="md:hidden text-[10px] text-[#2E9E6B] font-semibold">
                                   · Offline
                                 </span>
                               )}
@@ -3830,7 +4083,7 @@ export default function App() {
                           </div>
                         </div>
 
-                        <div className="flex items-center -mr-2 shrink-0">
+                        <div className="flex items-center -mr-1.5 shrink-0">
                           <button
                             type="button"
                             onClick={(e) => {
@@ -3844,7 +4097,7 @@ export default function App() {
                                 mode: 'manage',
                               });
                             }}
-                            className={`min-w-[36px] min-h-[40px] flex items-center justify-center cursor-pointer ${
+                            className={`min-w-[34px] min-h-[38px] rounded-lg flex items-center justify-center cursor-pointer ${
                               folder.isPinProtected
                                 ? 'text-[#D99B26] hover:text-[#D97757]'
                                 : 'text-[#9E978E] hover:text-[#D97757]'
@@ -3864,7 +4117,7 @@ export default function App() {
                               }
                               setShareModalFolder(folder);
                             }}
-                            className={`min-w-[36px] min-h-[40px] flex items-center justify-center cursor-pointer ${
+                            className={`min-w-[34px] min-h-[38px] rounded-lg flex items-center justify-center cursor-pointer ${
                               existingFolderShare
                                 ? 'text-[#D97757]'
                                 : 'text-[#9E978E] hover:text-[#D97757]'
@@ -3885,7 +4138,7 @@ export default function App() {
                                 subtitle: `Contains ${count} ${count === 1 ? 'file' : 'files'}`,
                               });
                             }}
-                            className="min-w-[36px] min-h-[40px] flex items-center justify-center text-[#9E978E] hover:text-[#D94848] cursor-pointer"
+                            className="min-w-[34px] min-h-[38px] rounded-lg flex items-center justify-center text-[#9E978E] hover:text-[#D94848] cursor-pointer"
                             title="Move Folder to Trash"
                           >
                             <Trash2 className="w-3.5 h-3.5" />
@@ -3898,34 +4151,144 @@ export default function App() {
               </div>
             )}
 
-            {/* Files Section */}
-            <div className="space-y-2.5">
+            {/* Files Section with Desktop 'Lasso' Drag-to-Select Support */}
+            <div
+              ref={lassoContainerRef}
+              onMouseDown={(e) => {
+                if (e.button !== 0) return;
+                const target = e.target as HTMLElement;
+                // Do not start lasso when clicking interactive buttons, inputs, links, or draggable cards unless Lasso mode is explicitly toggled on
+                if (
+                  !lassoModeActive &&
+                  target.closest('button, a, input, select, label, [data-select-file-id]')
+                ) {
+                  return;
+                }
+                if (
+                  lassoModeActive &&
+                  target.closest('button, a, input, select, label')
+                ) {
+                  return;
+                }
+                const container = lassoContainerRef.current;
+                if (!container) return;
+                const rect = container.getBoundingClientRect();
+                const startX = e.clientX - rect.left;
+                const startY = e.clientY - rect.top;
+                lassoBaselineSelectionRef.current = e.shiftKey || e.metaKey || e.ctrlKey ? [...selectedFileIds] : [];
+                setLassoBox({
+                  startX,
+                  startY,
+                  currentX: startX,
+                  currentY: startY,
+                });
+
+                const handleWindowMouseMove = (moveEv: MouseEvent) => {
+                  const curRect = container.getBoundingClientRect();
+                  const curX = moveEv.clientX - curRect.left;
+                  const curY = moveEv.clientY - curRect.top;
+                  setLassoBox({
+                    startX,
+                    startY,
+                    currentX: curX,
+                    currentY: curY,
+                  });
+
+                  const minX = Math.min(startX, curX) + curRect.left;
+                  const maxX = Math.max(startX, curX) + curRect.left;
+                  const minY = Math.min(startY, curY) + curRect.top;
+                  const maxY = Math.max(startY, curY) + curRect.top;
+
+                  if (Math.abs(curX - startX) < 6 && Math.abs(curY - startY) < 6) return;
+
+                  const cards = container.querySelectorAll<HTMLElement>('[data-select-file-id]');
+                  const hitIds = new Set<string>(lassoBaselineSelectionRef.current);
+                  cards.forEach((card) => {
+                    const cRect = card.getBoundingClientRect();
+                    const intersects =
+                      cRect.left <= maxX &&
+                      cRect.right >= minX &&
+                      cRect.top <= maxY &&
+                      cRect.bottom >= minY;
+                    const fid = card.getAttribute('data-select-file-id');
+                    if (intersects && fid) {
+                      hitIds.add(fid);
+                    }
+                  });
+                  setSelectedFileIds(Array.from(hitIds));
+                };
+
+                const handleWindowMouseUp = () => {
+                  setLassoBox(null);
+                  window.removeEventListener('mousemove', handleWindowMouseMove);
+                  window.removeEventListener('mouseup', handleWindowMouseUp);
+                };
+
+                window.addEventListener('mousemove', handleWindowMouseMove);
+                window.addEventListener('mouseup', handleWindowMouseUp);
+              }}
+              className={`relative space-y-2.5 ${lassoModeActive ? 'cursor-crosshair select-none' : ''}`}
+            >
+              {/* Live Lasso Marquee Box Overlay */}
+              {lassoBox &&
+                (Math.abs(lassoBox.currentX - lassoBox.startX) > 4 ||
+                  Math.abs(lassoBox.currentY - lassoBox.startY) > 4) && (
+                  <div
+                    style={{
+                      left: `${Math.min(lassoBox.startX, lassoBox.currentX)}px`,
+                      top: `${Math.min(lassoBox.startY, lassoBox.currentY)}px`,
+                      width: `${Math.abs(lassoBox.currentX - lassoBox.startX)}px`,
+                      height: `${Math.abs(lassoBox.currentY - lassoBox.startY)}px`,
+                      backgroundColor: 'rgba(37, 99, 235, 0.10)',
+                      border: '1.5px solid #2563EB',
+                    }}
+                    className="absolute z-30 pointer-events-none rounded-sm"
+                  />
+                )}
+
               <div className="flex flex-wrap items-center justify-between gap-2">
-                <div className="flex items-center gap-3">
+                <div className="flex items-center gap-2.5">
                   <h2 className="text-xs font-semibold text-[#9E978E] uppercase tracking-wider">
                     Files ({visibleFiles.length})
                   </h2>
                   {visibleFiles.length > 0 && (
-                    <button
-                      type="button"
-                      onClick={handleToggleSelectAllVisible}
-                      className="min-h-[32px] px-2.5 py-1 text-xs font-semibold bg-[#1C1A17] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center gap-1.5 cursor-pointer"
-                    >
-                      {allVisibleSelected ? (
-                        <CheckSquare className="w-3.5 h-3.5 text-[#D97757]" />
-                      ) : (
-                        <Square className="w-3.5 h-3.5 text-[#9E978E]" />
-                      )}
-                      <span>
-                        {allVisibleSelected ? 'Deselect All' : 'Select All'}
-                      </span>
-                    </button>
+                    <>
+                      <button
+                        type="button"
+                        onClick={handleToggleSelectAllVisible}
+                        className="min-h-[32px] px-2.5 py-1 text-xs font-semibold bg-[#1C1A17] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center gap-1.5 cursor-pointer"
+                      >
+                        {allVisibleSelected ? (
+                          <CheckSquare className="w-3.5 h-3.5 text-[#D97757]" />
+                        ) : (
+                          <Square className="w-3.5 h-3.5 text-[#9E978E]" />
+                        )}
+                        <span>
+                          {allVisibleSelected ? 'Deselect All' : 'Select All'}
+                        </span>
+                      </button>
+
+                      {/* Desktop Lasso Drag-Selection Toggle */}
+                      <button
+                        type="button"
+                        onClick={() => setLassoModeActive((prev) => !prev)}
+                        title="Toggle Lasso Mode — Click and drag across cards to select multiple files"
+                        className={`hidden md:inline-flex min-h-[32px] px-2.5 py-1 text-xs font-semibold border items-center gap-1.5 cursor-pointer transition-colors ${
+                          lassoModeActive
+                            ? 'bg-[#D97757] border-[#D97757] text-[#141311]'
+                            : 'bg-[#1C1A17] border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9]'
+                        }`}
+                      >
+                        <CheckSquare className="w-3.5 h-3.5" />
+                        <span>{lassoModeActive ? 'Lasso Mode: ON (Drag to Select)' : 'Lasso Select'}</span>
+                      </button>
+                    </>
                   )}
                 </div>
 
                 <div className="flex items-center gap-3">
-                  <span className="hidden md:inline text-xs text-[#9E978E]">
-                    Check files for batch ZIP/move · Tap any file to preview
+                  <span className="hidden lg:inline text-xs text-[#9E978E]">
+                    Click &amp; drag (Lasso) or check files to multi-select
                   </span>
                   {/* Grid / List Layout Toggle */}
                   <div className="flex items-center bg-[#1C1A17] border border-[#2C2824]">
@@ -4003,9 +4366,30 @@ export default function App() {
                 </div>
               ) : explorerLayout === 'list' ? (
                 /* ============================================================
-                    LIST VIEW LAYOUT
+                    LIST VIEW LAYOUT (Supports Mobile Touch Drag-to-Select)
                 ============================================================ */
-                <div className="bg-[#1C1A17] border border-[#2C2824] divide-y divide-[#2C2824]">
+                <div
+                  onTouchMove={(e) => {
+                    if (!touchDragSelectActiveRef.current && selectedFileIds.length === 0) return;
+                    const touch = e.touches[0];
+                    if (!touch) return;
+                    const targetEl = document
+                      .elementFromPoint(touch.clientX, touch.clientY)
+                      ?.closest('[data-select-file-id]');
+                    const fid = targetEl?.getAttribute('data-select-file-id');
+                    if (fid) {
+                      setSelectedFileIds((prev) => (prev.includes(fid) ? prev : [...prev, fid]));
+                    }
+                  }}
+                  onTouchEnd={() => {
+                    touchDragSelectActiveRef.current = false;
+                    if (longPressTimerRef.current) {
+                      clearTimeout(longPressTimerRef.current);
+                      longPressTimerRef.current = null;
+                    }
+                  }}
+                  className="rounded-2xl overflow-hidden bg-[#1C1A17] border border-[#2C2824] divide-y divide-[#2C2824]"
+                >
                   {visibleFiles.map((file) => {
                     const existingShare = shares.find((s) => s.fileId === file.id);
                     const isLocked = Boolean(file.lockedOverQuota);
@@ -4014,12 +4398,33 @@ export default function App() {
                     return (
                       <div
                         key={file.id}
+                        data-select-file-id={file.id}
                         draggable={!isLocked}
+                        onClick={() => {
+                          if (isLocked) {
+                            setActiveView('pricing');
+                            return;
+                          }
+                          setInspectedFile(file);
+                        }}
                         onMouseEnter={() => {
                           if (!isLocked) preloadVideoFile(file, authHeaders());
                         }}
                         onTouchStart={() => {
                           if (!isLocked) preloadVideoFile(file, authHeaders());
+                          if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current);
+                          longPressTimerRef.current = setTimeout(() => {
+                            touchDragSelectActiveRef.current = true;
+                            setSelectedFileIds((prev) =>
+                              prev.includes(file.id) ? prev : [...prev, file.id]
+                            );
+                          }, 320);
+                        }}
+                        onTouchEnd={() => {
+                          if (longPressTimerRef.current) {
+                            clearTimeout(longPressTimerRef.current);
+                            longPressTimerRef.current = null;
+                          }
                         }}
                         onDragStart={(e) => {
                           setDraggedFileId(file.id);
@@ -4029,7 +4434,7 @@ export default function App() {
                           setDraggedFileId(null);
                           setDragOverFolderId(null);
                         }}
-                        className={`p-3 sm:px-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 transition-colors ${
+                        className={`p-3 sm:px-4 flex items-center justify-between gap-3 transition-colors select-none cursor-pointer group ${
                           isSelected
                             ? 'bg-[#24211D]'
                             : 'hover:bg-[#24211D]/60'
@@ -4041,11 +4446,15 @@ export default function App() {
                             role="checkbox"
                             aria-checked={isSelected}
                             aria-label={`Select ${file.name}`}
+                            onTouchStart={(e) => {
+                              e.stopPropagation();
+                              touchDragSelectActiveRef.current = true;
+                            }}
                             onClick={(e) => {
                               e.stopPropagation();
                               toggleSelectFile(file.id);
                             }}
-                            className={`w-8 h-8 border flex items-center justify-center shrink-0 transition-colors cursor-pointer ${
+                            className={`w-8 h-8 rounded-lg border flex items-center justify-center shrink-0 transition-all cursor-pointer ${
                               isSelected
                                 ? 'bg-[#D97757] border-[#D97757] text-[#141311]'
                                 : 'bg-[#141311] border-[#2C2824] text-[#9E978E] hover:border-[#D97757] hover:text-[#F2EFE9]'
@@ -4058,11 +4467,7 @@ export default function App() {
                             )}
                           </button>
 
-                          <button
-                            onClick={() => setInspectedFile(file)}
-                            className="w-10 h-10 bg-[#24211D] border border-[#2C2824] flex items-center justify-center shrink-0 cursor-pointer overflow-hidden"
-                            title="Preview File"
-                          >
+                          <div className="w-10 h-10 rounded-xl bg-[#24211D] border border-[#2C2824] flex items-center justify-center shrink-0 overflow-hidden">
                             {file.previewDataUrl && file.mimeType.startsWith('image/') ? (
                               <img
                                 src={file.previewDataUrl}
@@ -4072,21 +4477,26 @@ export default function App() {
                             ) : (
                               renderFileIcon(file)
                             )}
-                          </button>
+                          </div>
 
                           <div className="min-w-0 flex-1">
-                            <div className="flex items-center gap-2">
-                              <button
-                                onClick={() => setInspectedFile(file)}
-                                className="text-sm font-bold text-[#F2EFE9] hover:text-[#D97757] text-left truncate cursor-pointer"
+                            <div className="flex items-center gap-1.5">
+                              <span
+                                className="text-sm font-bold text-[#F2EFE9] group-hover:text-[#D97757] truncate transition-colors"
                                 title={file.name}
                               >
                                 {file.name}
-                              </button>
+                              </span>
+                              {file.starred && (
+                                <Star
+                                  className="w-3.5 h-3.5 text-[#D97757] shrink-0"
+                                  fill="#D97757"
+                                />
+                              )}
                               {fileTags.map((tag) => (
                                 <span
                                   key={tag}
-                                  className="hidden md:inline-flex items-center px-1.5 py-0.5 text-[10px] font-semibold bg-[#141311] border border-[#2C2824] text-[#D97757]"
+                                  className="hidden sm:inline-flex items-center px-1.5 py-0.5 rounded-md text-[10px] font-semibold bg-[#141311] border border-[#2C2824] text-[#D97757] shrink-0"
                                 >
                                   {tag}
                                 </span>
@@ -4098,78 +4508,26 @@ export default function App() {
                               </span>
                               <span>·</span>
                               <span>{formatShortDate(file.updatedAt)}</span>
+                              {offlineFilesMap[file.id] && (
+                                <>
+                                  <span>·</span>
+                                  <span className="text-[#2E9E6B] font-semibold">Offline</span>
+                                </>
+                              )}
                               {existingShare && (
                                 <>
                                   <span>·</span>
                                   <span className="text-[#389E6C] font-semibold">Shared</span>
                                 </>
                               )}
+                              {isLocked && (
+                                <>
+                                  <span>·</span>
+                                  <span className="text-[#D99B26] font-semibold">Locked</span>
+                                </>
+                              )}
                             </div>
                           </div>
-                        </div>
-
-                        <div className="flex items-center justify-end gap-1.5 shrink-0">
-                          <button
-                            onClick={() => setInspectedFile(file)}
-                            className="min-h-[36px] px-2.5 py-1 text-xs font-semibold bg-[#24211D] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center gap-1 cursor-pointer"
-                            title="Preview File"
-                          >
-                            <Eye className="w-3.5 h-3.5 text-[#D97757]" />
-                            <span className="hidden lg:inline">Preview</span>
-                          </button>
-                          {!isLocked && (
-                            <>
-                              <button
-                                onClick={() => setMoveModalFile(file)}
-                                className="min-h-[36px] px-2.5 py-1 text-xs font-semibold bg-[#24211D] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center gap-1 cursor-pointer"
-                                title="Move File"
-                              >
-                                <FolderInput className="w-3.5 h-3.5 text-[#D97757]" />
-                                <span className="hidden lg:inline">Move</span>
-                              </button>
-                              <button
-                                onClick={() => setShareModalFile(file)}
-                                className="min-h-[36px] px-2.5 py-1 text-xs font-semibold bg-[#24211D] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center gap-1 cursor-pointer"
-                                title="Share Link"
-                              >
-                                <Link2 className="w-3.5 h-3.5 text-[#D97757]" />
-                                <span className="hidden lg:inline">
-                                  {existingShare ? 'Shared' : 'Share'}
-                                </span>
-                              </button>
-                              <button
-                                onClick={() => handleDownloadFile(file)}
-                                className="min-h-[36px] px-3 py-1 text-xs font-bold bg-[#D97757] text-[#141311] hover:bg-[#E08568] flex items-center gap-1 cursor-pointer"
-                                title="Download File"
-                              >
-                                <Download className="w-3.5 h-3.5" />
-                                <span className="hidden sm:inline">Download</span>
-                              </button>
-                            </>
-                          )}
-                          <button
-                            onClick={() => handleToggleStar(file)}
-                            className={`min-w-[36px] min-h-[36px] flex items-center justify-center border border-[#2C2824] bg-[#141311] cursor-pointer ${
-                              file.starred ? 'text-[#D97757]' : 'text-[#9E978E] hover:text-[#F2EFE9]'
-                            }`}
-                            title="Star File"
-                          >
-                            <Star className="w-3.5 h-3.5" fill={file.starred ? '#D97757' : 'none'} />
-                          </button>
-                          <button
-                            onClick={() =>
-                              setDeleteTarget({
-                                type: 'file',
-                                id: file.id,
-                                name: file.name,
-                                subtitle: `Size: ${formatBytes(file.sizeBytes)}`,
-                              })
-                            }
-                            className="min-w-[36px] min-h-[36px] flex items-center justify-center border border-[#2C2824] bg-[#141311] text-[#9E978E] hover:text-[#D94848] cursor-pointer"
-                            title="Move to Trash"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
                         </div>
                       </div>
                     );
@@ -4177,9 +4535,30 @@ export default function App() {
                 </div>
               ) : (
                 /* ============================================================
-                    GRID VIEW LAYOUT
+                    GRID VIEW LAYOUT (Click Card to Preview, Select for Actions)
                 ============================================================ */
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                <div
+                  onTouchMove={(e) => {
+                    if (!touchDragSelectActiveRef.current && selectedFileIds.length === 0) return;
+                    const touch = e.touches[0];
+                    if (!touch) return;
+                    const targetEl = document
+                      .elementFromPoint(touch.clientX, touch.clientY)
+                      ?.closest('[data-select-file-id]');
+                    const fid = targetEl?.getAttribute('data-select-file-id');
+                    if (fid) {
+                      setSelectedFileIds((prev) => (prev.includes(fid) ? prev : [...prev, fid]));
+                    }
+                  }}
+                  onTouchEnd={() => {
+                    touchDragSelectActiveRef.current = false;
+                    if (longPressTimerRef.current) {
+                      clearTimeout(longPressTimerRef.current);
+                      longPressTimerRef.current = null;
+                    }
+                  }}
+                  className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3 sm:gap-4"
+                >
                   {visibleFiles.map((file) => {
                     const existingShare = shares.find((s) => s.fileId === file.id);
                     const isLocked = Boolean(file.lockedOverQuota);
@@ -4188,12 +4567,33 @@ export default function App() {
                     return (
                       <div
                         key={file.id}
-                        draggable={!isLocked}
+                        data-select-file-id={file.id}
+                        draggable={!isLocked && !lassoModeActive}
+                        onClick={() => {
+                          if (isLocked) {
+                            setActiveView('pricing');
+                            return;
+                          }
+                          setInspectedFile(file);
+                        }}
                         onMouseEnter={() => {
                           if (!isLocked) preloadVideoFile(file, authHeaders());
                         }}
                         onTouchStart={() => {
                           if (!isLocked) preloadVideoFile(file, authHeaders());
+                          if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current);
+                          longPressTimerRef.current = setTimeout(() => {
+                            touchDragSelectActiveRef.current = true;
+                            setSelectedFileIds((prev) =>
+                              prev.includes(file.id) ? prev : [...prev, file.id]
+                            );
+                          }, 320);
+                        }}
+                        onTouchEnd={() => {
+                          if (longPressTimerRef.current) {
+                            clearTimeout(longPressTimerRef.current);
+                            longPressTimerRef.current = null;
+                          }
                         }}
                         onDragStart={(e) => {
                           setDraggedFileId(file.id);
@@ -4203,150 +4603,80 @@ export default function App() {
                           setDraggedFileId(null);
                           setDragOverFolderId(null);
                         }}
-                        className={`p-4 sm:p-5 border transition-colors flex flex-col justify-between gap-4 ${
+                        className={`animate-app-card rounded-2xl p-3.5 sm:p-4 border flex items-center justify-between gap-3 select-none cursor-pointer group ${
                           isSelected
-                            ? 'bg-[#24211D] border-[#D97757]'
+                            ? 'bg-[#24211D] border-[#D97757] shadow-sm'
                             : isLocked
                             ? 'bg-[#1C1A17] border-[#D99B26]/80'
                             : 'bg-[#1C1A17] border-[#2C2824] hover:border-[#D97757]/70'
                         }`}
                       >
-                        <div className="space-y-3">
-                          <div className="flex items-start justify-between gap-2">
-                            <div className="flex items-center gap-2.5">
-                              {/* Batch Action Selection Checkbox */}
-                              <button
-                                type="button"
-                                role="checkbox"
-                                aria-checked={isSelected}
-                                aria-label={`Select ${file.name}`}
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  toggleSelectFile(file.id);
-                                }}
-                                className={`w-9 h-9 border flex items-center justify-center shrink-0 transition-colors cursor-pointer ${
-                                  isSelected
-                                    ? 'bg-[#D97757] border-[#D97757] text-[#141311]'
-                                    : 'bg-[#141311] border-[#2C2824] text-[#9E978E] hover:border-[#D97757] hover:text-[#F2EFE9]'
-                                }`}
-                                title={isSelected ? 'Deselect file' : 'Select file for batch action'}
-                              >
-                                {isSelected ? (
-                                  <CheckSquare className="w-4 h-4" />
-                                ) : (
-                                  <Square className="w-4 h-4" />
-                                )}
-                              </button>
+                        <div className="flex items-center gap-3 min-w-0 flex-1">
+                          {/* Selection Checkbox */}
+                          <button
+                            type="button"
+                            role="checkbox"
+                            aria-checked={isSelected}
+                            aria-label={`Select ${file.name}`}
+                            onTouchStart={(e) => {
+                              e.stopPropagation();
+                              touchDragSelectActiveRef.current = true;
+                            }}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              toggleSelectFile(file.id);
+                            }}
+                            className={`w-8 h-8 rounded-lg border flex items-center justify-center shrink-0 transition-all cursor-pointer ${
+                              isSelected
+                                ? 'bg-[#D97757] border-[#D97757] text-[#141311]'
+                                : 'bg-[#141311] border-[#2C2824] text-[#9E978E] hover:border-[#D97757] hover:text-[#F2EFE9]'
+                            }`}
+                            title={isSelected ? 'Deselect file' : 'Select file'}
+                          >
+                            {isSelected ? (
+                              <CheckSquare className="w-3.5 h-3.5" />
+                            ) : (
+                              <Square className="w-3.5 h-3.5" />
+                            )}
+                          </button>
 
-                              <button
-                                onClick={() => setInspectedFile(file)}
-                                className="w-11 h-11 bg-[#24211D] border border-[#2C2824] flex items-center justify-center shrink-0 cursor-pointer overflow-hidden"
-                                title="Preview File"
-                              >
-                                {file.previewDataUrl && file.mimeType.startsWith('image/') ? (
-                                  <img
-                                    src={file.previewDataUrl}
-                                    alt={file.name}
-                                    className="w-full h-full object-cover"
-                                  />
-                                ) : (
-                                  renderFileIcon(file)
-                                )}
-                              </button>
-                            </div>
-
-                            <div className="flex items-center -mr-2 -mt-2">
-                              <button
-                                onClick={() => setInspectedFile(file)}
-                                className="min-w-[36px] min-h-[44px] flex items-center justify-center text-[#9E978E] hover:text-[#F2EFE9] cursor-pointer"
-                                title="Preview File (MKV / Video / Image / PDF)"
-                              >
-                                <Eye className="w-4 h-4" />
-                              </button>
-                              <button
-                                onClick={() => setTagModalFiles([file])}
-                                className="min-w-[36px] min-h-[44px] flex items-center justify-center text-[#9E978E] hover:text-[#D97757] cursor-pointer"
-                                title="Manage Labels / Tags"
-                              >
-                                <Tag className="w-4 h-4" />
-                              </button>
-                              {!isLocked && (
-                                <>
-                                  <button
-                                    onClick={() => {
-                                      setMoveModalMode('copy');
-                                      setMoveModalFile(file);
-                                    }}
-                                    className="min-w-[34px] min-h-[44px] flex items-center justify-center text-[#9E978E] hover:text-[#D97757] cursor-pointer"
-                                    title="Copy File to Another Folder"
-                                  >
-                                    <Copy className="w-4 h-4" />
-                                  </button>
-                                  <button
-                                    onClick={() => void handleToggleOfflineFile(file)}
-                                    disabled={savingOfflineFileId === file.id}
-                                    className={`min-w-[34px] min-h-[44px] flex items-center justify-center cursor-pointer ${
-                                      offlineFilesMap[file.id]
-                                        ? 'text-[#2E9E6B]'
-                                        : 'text-[#9E978E] hover:text-[#D97757]'
-                                    }`}
-                                    title={
-                                      offlineFilesMap[file.id]
-                                        ? 'Saved Offline on Device (Tap to Remove)'
-                                        : 'Save Offline to Local Device Storage'
-                                    }
-                                  >
-                                    <Smartphone className="w-4 h-4" />
-                                  </button>
-                                </>
-                              )}
-                              <button
-                                onClick={() => handleToggleStar(file)}
-                                className={`min-w-[34px] min-h-[44px] flex items-center justify-center cursor-pointer ${
-                                  file.starred
-                                    ? 'text-[#D97757]'
-                                    : 'text-[#9E978E] hover:text-[#F2EFE9]'
-                                }`}
-                                title="Star File"
-                              >
-                                <Star
-                                  className="w-4 h-4"
-                                  fill={file.starred ? '#D97757' : 'none'}
-                                />
-                              </button>
-                              <button
-                                onClick={() =>
-                                  setDeleteTarget({
-                                    type: 'file',
-                                    id: file.id,
-                                    name: file.name,
-                                    subtitle: `Size: ${formatBytes(file.sizeBytes)}`,
-                                  })
-                                }
-                                className="min-w-[34px] min-h-[44px] flex items-center justify-center text-[#9E978E] hover:text-[#D94848] cursor-pointer"
-                                title="Move File to Trash"
-                              >
-                                <Trash2 className="w-4 h-4" />
-                              </button>
-                            </div>
+                          {/* File Thumbnail / Icon */}
+                          <div className="w-11 h-11 rounded-xl bg-[#24211D] border border-[#2C2824] flex items-center justify-center shrink-0 overflow-hidden">
+                            {file.previewDataUrl && file.mimeType.startsWith('image/') ? (
+                              <img
+                                src={file.previewDataUrl}
+                                alt={file.name}
+                                className="w-full h-full object-cover"
+                              />
+                            ) : (
+                              renderFileIcon(file)
+                            )}
                           </div>
 
-                          <div>
-                            <button
-                              onClick={() => setInspectedFile(file)}
-                              className="text-sm font-bold text-[#F2EFE9] hover:text-[#D97757] text-left break-all line-clamp-1 cursor-pointer"
-                              title={file.name}
-                            >
-                              {file.name}
-                            </button>
-                            <div className="flex flex-wrap items-center gap-1.5 text-xs text-[#9E978E] mt-1 tabular-nums">
-                              <span className="text-[#F2EFE9] font-medium">
+                          {/* File Name & Clean Metadata */}
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-1.5">
+                              <span
+                                className="text-sm font-bold text-[#F2EFE9] group-hover:text-[#D97757] text-left break-all line-clamp-1 transition-colors"
+                                title={file.name}
+                              >
+                                {file.name}
+                              </span>
+                              {file.starred && (
+                                <Star
+                                  className="w-3.5 h-3.5 text-[#D97757] shrink-0"
+                                  fill="#D97757"
+                                />
+                              )}
+                            </div>
+                            <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-[#9E978E] mt-0.5 tabular-nums">
+                              <span className="text-[#F2EFE9] font-semibold">
                                 {formatBytes(file.sizeBytes)}
                               </span>
                               <span aria-hidden="true">·</span>
                               {isLocked ? (
                                 <span className="text-[#D99B26] font-semibold">
-                                  Locked (&gt;25 GB Limit)
+                                  Locked (&gt;25 GB)
                                 </span>
                               ) : offlineFilesMap[file.id] ? (
                                 <span className="text-[#2E9E6B] font-semibold">
@@ -4354,125 +4684,32 @@ export default function App() {
                                 </span>
                               ) : savingOfflineFileId === file.id ? (
                                 <span className="text-[#D97757] font-semibold">
-                                  Saving Offline ({offlineProgressPct}%)
+                                  Saving {offlineProgressPct}%
                                 </span>
                               ) : (
-                                <span>Encrypted Vault</span>
+                                <span>{formatShortDate(file.updatedAt)}</span>
                               )}
-                              <span aria-hidden="true">·</span>
-                              <span>{formatShortDate(file.updatedAt)}</span>
+                              {existingShare && (
+                                <>
+                                  <span aria-hidden="true">·</span>
+                                  <span className="text-[#389E6C] font-semibold">Shared</span>
+                                </>
+                              )}
                             </div>
-
-                            {/* File Tags / Custom Labels Row */}
-                            <div className="flex flex-wrap items-center gap-1.5 mt-2.5">
-                              {fileTags.map((tag) => {
-                                const isFiltered =
-                                  selectedTagFilter?.toLowerCase() === tag.toLowerCase();
-                                return (
+                            {fileTags.length > 0 && (
+                              <div className="flex flex-wrap items-center gap-1 mt-1.5">
+                                {fileTags.map((tag) => (
                                   <span
                                     key={tag}
-                                    className={`inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-semibold border transition-colors ${
-                                      isFiltered
-                                        ? 'bg-[#D97757] border-[#D97757] text-[#141311]'
-                                        : 'bg-[#141311] border-[#2C2824] text-[#F2EFE9]'
-                                    }`}
+                                    className="inline-flex items-center px-1.5 py-0.5 rounded-md text-[10px] font-semibold bg-[#141311] border border-[#2C2824] text-[#D97757]"
                                   >
-                                    <button
-                                      type="button"
-                                      onClick={() =>
-                                        setSelectedTagFilter(isFiltered ? null : tag)
-                                      }
-                                      className="hover:underline cursor-pointer"
-                                      title={`Filter by "${tag}"`}
-                                    >
-                                      {tag}
-                                    </button>
-                                    <button
-                                      type="button"
-                                      onClick={(e) => {
-                                        e.stopPropagation();
-                                        handleQuickRemoveTag(file, tag);
-                                      }}
-                                      className={`ml-0.5 cursor-pointer ${
-                                        isFiltered
-                                          ? 'text-[#141311]/70 hover:text-[#141311]'
-                                          : 'text-[#9E978E] hover:text-[#D94848]'
-                                      }`}
-                                      title={`Remove "${tag}" label`}
-                                    >
-                                      <X className="w-2.5 h-2.5" />
-                                    </button>
+                                    {tag}
                                   </span>
-                                );
-                              })}
-                              <button
-                                type="button"
-                                onClick={() => setTagModalFiles([file])}
-                                className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-medium bg-[#141311] border border-[#2C2824] hover:border-[#D97757] text-[#9E978E] hover:text-[#F2EFE9] cursor-pointer"
-                                title="Add or edit custom labels"
-                              >
-                                <Plus className="w-2.5 h-2.5 text-[#D97757]" />
-                                <span>{fileTags.length === 0 ? 'Add Label' : 'Label'}</span>
-                              </button>
-                            </div>
+                                ))}
+                              </div>
+                            )}
                           </div>
                         </div>
-
-                        {isLocked ? (
-                          <div className="pt-3 border-t border-[#2C2824]">
-                            <button
-                              onClick={() => setActiveView('pricing')}
-                              className="w-full min-h-[44px] py-2.5 px-3 text-xs font-bold bg-[#24211D] border border-[#D99B26] text-[#D99B26] hover:bg-[#D99B26] hover:text-[#141311] flex items-center justify-center gap-1.5 cursor-pointer"
-                            >
-                              <Lock className="w-3.5 h-3.5" />
-                              Extend Plan to Unlock
-                            </button>
-                          </div>
-                        ) : (
-                          <div className="grid grid-cols-4 gap-1.5 pt-3 border-t border-[#2C2824]">
-                            <button
-                              onClick={() => {
-                                setMoveModalMode('move');
-                                setMoveModalFile(file);
-                              }}
-                              className="min-h-[42px] py-2 px-2 text-xs font-semibold bg-[#24211D] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center justify-center gap-1 cursor-pointer"
-                              title="Move File"
-                            >
-                              <FolderInput className="w-3.5 h-3.5 text-[#D97757]" />
-                              <span>Move</span>
-                            </button>
-
-                            <button
-                              onClick={() => {
-                                setMoveModalMode('copy');
-                                setMoveModalFile(file);
-                              }}
-                              className="min-h-[42px] py-2 px-2 text-xs font-semibold bg-[#24211D] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center justify-center gap-1 cursor-pointer"
-                              title="Copy File to Another Folder"
-                            >
-                              <Copy className="w-3.5 h-3.5 text-[#D97757]" />
-                              <span>Copy</span>
-                            </button>
-
-                            <button
-                              onClick={() => setShareModalFile(file)}
-                              className="min-h-[42px] py-2 px-2 text-xs font-semibold bg-[#24211D] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center justify-center gap-1 cursor-pointer"
-                              title="Share File"
-                            >
-                              <Link2 className="w-3.5 h-3.5 text-[#D97757]" />
-                              <span>{existingShare ? 'Shared' : 'Share'}</span>
-                            </button>
-
-                            <button
-                              onClick={() => handleDownloadFile(file)}
-                              className="min-h-[42px] py-2 px-2 text-xs font-bold bg-[#D97757] text-[#141311] hover:bg-[#E08568] flex items-center justify-center gap-1 cursor-pointer"
-                              title="Download File"
-                            >
-                              <Download className="w-3.5 h-3.5" />
-                              <span>Save</span>
-                            </button>
-                          </div>
-                        )}
                       </div>
                     );
                   })}
@@ -4673,7 +4910,7 @@ export default function App() {
         ================================================================== */}
         {activeView === 'gallery' && (
           <MediaGalleryView
-            files={files}
+            files={activeFiles}
             folders={folders}
             offlineMap={offlineFilesMap}
             savingOfflineId={savingOfflineFileId}
@@ -4728,7 +4965,7 @@ export default function App() {
               });
             }}
             onOpenOfflineFile={(fid) => {
-              const found = files.find((f) => f.id === fid);
+              const found = activeFiles.find((f) => f.id === fid);
               if (found) setInspectedFile(found);
             }}
           />
@@ -4789,25 +5026,27 @@ export default function App() {
       )}
 
       {/* ====================================================================
-          GOOGLE DRIVE-STYLE MOBILE FLOATING PLUS (+) UPLOAD BUTTON & ACTION SHEET
+          GOOGLE DRIVE-STYLE MOBILE FLOATING PLUS (+) UPLOAD BUTTON & NATIVE BOTTOM SHEET
       ==================================================================== */}
       {showMobilePlusMenu && (
         <div
           onClick={() => setShowMobilePlusMenu(false)}
-          className="fixed inset-0 z-40 bg-black/60 md:hidden flex items-end justify-end p-4 pb-36"
+          className="animate-app-backdrop fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-xs md:hidden flex items-end justify-center"
         >
           <div
             onClick={(e) => e.stopPropagation()}
-            className="w-full max-w-xs bg-[#1C1A17] border border-[#D97757] shadow-2xl divide-y divide-[#2C2824]"
+            className="animate-app-sheet w-full bg-[#1C1A17] rounded-t-3xl border-t border-[#2C2824] shadow-2xl p-4 pb-8 space-y-2"
           >
-            <div className="px-4 py-2.5 bg-[#24211D] flex items-center justify-between">
+            {/* Native Bottom Sheet Drag Pill */}
+            <div className="w-10 h-1.5 bg-slate-300 rounded-full mx-auto mb-2" />
+            <div className="px-2 pb-2 flex items-center justify-between border-b border-[#2C2824]">
               <span className="text-xs font-bold text-[#F2EFE9] uppercase tracking-wider">
                 Add to {activeFolder ? activeFolder.name : 'Cloud Drive'}
               </span>
               <button
                 type="button"
                 onClick={() => setShowMobilePlusMenu(false)}
-                className="p-1 text-[#9E978E] hover:text-[#F2EFE9] cursor-pointer"
+                className="w-8 h-8 rounded-full bg-[#24211D] flex items-center justify-center text-[#9E978E] hover:text-[#F2EFE9] cursor-pointer"
               >
                 <X className="w-4 h-4" />
               </button>
@@ -4819,17 +5058,17 @@ export default function App() {
                 if (activeView !== 'explorer') setActiveView('explorer');
                 fileInputRef.current?.click();
               }}
-              className="w-full px-4 py-3.5 text-left flex items-center gap-3 hover:bg-[#24211D] cursor-pointer"
+              className="w-full p-3.5 rounded-2xl text-left flex items-center gap-3.5 bg-[#24211D]/60 hover:bg-[#24211D] cursor-pointer"
             >
-              <div className="w-9 h-9 bg-[#D97757] text-[#141311] flex items-center justify-center shrink-0">
-                <Upload className="w-4 h-4" />
+              <div className="w-11 h-11 rounded-2xl bg-[#D97757] text-[#141311] flex items-center justify-center shrink-0 shadow-xs">
+                <Upload className="w-5 h-5" />
               </div>
               <div>
-                <div className="text-xs font-bold text-[#F2EFE9]">
-                  Upload Files / Videos / Photos
+                <div className="text-sm font-bold text-[#F2EFE9]">
+                  Upload Files, Videos &amp; Photos
                 </div>
-                <div className="text-[11px] text-[#9E978E]">
-                  100% Original Quality via Main Account
+                <div className="text-xs text-[#9E978E]">
+                  100% Original Lossless Quality via Main Account
                 </div>
               </div>
             </button>
@@ -4840,15 +5079,15 @@ export default function App() {
                 if (activeView !== 'explorer') setActiveView('explorer');
                 setCreatingFolder(true);
               }}
-              className="w-full px-4 py-3.5 text-left flex items-center gap-3 hover:bg-[#24211D] cursor-pointer"
+              className="w-full p-3.5 rounded-2xl text-left flex items-center gap-3.5 bg-[#24211D]/60 hover:bg-[#24211D] cursor-pointer"
             >
-              <div className="w-9 h-9 bg-[#24211D] border border-[#2C2824] text-[#D97757] flex items-center justify-center shrink-0">
-                <FolderPlus className="w-4 h-4" />
+              <div className="w-11 h-11 rounded-2xl bg-[#24211D] border border-[#2C2824] text-[#D97757] flex items-center justify-center shrink-0">
+                <FolderPlus className="w-5 h-5" />
               </div>
               <div>
-                <div className="text-xs font-bold text-[#F2EFE9]">Create New Folder</div>
-                <div className="text-[11px] text-[#9E978E]">
-                  Organize files with optional PIN lock
+                <div className="text-sm font-bold text-[#F2EFE9]">Create New Folder</div>
+                <div className="text-xs text-[#9E978E]">
+                  Organize files with optional PIN protection
                 </div>
               </div>
             </button>
@@ -4859,15 +5098,15 @@ export default function App() {
                 if (activeView !== 'explorer') setActiveView('explorer');
                 setShowRemoteModal(true);
               }}
-              className="w-full px-4 py-3.5 text-left flex items-center gap-3 hover:bg-[#24211D] cursor-pointer"
+              className="w-full p-3.5 rounded-2xl text-left flex items-center gap-3.5 bg-[#24211D]/60 hover:bg-[#24211D] cursor-pointer"
             >
-              <div className="w-9 h-9 bg-[#24211D] border border-[#2C2824] text-[#D97757] flex items-center justify-center shrink-0">
-                <Globe className="w-4 h-4" />
+              <div className="w-11 h-11 rounded-2xl bg-[#24211D] border border-[#2C2824] text-[#D97757] flex items-center justify-center shrink-0">
+                <Globe className="w-5 h-5" />
               </div>
               <div>
-                <div className="text-xs font-bold text-[#F2EFE9]">Upload from Web Link</div>
-                <div className="text-[11px] text-[#9E978E]">
-                  Fetch direct URL to your cloud vault
+                <div className="text-sm font-bold text-[#F2EFE9]">Upload from Web Link</div>
+                <div className="text-xs text-[#9E978E]">
+                  Fetch direct file URL straight to your cloud vault
                 </div>
               </div>
             </button>
@@ -4875,39 +5114,209 @@ export default function App() {
         </div>
       )}
 
-      <div className="fixed right-4 bottom-20 z-40 md:hidden flex items-center shadow-2xl">
-        <button
-          type="button"
-          onClick={() => {
-            if (activeView !== 'explorer') setActiveView('explorer');
-            fileInputRef.current?.click();
-          }}
-          disabled={uploadingFiles}
-          title="Tap to Upload Files in Original Quality"
-          aria-label="Upload Files"
-          className="h-14 px-4 bg-[#D97757] text-[#141311] hover:bg-[#E08568] active:scale-95 transition-all flex items-center justify-center gap-2 font-bold text-xs border-r border-[#141311]/20 cursor-pointer"
-        >
-          <Plus className="w-6 h-6 stroke-[2.5]" />
-          <span>Upload</span>
-        </button>
-        <button
-          type="button"
-          onClick={() => setShowMobilePlusMenu((prev) => !prev)}
-          title="More Upload & Folder Options"
-          aria-label="More Upload Options"
-          className="w-11 h-14 bg-[#24211D] border border-[#D97757] text-[#D97757] hover:bg-[#D97757] hover:text-[#141311] active:scale-95 transition-all flex items-center justify-center cursor-pointer"
-        >
-          <FolderPlus className="w-4 h-4" />
-        </button>
-      </div>
+      {/* ====================================================================
+          MOBILE SELECTION ACTION SHEET (Slides up smoothly when 1+ files selected)
+      ==================================================================== */}
+      {selectedFileIds.length > 0 && activeView === 'explorer' && (
+        <div className="animate-app-sheet fixed bottom-16 left-2 right-2 z-40 md:hidden rounded-3xl bg-white/95 backdrop-blur-md border border-[#D97757]/50 shadow-2xl p-3.5 space-y-2.5">
+          <div className="flex items-center justify-between gap-2 pb-2 border-b border-[#2C2824]">
+            <div className="flex items-center gap-2 text-xs min-w-0">
+              <CheckSquare className="w-4 h-4 text-[#D97757] shrink-0" />
+              <span className="font-bold text-[#F2EFE9] truncate">
+                {selectedFileIds.length}{' '}
+                {selectedFileIds.length === 1 ? 'file' : 'files'}
+              </span>
+              <span className="text-[#9E978E] tabular-nums shrink-0">
+                ({formatBytes(selectedTotalBytes)})
+              </span>
+            </div>
+            <div className="flex items-center gap-1.5 shrink-0">
+              <button
+                type="button"
+                onClick={() => {
+                  selectedFilesObjects.forEach((f) => {
+                    void handleToggleStar(f);
+                  });
+                }}
+                className="min-h-[30px] px-2.5 py-1 rounded-xl text-[11px] font-semibold bg-[#24211D] border border-[#2C2824] text-[#F2EFE9] flex items-center gap-1 cursor-pointer"
+                title="Star / Unstar Selected"
+              >
+                <Star
+                  className="w-3 h-3 text-[#D97757]"
+                  fill={
+                    selectedFilesObjects.length > 0 &&
+                    selectedFilesObjects.every((f) => f.starred)
+                      ? '#D97757'
+                      : 'none'
+                  }
+                />
+                <span>Star</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setTagModalFiles(selectedFilesObjects)}
+                className="min-h-[30px] px-2.5 py-1 rounded-xl text-[11px] font-semibold bg-[#24211D] border border-[#2C2824] text-[#F2EFE9] flex items-center gap-1 cursor-pointer"
+                title="Label Selected"
+              >
+                <Tag className="w-3 h-3 text-[#D97757]" />
+                <span>Label</span>
+              </button>
+              <button
+                type="button"
+                onClick={handleToggleSelectAllVisible}
+                className="min-h-[30px] px-2.5 py-1 rounded-xl text-[11px] font-semibold bg-[#24211D] border border-[#2C2824] text-[#F2EFE9] cursor-pointer"
+              >
+                {allVisibleSelected ? 'None' : 'All'}
+              </button>
+              <button
+                type="button"
+                onClick={() => setSelectedFileIds([])}
+                className="min-h-[30px] px-2.5 py-1 rounded-xl text-[11px] font-semibold bg-[#141311] border border-[#2C2824] text-[#9E978E] hover:text-[#F2EFE9] flex items-center gap-1 cursor-pointer"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-3 gap-1.5">
+            {/* 1. Share */}
+            <button
+              type="button"
+              onClick={() => {
+                if (selectedFilesObjects[0]) {
+                  setShareModalFile(selectedFilesObjects[0]);
+                }
+              }}
+              className="min-h-[42px] rounded-xl px-2 py-2 text-xs font-semibold bg-[#24211D] border border-[#2C2824] text-[#F2EFE9] flex items-center justify-center gap-1.5 cursor-pointer"
+            >
+              <Link2 className="w-3.5 h-3.5 text-[#D97757] shrink-0" />
+              <span>Share</span>
+            </button>
+
+            {/* 2. Save to Offline (Local Storage + IndexedDB) */}
+            <button
+              type="button"
+              disabled={Boolean(savingOfflineFileId)}
+              onClick={() => void handleBatchSaveOffline(selectedFilesObjects)}
+              className={`min-h-[42px] rounded-xl px-2 py-2 text-xs font-bold border flex items-center justify-center gap-1.5 cursor-pointer ${
+                selectedFilesObjects.length > 0 &&
+                selectedFilesObjects.every((f) => Boolean(offlineFilesMap[f.id]))
+                  ? 'bg-[#24211D] border-[#2E9E6B] text-[#2E9E6B]'
+                  : 'bg-[#24211D] border-[#D97757] text-[#F2EFE9]'
+              }`}
+            >
+              {savingOfflineFileId ? (
+                <>
+                  <Loader2 className="w-3.5 h-3.5 animate-spin text-[#D97757] shrink-0" />
+                  <span>{offlineProgressPct}%</span>
+                </>
+              ) : selectedFilesObjects.length > 0 &&
+                selectedFilesObjects.every((f) => Boolean(offlineFilesMap[f.id])) ? (
+                <>
+                  <Check className="w-3.5 h-3.5 text-[#2E9E6B] shrink-0" />
+                  <span>Offline</span>
+                </>
+              ) : (
+                <>
+                  <Smartphone className="w-3.5 h-3.5 text-[#D97757] shrink-0" />
+                  <span>Save Offline</span>
+                </>
+              )}
+            </button>
+
+            {/* 3. Copy to Folder */}
+            <button
+              type="button"
+              onClick={() => {
+                setMoveModalMode('copy');
+                setBatchMoveFiles(selectedFilesObjects);
+              }}
+              className="min-h-[42px] rounded-xl px-2 py-2 text-xs font-semibold bg-[#24211D] border border-[#2C2824] text-[#F2EFE9] flex items-center justify-center gap-1.5 cursor-pointer"
+            >
+              <Copy className="w-3.5 h-3.5 text-[#D97757] shrink-0" />
+              <span>Copy</span>
+            </button>
+
+            {/* 4. Move to Folder */}
+            <button
+              type="button"
+              onClick={() => {
+                setMoveModalMode('move');
+                setBatchMoveFiles(selectedFilesObjects);
+              }}
+              className="min-h-[42px] rounded-xl px-2 py-2 text-xs font-semibold bg-[#24211D] border border-[#2C2824] text-[#F2EFE9] flex items-center justify-center gap-1.5 cursor-pointer"
+            >
+              <FolderInput className="w-3.5 h-3.5 text-[#D97757] shrink-0" />
+              <span>Move</span>
+            </button>
+
+            {/* 5. Download */}
+            <button
+              type="button"
+              onClick={handleBatchDownload}
+              className="min-h-[42px] rounded-xl px-2 py-2 text-xs font-bold bg-[#D97757] text-[#141311] flex items-center justify-center gap-1.5 cursor-pointer"
+            >
+              <Download className="w-3.5 h-3.5 shrink-0" />
+              <span>Download</span>
+            </button>
+
+            {/* 6. Delete (Move to Trash) */}
+            <button
+              type="button"
+              onClick={() =>
+                setDeleteTarget({
+                  type: 'batch-files',
+                  id: 'batch',
+                  name: `${selectedFileIds.length} Selected Files`,
+                  subtitle: `Total Size: ${formatBytes(selectedTotalBytes)}`,
+                  fileIds: [...selectedFileIds],
+                })
+              }
+              className="min-h-[42px] rounded-xl px-2 py-2 text-xs font-semibold bg-[#141311] border border-[#D94848] text-[#D94848] flex items-center justify-center gap-1.5 cursor-pointer"
+            >
+              <Trash2 className="w-3.5 h-3.5 shrink-0" />
+              <span>Delete</span>
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Sleek Google-Drive Style Floating '+' Pill Button on Mobile */}
+      {selectedFileIds.length === 0 && (
+        <div className="animate-app-fab fixed right-4 bottom-20 z-40 md:hidden flex items-center rounded-2xl overflow-hidden shadow-[0_10px_28px_rgba(37,99,235,0.32)] border border-blue-500/20">
+          <button
+            type="button"
+            onClick={() => {
+              if (activeView !== 'explorer') setActiveView('explorer');
+              fileInputRef.current?.click();
+            }}
+            disabled={uploadingFiles}
+            title="Tap to Upload Files in Original Quality"
+            aria-label="Upload Files"
+            className="h-13 pl-4 pr-3.5 bg-[#D97757] text-[#141311] hover:bg-[#E08568] active:scale-95 transition-all flex items-center justify-center gap-1.5 font-bold text-xs cursor-pointer"
+          >
+            <Plus className="w-5 h-5 stroke-[2.5]" />
+            <span>Upload</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setShowMobilePlusMenu((prev) => !prev)}
+            title="More Upload & Folder Options"
+            aria-label="More Upload Options"
+            className="w-11 h-13 bg-white text-[#D97757] border-l border-slate-200 active:scale-95 transition-all flex items-center justify-center cursor-pointer"
+          >
+            <FolderPlus className="w-4 h-4" />
+          </button>
+        </div>
+      )}
 
       {/* ====================================================================
-          MOBILE FIXED BOTTOM TAB BAR
+          MOBILE FIXED BOTTOM TAB BAR (Native App Frosted Bar + Pill Active Indicator)
       ==================================================================== */}
       <nav
         className={`fixed bottom-0 left-0 right-0 z-40 md:hidden grid ${
-          isAdminUser ? 'grid-cols-6' : 'grid-cols-5'
-        } bg-[#1C1A17] border-t border-[#2C2824]`}
+          isAdminUser ? 'grid-cols-5' : 'grid-cols-4'
+        } bg-white/95 backdrop-blur-md border-t border-slate-200/90 shadow-[0_-4px_20px_rgba(15,23,42,0.04)] px-1 py-1`}
       >
         <button
           onClick={() => {
@@ -4915,65 +5324,85 @@ export default function App() {
             setOnlyStarred(false);
             setOnlyOffline(false);
           }}
-          className={`min-h-[56px] flex flex-col items-center justify-center gap-1 text-[10px] font-medium cursor-pointer ${
-            activeView === 'explorer' ? 'text-[#D97757] font-bold' : 'text-[#9E978E]'
+          className={`min-h-[52px] flex flex-col items-center justify-center gap-0.5 text-[11px] cursor-pointer transition-all ${
+            activeView === 'explorer' ? 'text-[#D97757] font-bold' : 'text-[#9E978E] font-medium'
           }`}
         >
-          <Folder className="w-4 h-4" />
+          <div
+            className={`px-3.5 py-1 rounded-full transition-all duration-200 ${
+              activeView === 'explorer' ? 'bg-blue-50 scale-105' : ''
+            }`}
+          >
+            <Folder className="w-4 h-4" />
+          </div>
           <span>Files</span>
         </button>
 
         <button
           onClick={() => setActiveView('gallery')}
-          className={`min-h-[56px] flex flex-col items-center justify-center gap-1 text-[10px] font-medium cursor-pointer ${
-            activeView === 'gallery' ? 'text-[#D97757] font-bold' : 'text-[#9E978E]'
+          className={`min-h-[52px] flex flex-col items-center justify-center gap-0.5 text-[11px] cursor-pointer transition-all ${
+            activeView === 'gallery' ? 'text-[#D97757] font-bold' : 'text-[#9E978E] font-medium'
           }`}
         >
-          <Film className="w-4 h-4" />
+          <div
+            className={`px-3.5 py-1 rounded-full transition-all duration-200 ${
+              activeView === 'gallery' ? 'bg-blue-50 scale-105' : ''
+            }`}
+          >
+            <Film className="w-4 h-4" />
+          </div>
           <span>Gallery</span>
         </button>
 
         <button
           onClick={() => setActiveView('shares')}
-          className={`min-h-[56px] flex flex-col items-center justify-center gap-1 text-[10px] font-medium cursor-pointer ${
-            activeView === 'shares' ? 'text-[#D97757] font-bold' : 'text-[#9E978E]'
+          className={`min-h-[52px] flex flex-col items-center justify-center gap-0.5 text-[11px] cursor-pointer transition-all ${
+            activeView === 'shares' ? 'text-[#D97757] font-bold' : 'text-[#9E978E] font-medium'
           }`}
         >
-          <Link2 className="w-4 h-4" />
+          <div
+            className={`px-3.5 py-1 rounded-full transition-all duration-200 ${
+              activeView === 'shares' ? 'bg-blue-50 scale-105' : ''
+            }`}
+          >
+            <Link2 className="w-4 h-4" />
+          </div>
           <span>Shared</span>
         </button>
 
         <button
-          onClick={() => setActiveView('trash')}
-          className={`min-h-[56px] flex flex-col items-center justify-center gap-1 text-[10px] font-medium cursor-pointer ${
-            activeView === 'trash' ? 'text-[#D97757] font-bold' : 'text-[#9E978E]'
+          onClick={() => setActiveView('pricing')}
+          className={`min-h-[52px] flex flex-col items-center justify-center gap-0.5 text-[11px] cursor-pointer transition-all ${
+            activeView === 'pricing' ? 'text-[#D97757] font-bold' : 'text-[#9E978E] font-medium'
           }`}
         >
-          <Trash2 className="w-4 h-4" />
-          <span>Trash</span>
-        </button>
-
-        <button
-          onClick={() => setActiveView('settings')}
-          className={`min-h-[56px] flex flex-col items-center justify-center gap-1 text-[10px] font-medium cursor-pointer ${
-            activeView === 'settings' ? 'text-[#D97757] font-bold' : 'text-[#9E978E]'
-          }`}
-        >
-          <Bell className="w-4 h-4" />
-          <span>Alerts</span>
+          <div
+            className={`px-3.5 py-1 rounded-full transition-all duration-200 ${
+              activeView === 'pricing' ? 'bg-blue-50 scale-105' : ''
+            }`}
+          >
+            <Coins className="w-4 h-4" />
+          </div>
+          <span>Plans</span>
         </button>
 
         {isAdminUser && (
           <button
             onClick={() => setActiveView('telegram_settings')}
-            className={`min-h-[56px] flex flex-col items-center justify-center gap-1 text-[10px] font-medium cursor-pointer ${
+            className={`min-h-[52px] flex flex-col items-center justify-center gap-0.5 text-[11px] cursor-pointer transition-all ${
               activeView === 'telegram_settings'
                 ? 'text-[#D97757] font-bold'
-                : 'text-[#9E978E]'
+                : 'text-[#9E978E] font-medium'
             }`}
           >
-            <Settings className="w-4 h-4" />
-            <span>Node</span>
+            <div
+              className={`px-3.5 py-1 rounded-full transition-all duration-200 ${
+                activeView === 'telegram_settings' ? 'bg-blue-50 scale-105' : ''
+              }`}
+            >
+              <Settings className="w-4 h-4" />
+            </div>
+            <span>Admin</span>
           </button>
         )}
       </nav>

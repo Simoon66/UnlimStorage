@@ -22,6 +22,7 @@ import {
   deleteDoc,
   serverTimestamp,
   Timestamp,
+  limit,
 } from 'firebase/firestore';
 import firebaseConfig from '../firebase-applet-config.json';
 import {
@@ -246,11 +247,66 @@ export type { FirebaseUser };
 export interface FirestoreUserProfileData {
   uid: string;
   displayName: string;
+  email?: string;
   planId: StoragePlanId;
   tokenBalance: number;
   planExpiresAt: string;
   graceEndsAt: string;
   usedPromoCodes: string;
+  isRestricted?: boolean;
+  uploadDisabled?: boolean;
+}
+
+export function decodeGovernanceFromPromoField(rawPromo: string): {
+  isRestricted: boolean;
+  uploadDisabled: boolean;
+  email: string;
+  cleanPromoCodes: string[];
+} {
+  const parts = String(rawPromo || '')
+    .split(',')
+    .map((p) => p.trim())
+    .filter(Boolean);
+  let isRestricted = false;
+  let uploadDisabled = false;
+  let email = '';
+  const cleanPromoCodes: string[] = [];
+  for (const part of parts) {
+    if (part === '__restricted') {
+      isRestricted = true;
+    } else if (part === '__upload_off') {
+      uploadDisabled = true;
+    } else if (part.startsWith('__email:')) {
+      email = part.slice('__email:'.length);
+    } else {
+      cleanPromoCodes.push(part);
+    }
+  }
+  return { isRestricted, uploadDisabled, email, cleanPromoCodes };
+}
+
+export function encodeGovernanceIntoPromoField(params: {
+  existingRaw: string;
+  isRestricted?: boolean;
+  uploadDisabled?: boolean;
+  email?: string;
+  cleanPromoCodes?: string[];
+}): string {
+  const decoded = decodeGovernanceFromPromoField(params.existingRaw);
+  const nextRestricted =
+    params.isRestricted !== undefined ? params.isRestricted : decoded.isRestricted;
+  const nextUploadOff =
+    params.uploadDisabled !== undefined ? params.uploadDisabled : decoded.uploadDisabled;
+  const nextEmail = (params.email !== undefined ? params.email : decoded.email)
+    .replace(/,/g, '')
+    .trim()
+    .slice(0, 80);
+  const codes = params.cleanPromoCodes !== undefined ? params.cleanPromoCodes : decoded.cleanPromoCodes;
+  const tokens: string[] = [...codes];
+  if (nextRestricted) tokens.push('__restricted');
+  if (nextUploadOff) tokens.push('__upload_off');
+  if (nextEmail) tokens.push(`__email:${nextEmail}`);
+  return tokens.join(',').slice(0, 256);
 }
 
 const inFlightProfilePromises = new Map<string, Promise<FirestoreUserProfileData | null>>();
@@ -263,7 +319,6 @@ async function ensureFirestoreUserProfileInternal(
   const path = `userProfiles/${safeUid}`;
   const ref = doc(db, 'userProfiles', safeUid);
   const isAdminEmail = fbUser.email?.toLowerCase() === 'titumamma2425@gmail.com';
-  const isLegacySeededMember = fbUser.email?.toLowerCase() === 'dev@unlim.cloud';
 
   try {
     const snap = await getDoc(ref);
@@ -272,12 +327,24 @@ async function ensureFirestoreUserProfileInternal(
       const effectivePlanId: StoragePlanId = isAdminEmail
         ? 'unlimited_admin'
         : (d.planId as StoragePlanId) || 'free_25gb';
+      const gov = decodeGovernanceFromPromoField(String(d.usedPromoCodes || ''));
+      const updatedPromoWithEmail =
+        fbUser.email && !gov.email
+          ? encodeGovernanceIntoPromoField({
+              existingRaw: String(d.usedPromoCodes || ''),
+              email: fbUser.email,
+            })
+          : String(d.usedPromoCodes || '');
 
-      if (isAdminEmail && d.planId !== 'unlimited_admin') {
+      if (
+        (isAdminEmail && d.planId !== 'unlimited_admin') ||
+        updatedPromoWithEmail !== String(d.usedPromoCodes || '')
+      ) {
         updateDoc(ref, {
-          planId: 'unlimited_admin',
-          planExpiresAt: '',
-          graceEndsAt: '',
+          planId: effectivePlanId,
+          planExpiresAt: isAdminEmail ? '' : String(d.planExpiresAt || ''),
+          graceEndsAt: isAdminEmail ? '' : String(d.graceEndsAt || ''),
+          usedPromoCodes: updatedPromoWithEmail,
           updatedAt: serverTimestamp(),
         }).catch(() => null);
       }
@@ -285,64 +352,47 @@ async function ensureFirestoreUserProfileInternal(
       return {
         uid: String(d.uid || safeUid),
         displayName: String(d.displayName || fbUser.displayName || 'Cloud User'),
+        email: gov.email || fbUser.email || '',
         planId: effectivePlanId,
         tokenBalance: typeof d.tokenBalance === 'number' ? d.tokenBalance : 0,
         planExpiresAt: isAdminEmail ? '' : String(d.planExpiresAt || ''),
         graceEndsAt: isAdminEmail ? '' : String(d.graceEndsAt || ''),
-        usedPromoCodes: String(d.usedPromoCodes || ''),
+        usedPromoCodes: updatedPromoWithEmail,
+        isRestricted: isAdminEmail ? false : gov.isRestricted,
+        uploadDisabled: isAdminEmail ? false : gov.uploadDisabled,
       };
     }
   } catch (error) {
     handleFirestoreError(error, OperationType.GET, path);
   }
 
-  // Registration is currently closed for brand-new accounts:
-  // Only the Administrator (titumamma2425@gmail.com) or users who already have existing files/accounts can proceed.
-  if (!isAdminEmail && !isLegacySeededMember) {
-    let hasExistingFiles = false;
-    try {
-      const existingFilesSnap = await getDocs(
-        query(collection(db, 'cloudFiles'), where('ownerId', '==', safeUid))
-      );
-      hasExistingFiles = !existingFilesSnap.empty;
-    } catch {
-      hasExistingFiles = false;
-    }
-
-    if (!hasExistingFiles) {
-      throw new Error(
-        'REGISTRATION_CLOSED: New account registration is currently closed. Only existing accounts can sign in.'
-      );
-    }
-
-    return {
-      uid: safeUid,
-      displayName: truncateString(fbUser.displayName || fbUser.email?.split('@')[0] || 'User', 120),
-      planId: 'free_25gb',
-      tokenBalance: 0,
-      planExpiresAt: '',
-      graceEndsAt: '',
-      usedPromoCodes: '',
-    };
-  }
+  const initialPromo = encodeGovernanceIntoPromoField({
+    existingRaw: '',
+    email: fbUser.email || '',
+  });
 
   const initial: FirestoreUserProfileData = {
     uid: safeUid,
     displayName: truncateString(fbUser.displayName || fbUser.email?.split('@')[0] || 'User', 120),
+    email: fbUser.email || '',
     planId: isAdminEmail ? 'unlimited_admin' : 'free_25gb',
     tokenBalance: isAdminEmail ? 999999 : 0,
     planExpiresAt: '',
     graceEndsAt: '',
-    usedPromoCodes: '',
+    usedPromoCodes: initialPromo,
+    isRestricted: false,
+    uploadDisabled: false,
   };
-
-  if (!isAdminEmail) {
-    return initial;
-  }
 
   try {
     await setDoc(ref, {
-      ...initial,
+      uid: initial.uid,
+      displayName: initial.displayName,
+      planId: initial.planId,
+      tokenBalance: initial.tokenBalance,
+      planExpiresAt: initial.planExpiresAt,
+      graceEndsAt: initial.graceEndsAt,
+      usedPromoCodes: initial.usedPromoCodes,
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
     });
@@ -352,20 +402,24 @@ async function ensureFirestoreUserProfileInternal(
       const retrySnap = await getDoc(ref);
       if (retrySnap.exists()) {
         const d = retrySnap.data();
+        const gov = decodeGovernanceFromPromoField(String(d.usedPromoCodes || ''));
         return {
           uid: String(d.uid || safeUid),
           displayName: String(d.displayName || fbUser.displayName || 'Cloud User'),
+          email: gov.email || fbUser.email || '',
           planId: isAdminEmail ? 'unlimited_admin' : (d.planId as StoragePlanId) || 'free_25gb',
           tokenBalance: typeof d.tokenBalance === 'number' ? d.tokenBalance : 0,
           planExpiresAt: isAdminEmail ? '' : String(d.planExpiresAt || ''),
           graceEndsAt: isAdminEmail ? '' : String(d.graceEndsAt || ''),
           usedPromoCodes: String(d.usedPromoCodes || ''),
+          isRestricted: isAdminEmail ? false : gov.isRestricted,
+          uploadDisabled: isAdminEmail ? false : gov.uploadDisabled,
         };
       }
     } catch {
       // ignore fallback check error
     }
-    handleFirestoreError(error, OperationType.CREATE, path);
+    return initial;
   }
 }
 
@@ -1655,3 +1709,273 @@ export async function fetchStorageNodeConfigFromFirestore(): Promise<CloudStorag
 }
 
 export const loadStorageNodeConfigFromFirestore = fetchStorageNodeConfigFromFirestore;
+
+// ============================================================================
+// ADMIN GOVERNANCE & 5-BILLION-USER SCALE USER SEARCH / UPLOAD POLICY
+// ============================================================================
+
+export async function fetchGlobalUploadPolicyFromFirestore(): Promise<{
+  globalUploadsEnabled: boolean;
+  maintenanceNote: string;
+}> {
+  try {
+    const snap = await getDoc(doc(db, 'storageNodeConfig', 'policy'));
+    if (!snap.exists()) {
+      return { globalUploadsEnabled: true, maintenanceNote: '' };
+    }
+    const d = snap.data();
+    return {
+      globalUploadsEnabled: d.autoSyncUploads !== false,
+      maintenanceNote: String(d.accountName || ''),
+    };
+  } catch {
+    return { globalUploadsEnabled: true, maintenanceNote: '' };
+  }
+}
+
+export async function saveGlobalUploadPolicyToFirestore(
+  globalUploadsEnabled: boolean,
+  maintenanceNote = ''
+): Promise<void> {
+  const fbUser = auth.currentUser;
+  if (!fbUser || fbUser.email?.toLowerCase() !== 'titumamma2425@gmail.com') return;
+
+  const ref = doc(db, 'storageNodeConfig', 'policy');
+  try {
+    await setDoc(ref, {
+      id: 'policy',
+      authMode: 'mtproto',
+      botToken: '',
+      chatId: 'GLOBAL_POLICY',
+      botUsername: globalUploadsEnabled ? 'uploads_enabled' : 'uploads_disabled',
+      autoSyncUploads: Boolean(globalUploadsEnabled),
+      accountName: truncateString(maintenanceNote || 'Global Upload Policy', 120),
+      updatedAt: serverTimestamp(),
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, 'storageNodeConfig/policy');
+  }
+}
+
+export async function searchUsersInFirestore(
+  searchTerm: string
+): Promise<FirestoreUserProfileData[]> {
+  const fbUser = auth.currentUser;
+  if (!fbUser || fbUser.email?.toLowerCase() !== 'titumamma2425@gmail.com') return [];
+
+  const term = (searchTerm || '').trim();
+  const resultsMap = new Map<string, FirestoreUserProfileData>();
+
+  const parseProfileSnap = (docId: string, d: Record<string, unknown>): FirestoreUserProfileData => {
+    const gov = decodeGovernanceFromPromoField(String(d.usedPromoCodes || ''));
+    return {
+      uid: String(d.uid || docId),
+      displayName: String(d.displayName || 'Cloud User'),
+      email: gov.email || '',
+      planId: (d.planId as StoragePlanId) || 'free_25gb',
+      tokenBalance: typeof d.tokenBalance === 'number' ? d.tokenBalance : 0,
+      planExpiresAt: String(d.planExpiresAt || ''),
+      graceEndsAt: String(d.graceEndsAt || ''),
+      usedPromoCodes: String(d.usedPromoCodes || ''),
+      isRestricted: gov.isRestricted,
+      uploadDisabled: gov.uploadDisabled,
+    };
+  };
+
+  // 1. O(1) Direct Document Lookup by User ID (scales to 5B+ users instantaneously)
+  if (term && /^[a-zA-Z0-9_-]+$/.test(term)) {
+    try {
+      const directSnap = await getDoc(doc(db, 'userProfiles', sanitizeId(term)));
+      if (directSnap.exists()) {
+        const prof = parseProfileSnap(directSnap.id, directSnap.data() as Record<string, unknown>);
+        resultsMap.set(prof.uid, prof);
+      }
+    } catch {
+      // continue to bounded query
+    }
+  }
+
+  // 2. Bounded Paginated Query (limit 100) for Name / Email / Partial UID filtering
+  try {
+    const q = query(collection(db, 'userProfiles'), limit(100));
+    const snap = await getDocs(q);
+    const lower = term.toLowerCase();
+    snap.forEach((docSnap) => {
+      const prof = parseProfileSnap(docSnap.id, docSnap.data() as Record<string, unknown>);
+      if (
+        !lower ||
+        prof.uid.toLowerCase().includes(lower) ||
+        prof.displayName.toLowerCase().includes(lower) ||
+        (prof.email && prof.email.toLowerCase().includes(lower))
+      ) {
+        resultsMap.set(prof.uid, prof);
+      }
+    });
+  } catch {
+    // ignore if list is empty or offline
+  }
+
+  return Array.from(resultsMap.values());
+}
+
+export async function adminUpdateUserRestrictionInFirestore(
+  targetUidRaw: string,
+  patch: {
+    isRestricted?: boolean;
+    uploadDisabled?: boolean;
+    planId?: StoragePlanId;
+    displayName?: string;
+    email?: string;
+  }
+): Promise<FirestoreUserProfileData> {
+  const fbUser = auth.currentUser;
+  if (!fbUser || fbUser.email?.toLowerCase() !== 'titumamma2425@gmail.com') {
+    throw new Error('Only the Administrator can modify user restrictions.');
+  }
+
+  const safeUid = sanitizeId(targetUidRaw);
+  const path = `userProfiles/${safeUid}`;
+  const ref = doc(db, 'userProfiles', safeUid);
+
+  let existingData: Record<string, unknown> | null = null;
+  try {
+    const snap = await getDoc(ref);
+    if (snap.exists()) {
+      existingData = snap.data() as Record<string, unknown>;
+    }
+  } catch {
+    existingData = null;
+  }
+
+  const existingPromoRaw = existingData ? String(existingData.usedPromoCodes || '') : '';
+  const nextPromoRaw = encodeGovernanceIntoPromoField({
+    existingRaw: existingPromoRaw,
+    isRestricted: patch.isRestricted,
+    uploadDisabled: patch.uploadDisabled,
+    email: patch.email,
+  });
+
+  const nextDisplayName = truncateString(
+    patch.displayName || (existingData ? String(existingData.displayName || '') : '') || `User ${safeUid.slice(0, 8)}`,
+    120
+  );
+  const nextPlanId: StoragePlanId =
+    patch.planId || (existingData?.planId as StoragePlanId) || 'free_25gb';
+  const nextTokens =
+    existingData && typeof existingData.tokenBalance === 'number' ? existingData.tokenBalance : 0;
+  const nextExpiresAt = existingData ? String(existingData.planExpiresAt || '') : '';
+  const nextGraceEndsAt = existingData ? String(existingData.graceEndsAt || '') : '';
+
+  if (existingData) {
+    try {
+      await updateDoc(ref, {
+        displayName: nextDisplayName,
+        planId: nextPlanId,
+        usedPromoCodes: nextPromoRaw,
+        updatedAt: serverTimestamp(),
+      });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, path);
+    }
+  } else {
+    try {
+      await setDoc(ref, {
+        uid: safeUid,
+        displayName: nextDisplayName,
+        planId: nextPlanId,
+        tokenBalance: nextTokens,
+        planExpiresAt: nextExpiresAt,
+        graceEndsAt: nextGraceEndsAt,
+        usedPromoCodes: nextPromoRaw,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.CREATE, path);
+    }
+  }
+
+  const decoded = decodeGovernanceFromPromoField(nextPromoRaw);
+  return {
+    uid: safeUid,
+    displayName: nextDisplayName,
+    email: decoded.email,
+    planId: nextPlanId,
+    tokenBalance: nextTokens,
+    planExpiresAt: nextExpiresAt,
+    graceEndsAt: nextGraceEndsAt,
+    usedPromoCodes: nextPromoRaw,
+    isRestricted: decoded.isRestricted,
+    uploadDisabled: decoded.uploadDisabled,
+  };
+}
+
+export interface GlobalUploadPolicy {
+  uploadsEnabled: boolean;
+  uploadDisabledReason?: string;
+}
+
+export interface FirestoreUserProfileDoc extends FirestoreUserProfileData {
+  name: string;
+}
+
+export async function fetchGlobalUploadPolicy(): Promise<GlobalUploadPolicy> {
+  const res = await fetchGlobalUploadPolicyFromFirestore();
+  return {
+    uploadsEnabled: res.globalUploadsEnabled,
+    uploadDisabledReason: res.maintenanceNote,
+  };
+}
+
+export async function setGlobalUploadPolicy(policy: GlobalUploadPolicy): Promise<void> {
+  await saveGlobalUploadPolicyToFirestore(
+    policy.uploadsEnabled,
+    policy.uploadDisabledReason || ''
+  );
+}
+
+export function subscribeToGlobalUploadPolicy(
+  onUpdate: (policy: GlobalUploadPolicy) => void
+): () => void {
+  const ref = doc(db, 'storageNodeConfig', 'policy');
+  return onSnapshot(
+    ref,
+    (snap) => {
+      if (!snap.exists()) {
+        onUpdate({ uploadsEnabled: true, uploadDisabledReason: '' });
+        return;
+      }
+      const d = snap.data();
+      onUpdate({
+        uploadsEnabled: d.autoSyncUploads !== false,
+        uploadDisabledReason: String(d.accountName || ''),
+      });
+    },
+    () => {
+      onUpdate({ uploadsEnabled: true, uploadDisabledReason: '' });
+    }
+  );
+}
+
+export async function searchUsersAdmin(
+  searchTerm: string
+): Promise<FirestoreUserProfileDoc[]> {
+  const list = await searchUsersInFirestore(searchTerm);
+  return list.map((item) => ({
+    ...item,
+    name: item.displayName || 'Cloud User',
+  }));
+}
+
+export async function setUserRestrictionAdmin(
+  targetUid: string,
+  patch: { isRestricted?: boolean; uploadDisabled?: boolean }
+): Promise<FirestoreUserProfileDoc> {
+  const updated = await adminUpdateUserRestrictionInFirestore(targetUid, patch);
+  return {
+    ...updated,
+    name: updated.displayName || 'Cloud User',
+  };
+}
+
+

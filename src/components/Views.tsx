@@ -49,6 +49,14 @@ import {
   playTransferCompletionChime,
 } from '../utils/offlineAndNotifications';
 import { getWatchPercentage } from '../utils/mediaProgressAndZip';
+import {
+  searchUsersAdmin,
+  setUserRestrictionAdmin,
+  fetchGlobalUploadPolicy,
+  setGlobalUploadPolicy,
+  FirestoreUserProfileDoc,
+  GlobalUploadPolicy,
+} from '../firebase';
 
 // ============================================================================
 // 1. SHARED LINKS VIEW
@@ -87,16 +95,16 @@ export const SharedLinksView: React.FC<SharedLinksViewProps> = ({
   };
 
   return (
-    <div className="space-y-5">
+    <div className="animate-app-view space-y-5">
       <div className="border-b border-[#2C2824] pb-3.5">
         <h1 className="text-lg sm:text-xl font-bold text-[#F2EFE9]">Shared Download Links</h1>
         <p className="text-xs text-[#9E978E] mt-1">
-          Copy your shared links, open the public download page, or adjust speed limits.
+          Copy your shared links, open the public download page, or manage link access.
         </p>
       </div>
 
       {shares.length === 0 ? (
-        <div className="p-8 sm:p-12 bg-[#1C1A17] border border-[#2C2824] text-center space-y-2">
+        <div className="p-8 sm:p-12 rounded-2xl bg-[#1C1A17] border border-[#2C2824] text-center space-y-2">
           <div className="text-base font-bold text-[#F2EFE9]">No Shared Links Yet</div>
           <p className="text-xs text-[#9E978E]">
             Go to &ldquo;My Files&rdquo; and tap &ldquo;Share&rdquo; on any file card to create a
@@ -104,11 +112,11 @@ export const SharedLinksView: React.FC<SharedLinksViewProps> = ({
           </p>
         </div>
       ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3.5 sm:gap-4">
           {shares.map((s) => (
             <div
               key={s.id}
-              className={`p-4 sm:p-5 bg-[#1C1A17] border border-[#2C2824] flex flex-col justify-between gap-4 ${
+              className={`animate-app-card rounded-2xl p-4 sm:p-5 bg-[#1C1A17] border border-[#2C2824] flex flex-col justify-between gap-4 ${
                 !s.active ? 'opacity-60' : ''
               }`}
             >
@@ -165,22 +173,10 @@ export const SharedLinksView: React.FC<SharedLinksViewProps> = ({
                 </div>
 
                 <div className="flex items-center justify-between pt-2.5 border-t border-[#2C2824] text-xs">
-                  <span className="text-[#9E978E]">Speed Limit:</span>
-                  <select
-                    value={s.throttleKbps || ''}
-                    onChange={(e) =>
-                      onUpdateShareThrottle(
-                        s,
-                        e.target.value ? Number(e.target.value) : null
-                      )
-                    }
-                    className="min-h-[40px] bg-[#141311] border border-[#2C2824] px-3 py-1.5 text-xs text-[#F2EFE9] focus:outline-none focus:border-[#D97757]"
-                  >
-                    <option value="">Full Speed</option>
-                    <option value="2048">2 MB/s</option>
-                    <option value="1024">1 MB/s</option>
-                    <option value="512">512 KB/s</option>
-                  </select>
+                  <span className="text-[#9E978E]">Transfer Speed:</span>
+                  <span className="font-semibold text-[#2E9E6B]">
+                    Unlimited Full Speed
+                  </span>
                 </div>
               </div>
 
@@ -384,9 +380,9 @@ export const StoragePricingView: React.FC<StoragePricingViewProps> = ({
     activePlan === 'unlimited_admin';
 
   return (
-    <div className="space-y-6">
+    <div className="animate-app-view space-y-5 sm:space-y-6">
       {/* Header & Wallet Bar */}
-      <div className="p-4 sm:p-5 bg-[#1C1A17] border border-[#2C2824] flex flex-col md:flex-row md:items-center justify-between gap-4">
+      <div className="p-4 sm:p-5 rounded-2xl bg-[#1C1A17] border border-[#2C2824] flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div className="space-y-1">
           <h1 className="text-lg sm:text-xl font-bold text-[#F2EFE9]">
             Storage Plans & Token Wallet
@@ -535,7 +531,7 @@ export const StoragePricingView: React.FC<StoragePricingViewProps> = ({
           return (
             <div
               key={plan.id}
-              className={`p-5 sm:p-6 bg-[#1C1A17] border flex flex-col justify-between gap-6 ${
+              className={`animate-app-card rounded-2xl p-5 sm:p-6 bg-[#1C1A17] border flex flex-col justify-between gap-6 ${
                 isCurrent ? 'border-[#D97757]' : 'border-[#2C2824]'
               }`}
             >
@@ -899,21 +895,350 @@ export const TelegramStorageView: React.FC<TelegramStorageViewProps> = ({
     }
   };
 
+  // ============================================================================
+  // 5B-SCALE ADMIN USER GOVERNANCE & GLOBAL UPLOAD MASTER SWITCH STATE
+  // ============================================================================
+  const [globalPolicy, setGlobalPolicy] = useState<GlobalUploadPolicy>({
+    uploadsEnabled: true,
+    uploadDisabledReason: '',
+  });
+  const [policyBusy, setPolicyBusy] = useState(false);
+  const [policyNotice, setPolicyNotice] = useState<string | null>(null);
+
+  const [userSearchQuery, setUserSearchQuery] = useState('');
+  const [searchingUsers, setSearchingUsers] = useState(false);
+  const [searchedUsers, setSearchedUsers] = useState<FirestoreUserProfileDoc[]>([]);
+  const [directRestrictUid, setDirectRestrictUid] = useState('');
+  const [userAdminNotice, setUserAdminNotice] = useState<string | null>(null);
+  const [updatingUid, setUpdatingUid] = useState<string | null>(null);
+
+  const loadAdminGovernanceState = React.useCallback(async () => {
+    setSearchingUsers(true);
+    try {
+      const [pol, initialUsers] = await Promise.all([
+        fetchGlobalUploadPolicy(),
+        searchUsersAdmin(''),
+      ]);
+      setGlobalPolicy(pol);
+      setSearchedUsers(initialUsers);
+    } catch {
+      // ignore
+    } finally {
+      setSearchingUsers(false);
+    }
+  }, []);
+
+  React.useEffect(() => {
+    void loadAdminGovernanceState();
+  }, [loadAdminGovernanceState]);
+
+  const handleToggleGlobalUploads = async (enabled: boolean) => {
+    setPolicyBusy(true);
+    setPolicyNotice(null);
+    try {
+      await setGlobalUploadPolicy({
+        uploadsEnabled: enabled,
+        uploadDisabledReason: enabled
+          ? ''
+          : globalPolicy.uploadDisabledReason ||
+            'File uploads are temporarily paused by the administrator.',
+      });
+      setGlobalPolicy((prev) => ({ ...prev, uploadsEnabled: enabled }));
+      setPolicyNotice(
+        enabled
+          ? 'Global file uploads are now ENABLED for all users.'
+          : 'Global file uploads are now PAUSED across the platform.'
+      );
+    } catch (err: unknown) {
+      setPolicyNotice(
+        err instanceof Error ? err.message : 'Failed to update global upload policy'
+      );
+    } finally {
+      setPolicyBusy(false);
+    }
+  };
+
+  const handleRunUserSearch = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    setSearchingUsers(true);
+    setUserAdminNotice(null);
+    try {
+      const results = await searchUsersAdmin(userSearchQuery);
+      setSearchedUsers(results);
+    } catch {
+      // ignore
+    } finally {
+      setSearchingUsers(false);
+    }
+  };
+
+  const handleToggleUserFlag = async (
+    targetUid: string,
+    patch: { isRestricted?: boolean; uploadDisabled?: boolean }
+  ) => {
+    if (!targetUid.trim()) return;
+    setUpdatingUid(targetUid);
+    setUserAdminNotice(null);
+    try {
+      await setUserRestrictionAdmin(targetUid.trim(), patch);
+      setSearchedUsers((prev) => {
+        const exists = prev.some((u) => u.uid === targetUid.trim());
+        if (!exists) return prev;
+        return prev.map((u) =>
+          u.uid === targetUid.trim() ? { ...u, ...patch } : u
+        );
+      });
+      setUserAdminNotice(`Updated permissions for User ID: ${targetUid.trim()}`);
+      if (!searchedUsers.some((u) => u.uid === targetUid.trim())) {
+        const refreshed = await searchUsersAdmin(targetUid.trim());
+        setSearchedUsers(refreshed);
+      }
+    } catch (err: unknown) {
+      setUserAdminNotice(
+        err instanceof Error ? err.message : 'Could not update user restriction'
+      );
+    } finally {
+      setUpdatingUid(null);
+    }
+  };
+
   return (
-    <div className="max-w-2xl space-y-6">
+    <div className="animate-app-view max-w-4xl space-y-5 sm:space-y-6">
       <div className="border-b border-[#2C2824] pb-4">
         <div className="text-[11px] font-bold uppercase tracking-wider text-[#D97757]">
-          Administrator Only — Main Account Private Channel Vault
+          Administrator Control Center — 5B-Scale Governance &amp; Private Channel Vault
         </div>
         <h1 className="text-lg sm:text-xl font-bold text-[#F2EFE9] mt-0.5">
-          Main Telegram Account Storage Vault (2 GB MTProto &amp; Original Quality)
+          Admin Governance, User Restrictions &amp; Main Account Vault
         </h1>
         <p className="text-xs text-[#9E978E] mt-1">
-          Store all uploaded files directly through your{' '}
-          <strong className="text-[#F2EFE9]">Main Telegram Account</strong> into your{' '}
-          <strong className="text-[#F2EFE9]">Private Telegram Channel</strong> as uncompressed
-          documents (100% original video &amp; image quality, up to 2 GB per file, zero bot usage).
+          Control global file uploads, search and restrict any User ID or account data at 5-billion-user scale, and manage your Main Telegram Account 2 GB lossless storage vault.
         </p>
+      </div>
+
+      {/* ====================================================================
+          SECTION 1: ADMIN PLATFORM GOVERNANCE (UPLOAD SWITCH + USER SEARCH)
+      ==================================================================== */}
+      <div className="p-5 bg-[#1C1A17] border border-[#2C2824] space-y-5">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-[#2C2824] pb-4">
+          <div className="space-y-1">
+            <div className="text-sm font-bold text-[#F2EFE9] flex items-center gap-2">
+              <ShieldCheck className="w-4 h-4 text-[#D97757]" />
+              <span>Global File Upload Master Switch</span>
+            </div>
+            <p className="text-xs text-[#9E978E]">
+              Turn file uploads ON or OFF across the entire platform. When turned OFF, regular users cannot upload new files until re-enabled.
+            </p>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              disabled={policyBusy}
+              onClick={() => void handleToggleGlobalUploads(true)}
+              className={`min-h-[38px] px-4 py-1.5 text-xs font-bold border cursor-pointer ${
+                globalPolicy.uploadsEnabled
+                  ? 'bg-[#2E9E6B] border-[#2E9E6B] text-white'
+                  : 'bg-[#141311] border-[#2C2824] text-[#9E978E]'
+              }`}
+            >
+              Uploads ON
+            </button>
+            <button
+              type="button"
+              disabled={policyBusy}
+              onClick={() => void handleToggleGlobalUploads(false)}
+              className={`min-h-[38px] px-4 py-1.5 text-xs font-bold border cursor-pointer ${
+                !globalPolicy.uploadsEnabled
+                  ? 'bg-[#D94848] border-[#D94848] text-white'
+                  : 'bg-[#141311] border-[#2C2824] text-[#9E978E]'
+              }`}
+            >
+              Uploads OFF
+            </button>
+          </div>
+        </div>
+
+        {policyNotice && (
+          <div className="p-3 bg-[#141311] border border-[#2C2824] text-xs font-semibold text-[#D97757]">
+            {policyNotice}
+          </div>
+        )}
+
+        {/* User Search Bar + O(1) Direct User ID Restriction */}
+        <div className="space-y-3">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+            <div>
+              <div className="text-sm font-bold text-[#F2EFE9]">
+                User Search &amp; Account / Data Restriction (5B-User Indexed Lookup)
+              </div>
+              <div className="text-xs text-[#9E978E]">
+                Search by User ID, email, or name — or paste any User ID directly to restrict data access or disable uploads.
+              </div>
+            </div>
+          </div>
+
+          <form onSubmit={handleRunUserSearch} className="flex flex-col sm:flex-row gap-2">
+            <div className="relative flex-1">
+              <Search className="w-4 h-4 text-[#9E978E] absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+              <input
+                type="text"
+                value={userSearchQuery}
+                onChange={(e) => setUserSearchQuery(e.target.value)}
+                placeholder="Search by User ID (UID), email address, or display name..."
+                className="w-full min-h-[42px] bg-[#141311] border border-[#2C2824] pl-10 pr-9 py-2 text-xs text-[#F2EFE9] focus:outline-none focus:border-[#D97757]"
+              />
+              {userSearchQuery && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setUserSearchQuery('');
+                    void searchUsersAdmin('').then(setSearchedUsers);
+                  }}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-[#9E978E] hover:text-[#F2EFE9] cursor-pointer"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              )}
+            </div>
+            <button
+              type="submit"
+              disabled={searchingUsers}
+              className="min-h-[42px] px-5 py-2 text-xs font-bold bg-[#D97757] text-[#141311] hover:bg-[#E08568] flex items-center justify-center gap-1.5 cursor-pointer shrink-0"
+            >
+              <Search className="w-3.5 h-3.5" />
+              <span>{searchingUsers ? 'Searching...' : 'Search Users'}</span>
+            </button>
+          </form>
+
+          {/* Direct User ID Quick Restrict Bar */}
+          <div className="p-3 bg-[#141311] border border-[#2C2824] flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+            <input
+              type="text"
+              value={directRestrictUid}
+              onChange={(e) => setDirectRestrictUid(e.target.value)}
+              placeholder="Direct User ID action (paste any User ID)..."
+              className="flex-1 min-h-[38px] bg-[#1C1A17] border border-[#2C2824] px-3 py-1.5 text-xs font-mono text-[#F2EFE9]"
+            />
+            <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+              <button
+                type="button"
+                disabled={!directRestrictUid.trim() || updatingUid === directRestrictUid.trim()}
+                onClick={() =>
+                  void handleToggleUserFlag(directRestrictUid.trim(), { isRestricted: true })
+                }
+                className="min-h-[38px] px-3 py-1.5 text-xs font-bold bg-[#D94848] text-white cursor-pointer disabled:opacity-50"
+              >
+                Restrict User ID
+              </button>
+              <button
+                type="button"
+                disabled={!directRestrictUid.trim() || updatingUid === directRestrictUid.trim()}
+                onClick={() =>
+                  void handleToggleUserFlag(directRestrictUid.trim(), {
+                    isRestricted: false,
+                    uploadDisabled: false,
+                  })
+                }
+                className="min-h-[38px] px-3 py-1.5 text-xs font-semibold bg-[#24211D] border border-[#2C2824] text-[#F2EFE9] cursor-pointer disabled:opacity-50"
+              >
+                Unrestrict User ID
+              </button>
+            </div>
+          </div>
+
+          {userAdminNotice && (
+            <div className="text-xs font-semibold text-[#2E9E6B]">{userAdminNotice}</div>
+          )}
+
+          {/* User Directory Results Table */}
+          <div className="border border-[#2C2824] bg-[#141311] divide-y divide-[#2C2824] max-h-80 overflow-y-auto">
+            {searchedUsers.length === 0 ? (
+              <div className="p-6 text-center text-xs text-[#9E978E]">
+                {searchingUsers
+                  ? 'Searching user profiles...'
+                  : 'No matching user profiles found.'}
+              </div>
+            ) : (
+              searchedUsers.map((u) => {
+                const isTargetAdmin = u.email?.toLowerCase() === 'titumamma2425@gmail.com';
+                return (
+                  <div
+                    key={u.uid}
+                    className="p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs"
+                  >
+                    <div className="min-w-0 space-y-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="font-bold text-[#F2EFE9] truncate">
+                          {u.name || 'User'}
+                        </span>
+                        <span className="text-[#9E978E] truncate">{u.email}</span>
+                        {isTargetAdmin && (
+                          <span className="px-2 py-0.5 text-[10px] font-bold bg-[#24211D] border border-[#D97757] text-[#D97757]">
+                            ADMIN
+                          </span>
+                        )}
+                        {u.isRestricted && (
+                          <span className="px-2 py-0.5 text-[10px] font-bold bg-[#D94848] text-white">
+                            RESTRICTED
+                          </span>
+                        )}
+                        {u.uploadDisabled && !u.isRestricted && (
+                          <span className="px-2 py-0.5 text-[10px] font-bold bg-[#D99B26] text-white">
+                            UPLOADS OFF
+                          </span>
+                        )}
+                      </div>
+                      <div className="text-[11px] font-mono text-[#9E978E] flex flex-wrap items-center gap-2">
+                        <span>UID: {u.uid}</span>
+                        <span>·</span>
+                        <span>Plan: {u.planId}</span>
+                        <span>·</span>
+                        <span>Tokens: {(u.tokenBalance || 0).toLocaleString()}</span>
+                      </div>
+                    </div>
+
+                    {!isTargetAdmin && (
+                      <div className="flex flex-wrap items-center gap-2 shrink-0">
+                        <button
+                          type="button"
+                          disabled={updatingUid === u.uid}
+                          onClick={() =>
+                            void handleToggleUserFlag(u.uid, {
+                              uploadDisabled: !u.uploadDisabled,
+                            })
+                          }
+                          className={`min-h-[34px] px-3 py-1 text-xs font-semibold border cursor-pointer ${
+                            u.uploadDisabled
+                              ? 'bg-[#D99B26] border-[#D99B26] text-white'
+                              : 'bg-[#1C1A17] border-[#2C2824] text-[#F2EFE9]'
+                          }`}
+                        >
+                          {u.uploadDisabled ? 'Enable Upload' : 'Block Upload'}
+                        </button>
+                        <button
+                          type="button"
+                          disabled={updatingUid === u.uid}
+                          onClick={() =>
+                            void handleToggleUserFlag(u.uid, {
+                              isRestricted: !u.isRestricted,
+                            })
+                          }
+                          className={`min-h-[34px] px-3 py-1 text-xs font-bold border cursor-pointer ${
+                            u.isRestricted
+                              ? 'bg-[#2E9E6B] border-[#2E9E6B] text-white'
+                              : 'bg-[#D94848] border-[#D94848] text-white'
+                          }`}
+                        >
+                          {u.isRestricted ? 'Unrestrict Data' : 'Restrict User & Data'}
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                );
+              })
+            )}
+          </div>
+        </div>
       </div>
 
       {/* Active Connection Status Card */}
@@ -1411,29 +1736,29 @@ export const MediaGalleryView: React.FC<MediaGalleryViewProps> = ({
   const offlineCount = files.filter((f) => !f.trashed && Boolean(offlineMap[f.id])).length;
 
   return (
-    <div className="space-y-6">
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-[#2C2824] pb-4">
+    <div className="animate-app-view space-y-4 sm:space-y-5">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 sm:gap-4 border-b border-[#2C2824] pb-3.5">
         <div>
-          <h1 className="text-xl font-bold tracking-tight">
-            Media Gallery &amp; Offline Vault
+          <h1 className="text-lg sm:text-xl font-bold tracking-tight">
+            Media Gallery
           </h1>
-          <p className="text-sm text-[#9E978E] mt-1">
-            Search and stream all your original-quality videos, photos, audio, and offline-saved files.
+          <p className="text-xs sm:text-sm text-[#9E978E] mt-0.5">
+            Search and stream all your original-quality videos, photos, and audio files.
           </p>
         </div>
         <div className="flex items-center gap-2 text-xs text-[#9E978E] tabular-nums">
           <span>{videoCount} Videos</span>
           <span>·</span>
           <span>{imageCount} Photos</span>
-          <span>·</span>
-          <span className="text-[#2E9E6B] font-semibold">
-            {offlineCount} Offline Ready
+          <span className="md:hidden">·</span>
+          <span className="md:hidden text-[#2E9E6B] font-semibold">
+            {offlineCount} Offline
           </span>
         </div>
       </div>
 
       {/* Gallery Search Bar + Segmented Filter Controls */}
-      <div className="flex flex-col md:flex-row gap-3">
+      <div className="flex flex-col md:flex-row gap-2.5 sm:gap-3">
         <div className="relative flex-1">
           <Search className="w-4 h-4 text-[#9E978E] absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
           <input
@@ -1441,7 +1766,7 @@ export const MediaGalleryView: React.FC<MediaGalleryViewProps> = ({
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             placeholder="Search gallery by video/photo name, folder, or label..."
-            className="w-full min-h-[44px] bg-[#1C1A17] border border-[#2C2824] pl-10 pr-9 py-2.5 text-sm text-[#F2EFE9] placeholder-[#9E978E] focus:outline-none focus:border-[#D97757]"
+            className="w-full min-h-[44px] rounded-2xl bg-[#1C1A17] border border-[#2C2824] pl-10 pr-9 py-2.5 text-xs sm:text-sm text-[#F2EFE9] placeholder-[#9E978E] focus:outline-none focus:border-[#D97757]"
           />
           {searchQuery && (
             <button
@@ -1455,23 +1780,23 @@ export const MediaGalleryView: React.FC<MediaGalleryViewProps> = ({
           )}
         </div>
 
-        <div className="flex items-center gap-1 bg-[#1C1A17] border border-[#2C2824] p-1 overflow-x-auto">
+        <div className="no-scrollbar flex items-center gap-1.5 rounded-2xl bg-[#1C1A17] border border-[#2C2824] p-1 overflow-x-auto">
           {(
             [
-              { id: 'all', label: `All Media (${videoCount + imageCount + audioCount})` },
-              { id: 'video', label: `Videos (${videoCount})` },
-              { id: 'image', label: `Photos (${imageCount})` },
-              { id: 'audio', label: `Audio (${audioCount})` },
-              { id: 'offline', label: `Offline (${offlineCount})` },
+              { id: 'all', label: `All (${videoCount + imageCount + audioCount})`, mobileOnly: false },
+              { id: 'video', label: `Videos (${videoCount})`, mobileOnly: false },
+              { id: 'image', label: `Photos (${imageCount})`, mobileOnly: false },
+              { id: 'audio', label: `Audio (${audioCount})`, mobileOnly: false },
+              { id: 'offline', label: `Offline (${offlineCount})`, mobileOnly: true },
             ] as const
           ).map((tab) => (
             <button
               key={tab.id}
               type="button"
               onClick={() => setMediaFilter(tab.id)}
-              className={`min-h-[36px] px-3 py-1.5 text-xs font-semibold whitespace-nowrap cursor-pointer transition-colors ${
+              className={`${tab.mobileOnly ? 'md:hidden ' : ''}min-h-[34px] rounded-xl px-3 py-1.5 text-xs font-semibold whitespace-nowrap cursor-pointer transition-all ${
                 mediaFilter === tab.id
-                  ? 'bg-[#D97757] text-[#141311]'
+                  ? 'bg-[#D97757] text-[#141311] shadow-2xs'
                   : 'text-[#9E978E] hover:text-[#F2EFE9]'
               }`}
             >
@@ -1482,7 +1807,7 @@ export const MediaGalleryView: React.FC<MediaGalleryViewProps> = ({
       </div>
 
       {mediaFiles.length === 0 ? (
-        <div className="p-10 bg-[#1C1A17] border border-[#2C2824] text-center space-y-2">
+        <div className="p-10 rounded-2xl bg-[#1C1A17] border border-[#2C2824] text-center space-y-2">
           <div className="text-base font-bold text-[#F2EFE9]">
             {searchQuery
               ? `No gallery items match "${searchQuery}"`
@@ -1492,12 +1817,12 @@ export const MediaGalleryView: React.FC<MediaGalleryViewProps> = ({
           </div>
           <p className="text-xs text-[#9E978E] max-w-md mx-auto">
             {mediaFilter === 'offline'
-              ? 'Tap "Save Offline" on any file in My Files or Gallery to store it on your device for instant offline playback.'
+              ? 'Select any file in My Files and tap "Save Offline" to store it on your device for instant offline playback.'
               : 'Upload videos, photos, or audio in 100% original quality to browse and stream them here.'}
           </p>
         </div>
       ) : (
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3.5 sm:gap-4">
           {mediaFiles.map((file) => {
             const isVid = isVideoFile(file);
             const isImg = isImageFile(file);
@@ -1522,14 +1847,12 @@ export const MediaGalleryView: React.FC<MediaGalleryViewProps> = ({
             return (
               <div
                 key={file.id}
-                className="bg-[#1C1A17] border border-[#2C2824] hover:border-[#D97757]/70 flex flex-col justify-between overflow-hidden transition-colors"
+                onClick={() => onInspectFile(file)}
+                className="animate-app-card rounded-2xl bg-[#1C1A17] border border-[#2C2824] hover:border-[#D97757]/70 flex flex-col justify-between overflow-hidden cursor-pointer group"
               >
                 {/* Visual Media Preview Area */}
                 <div>
-                  <div
-                    onClick={() => onInspectFile(file)}
-                    className="relative h-44 bg-[#141311] border-b border-[#2C2824] flex items-center justify-center overflow-hidden cursor-pointer group"
-                  >
+                  <div className="relative h-44 bg-[#141311] border-b border-[#2C2824] flex items-center justify-center overflow-hidden">
                     {imgSrc ? (
                       <img
                         src={imgSrc}
@@ -1539,11 +1862,11 @@ export const MediaGalleryView: React.FC<MediaGalleryViewProps> = ({
                       />
                     ) : isVid ? (
                       <div className="flex flex-col items-center gap-2 text-[#9E978E] group-hover:text-[#D97757] transition-colors">
-                        <div className="w-12 h-12 bg-[#1C1A17] border border-[#D97757] flex items-center justify-center">
+                        <div className="w-12 h-12 rounded-xl bg-[#1C1A17] border border-[#D97757] flex items-center justify-center">
                           <Play className="w-5 h-5 text-[#D97757] fill-current ml-0.5" />
                         </div>
                         <span className="text-[11px] font-semibold text-[#F2EFE9]">
-                          Tap to Stream Original Video
+                          Tap to Preview Video
                         </span>
                       </div>
                     ) : (
@@ -1551,13 +1874,10 @@ export const MediaGalleryView: React.FC<MediaGalleryViewProps> = ({
                     )}
 
                     {/* Top-right status indicators */}
-                    <div className="absolute top-2.5 right-2.5 flex items-center gap-1.5 bg-[#141311]/90 border border-[#2C2824] px-2 py-1 text-[11px] text-[#F2EFE9] tabular-nums">
+                    <div className="absolute top-2.5 right-2.5 flex items-center gap-1.5 rounded-lg bg-[#141311]/90 border border-[#2C2824] px-2 py-1 text-[11px] text-[#F2EFE9] tabular-nums">
                       <span>{formatBytes(file.sizeBytes)}</span>
                       {isOffline && (
-                        <>
-                          <span>·</span>
-                          <span className="text-[#2E9E6B] font-bold">Offline</span>
-                        </>
+                        <span className="md:hidden text-[#2E9E6B] font-bold">· Offline</span>
                       )}
                     </div>
 
@@ -1571,16 +1891,12 @@ export const MediaGalleryView: React.FC<MediaGalleryViewProps> = ({
                     )}
                   </div>
 
-                  <div className="p-4 space-y-1.5">
-                    <button
-                      type="button"
-                      onClick={() => onInspectFile(file)}
-                      className="text-sm font-bold text-[#F2EFE9] hover:text-[#D97757] text-left line-clamp-1 break-all cursor-pointer"
-                    >
+                  <div className="p-3.5 space-y-1">
+                    <div className="text-sm font-bold text-[#F2EFE9] group-hover:text-[#D97757] text-left line-clamp-1 break-all transition-colors">
                       {file.name}
-                    </button>
+                    </div>
                     <div className="flex flex-wrap items-center gap-1.5 text-xs text-[#9E978E] tabular-nums">
-                      <span>Folder: {folderName}</span>
+                      <span>{folderName}</span>
                       <span>·</span>
                       <span>{formatShortDate(file.updatedAt)}</span>
                       {watchPct !== null && (
@@ -1593,69 +1909,6 @@ export const MediaGalleryView: React.FC<MediaGalleryViewProps> = ({
                       )}
                     </div>
                   </div>
-                </div>
-
-                {/* Action Bar: Stream/Preview, Copy to Folder, Save Offline, Share */}
-                <div className="p-3 pt-0 grid grid-cols-4 gap-1.5">
-                  <button
-                    type="button"
-                    onClick={() => onInspectFile(file)}
-                    className="min-h-[38px] px-2 py-1.5 text-xs font-bold bg-[#D97757] text-[#141311] hover:bg-[#E08568] flex items-center justify-center gap-1 cursor-pointer"
-                    title="Stream or Preview"
-                  >
-                    <Eye className="w-3.5 h-3.5" />
-                    <span>Open</span>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => onCopyFile(file)}
-                    className="min-h-[38px] px-2 py-1.5 text-xs font-semibold bg-[#24211D] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center justify-center gap-1 cursor-pointer"
-                    title="Copy to Folder"
-                  >
-                    <Copy className="w-3.5 h-3.5 text-[#D97757]" />
-                    <span>Copy</span>
-                  </button>
-
-                  <button
-                    type="button"
-                    disabled={isSavingThisOffline}
-                    onClick={() => onToggleOffline(file)}
-                    className={`min-h-[38px] px-2 py-1.5 text-xs font-semibold border flex items-center justify-center gap-1 cursor-pointer ${
-                      isOffline
-                        ? 'bg-[#24211D] border-[#2E9E6B] text-[#2E9E6B]'
-                        : 'bg-[#24211D] border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9]'
-                    }`}
-                    title={
-                      isOffline
-                        ? 'Saved in local device storage for offline use (tap to remove)'
-                        : 'Save to local device storage for offline use'
-                    }
-                  >
-                    {isSavingThisOffline ? (
-                      <span>{offlineProgressPct}%</span>
-                    ) : isOffline ? (
-                      <>
-                        <Check className="w-3.5 h-3.5 text-[#2E9E6B]" />
-                        <span>Offline</span>
-                      </>
-                    ) : (
-                      <>
-                        <Smartphone className="w-3.5 h-3.5 text-[#D97757]" />
-                        <span>Offline</span>
-                      </>
-                    )}
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => onShareFile(file)}
-                    className="min-h-[38px] px-2 py-1.5 text-xs font-semibold bg-[#24211D] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center justify-center gap-1 cursor-pointer"
-                    title="Share File"
-                  >
-                    <Link2 className="w-3.5 h-3.5 text-[#D97757]" />
-                    <span>Share</span>
-                  </button>
                 </div>
               </div>
             );
@@ -1724,10 +1977,10 @@ export const NotificationSettingsView: React.FC<NotificationSettingsViewProps> =
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-[#2C2824] pb-4">
         <div>
           <h1 className="text-xl font-bold tracking-tight">
-            Notifications &amp; Offline Device Storage
+            Transfer Notifications &amp; Alert Settings
           </h1>
           <p className="text-sm text-[#9E978E] mt-1">
-            Configure real-time push or toast notifications for large file transfers and manage files saved offline on your device.
+            Configure real-time push or toast notifications when large file transfers are completed.
           </p>
         </div>
         <button
@@ -1886,13 +2139,13 @@ export const NotificationSettingsView: React.FC<NotificationSettingsViewProps> =
         </div>
       </div>
 
-      {/* Offline Local Device Storage Management Section */}
-      <div className="p-5 sm:p-6 bg-[#1C1A17] border border-[#2C2824] space-y-4">
+      {/* Offline Local Device Storage Management Section (Mobile Only) */}
+      <div className="md:hidden p-5 sm:p-6 bg-[#1C1A17] border border-[#2C2824] space-y-4">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-[#2C2824] pb-3">
           <div>
             <h2 className="text-sm font-bold text-[#F2EFE9] flex items-center gap-2">
               <Smartphone className="w-4 h-4 text-[#2E9E6B]" />
-              <span>Offline Local Storage Vault ({offlineEntries.length} Files · {formatBytes(totalOfflineBytes)})</span>
+              <span>Mobile Offline Storage ({offlineEntries.length} Files · {formatBytes(totalOfflineBytes)})</span>
             </h2>
             <p className="text-xs text-[#9E978E] mt-0.5">
               Files saved offline are stored in your device&apos;s local storage &amp; IndexedDB so you can open, stream, or view them anytime without internet.

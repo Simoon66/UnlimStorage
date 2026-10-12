@@ -18,6 +18,15 @@ export interface User {
   graceEndsAt?: string | null; // ISO date 90 days (3 months) after planExpiresAt
   usedPromoCodes?: string[];
   photoURL?: string;
+  // Admin governance fields
+  isRestricted?: boolean;
+  uploadDisabled?: boolean;
+}
+
+export interface GlobalUploadPolicy {
+  globalUploadsEnabled: boolean;
+  maintenanceNote?: string;
+  updatedAt?: string;
 }
 
 export interface StoragePlanSpec {

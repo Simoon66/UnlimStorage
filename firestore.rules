@@ -59,7 +59,7 @@ service cloud.firestore {
         'createdAt',
         'updatedAt'
       ]) &&
-      data.uid == request.auth.uid &&
+      (data.uid == request.auth.uid || isAdmin()) &&
       data.uid is string && data.uid.size() >= 1 && data.uid.size() <= 128 && data.uid.matches('^[a-zA-Z0-9_\\-]+$') &&
       data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 120 &&
       data.planId is string && data.planId.size() >= 1 && data.planId.size() <= 32 &&
@@ -308,11 +308,11 @@ service cloud.firestore {
       allow get: if isSignedIn() && isValidId(userId) && (request.auth.uid == userId || isAdmin());
       allow list: if isAdmin();
 
-      // Registration closed: only admin can create new userProfiles; existing users already have their document
-      allow create: if isAdmin() &&
+      allow create: if isVerifiedUser() &&
         isValidId(userId) &&
-        request.auth.uid == userId &&
+        (request.auth.uid == userId || isAdmin()) &&
         isValidUserProfile(incoming()) &&
+        incoming().uid == userId &&
         incoming().createdAt == request.time &&
         incoming().updatedAt == request.time;
 

@@ -94,12 +94,9 @@ interface ServerMediaInfoResponse {
 }
 
 const QUALITY_LABELS: Record<string, { title: string; badge?: string }> = {
-  Original: { title: 'Original (100% Lossless)', badge: 'ORIG' },
-  Auto: { title: 'Auto (Original Quality)', badge: 'AUTO' },
-  '1080p': { title: '1080p Full HD', badge: 'FHD' },
-  '720p': { title: '720p HD', badge: 'HD' },
-  '480p': { title: '480p Standard' },
-  '360p': { title: '360p Data Saver' },
+  '1080p': { title: '1080p High', badge: 'HD' },
+  '720p': { title: '720p Standard', badge: 'HD' },
+  '480p': { title: '480p Data Saver' },
 };
 
 const ISO_LANG_LABELS: Record<string, string> = {
@@ -357,16 +354,17 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
   // On-screen HUD feedback for keyboard / skip / volume actions
   const [hudBadgeText, setHudBadgeText] = useState<string | null>(null);
 
-  // Multi-Quality stream selector — defaults to 'Original' for 100% lossless zero-downscale playback
+  // Multi-Quality stream selector — 1080p High is the 100% lossless original stream; adapts smoothly to network speed by default
   const [availableQualities, setAvailableQualities] = useState<string[]>([
-    'Original',
-    'Auto',
     '1080p',
     '720p',
     '480p',
-    '360p',
   ]);
-  const [selectedQuality, setSelectedQuality] = useState<string>('Original');
+  const [selectedQuality, setSelectedQuality] = useState<string>('1080p');
+  const [isAdaptiveQuality, setIsAdaptiveQuality] = useState<boolean>(true);
+  const [networkMbps, setNetworkMbps] = useState<number>(10);
+  const stallCountRef = useRef<number>(0);
+  const lastAbrSwitchMsRef = useRef<number>(0);
   const [showQualityMenu, setShowQualityMenu] = useState(false);
 
   // Multi-Audio tracks (only shown in UI if > 1 track exists on the video)
@@ -457,12 +455,13 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
     }
   }, [fileId, fileName, srcUrl]);
 
-  // Compute the active <video src="..."> URL immediately (no blocking wait before starting playback!)
+  // Compute the active <video src="..."> URL immediately (1080p High maps to Original lossless stream)
   const activeVideoSrc = useMemo(() => {
     if (useServerTranscode && isServerApiSource) {
+      const serverQualityParam = selectedQuality === '1080p' ? 'Original' : selectedQuality;
       const sep = streamEndpoints.streamBaseUrl.includes('?') ? '&' : '?';
       return `${streamEndpoints.streamBaseUrl}${sep}audio=${activeAudioIndex}&quality=${encodeURIComponent(
-        selectedQuality
+        serverQualityParam
       )}&start=${streamStartOffset.toFixed(2)}${hydrationNonce ? `&r=${hydrationNonce}` : ''}`;
     }
     return srcUrl;
@@ -530,10 +529,10 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
               setProbedDuration(info.duration);
             }
             if (info.availableQualities && info.availableQualities.length > 0) {
-              const withAuto = info.availableQualities.includes('Auto')
-                ? info.availableQualities
-                : ['Auto', ...info.availableQualities];
-              setAvailableQualities(withAuto);
+              const cleaned = info.availableQualities.filter(
+                (q) => q === '1080p' || q === '720p' || q === '480p'
+              );
+              setAvailableQualities(cleaned.length > 0 ? cleaned : ['1080p', '720p', '480p']);
             }
             if (info.audioTracks && info.audioTracks.length > 1) {
               setAudioTracks(
@@ -905,26 +904,130 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
     ]
   );
 
+  const applySmoothQualitySwitch = useCallback(
+    (targetQuality: string, isManual: boolean) => {
+      if (isManual) {
+        setIsAdaptiveQuality(false);
+        setShowQualityMenu(false);
+      }
+      if (targetQuality === selectedQuality && useServerTranscode) {
+        if (isManual) {
+          showHudFeedback(`${targetQuality}${targetQuality === '1080p' ? ' (Original HD)' : ''}`);
+        }
+        return;
+      }
+
+      const vid = videoRef.current;
+      const resumeAt = displayedCurrentTime;
+
+      // If switching to 1080p (Original) and we have native playback without transcode, keep native buffer if possible
+      if (targetQuality === '1080p' && !isMkv && activeAudioIndex === 0 && !useServerTranscode) {
+        setSelectedQuality('1080p');
+        if (isManual) {
+          showHudFeedback('1080p High');
+        }
+        return;
+      }
+
+      autoPlayAfterSwitchRef.current = vid ? !vid.paused || isPlaying : true;
+      errorRetryCountRef.current = 0;
+      lastAbrSwitchMsRef.current = Date.now();
+
+      setSelectedQuality(targetQuality);
+      if (isManual) {
+        showHudFeedback(`${targetQuality}`);
+      }
+
+      if (isServerApiSource) {
+        setIsBuffering(true);
+        setUseServerTranscode(true);
+        setStreamStartOffset(resumeAt);
+        setCurrentTime(0);
+        setPendingSeekTime(resumeAt);
+      }
+    },
+    [
+      selectedQuality,
+      useServerTranscode,
+      displayedCurrentTime,
+      isMkv,
+      activeAudioIndex,
+      isPlaying,
+      isServerApiSource,
+      showHudFeedback,
+    ]
+  );
+
   const handleSelectQuality = (quality: string) => {
-    setShowQualityMenu(false);
-    if (quality === selectedQuality && useServerTranscode) return;
-
-    const resumeAt = displayedCurrentTime;
-    const vid = videoRef.current;
-    autoPlayAfterSwitchRef.current = vid ? !vid.paused || isPlaying : true;
-    errorRetryCountRef.current = 0;
-
-    setSelectedQuality(quality);
-    showHudFeedback(`Quality: ${quality}`);
-
-    if (isServerApiSource) {
-      setIsBuffering(true);
-      setUseServerTranscode(true);
-      setStreamStartOffset(resumeAt);
-      setCurrentTime(0);
-      setPendingSeekTime(resumeAt);
-    }
+    applySmoothQualitySwitch(quality, true);
   };
+
+  // YouTube / Facebook-style Smooth Automatic Network-Speed Quality Adaptation
+  useEffect(() => {
+    const navConn = (
+      navigator as Navigator & {
+        connection?: {
+          downlink?: number;
+          effectiveType?: string;
+          addEventListener?: (type: string, listener: () => void) => void;
+          removeEventListener?: (type: string, listener: () => void) => void;
+        };
+      }
+    ).connection;
+
+    const evaluateNetworkSpeed = () => {
+      const dl = typeof navConn?.downlink === 'number' && navConn.downlink > 0 ? navConn.downlink : 10;
+      const eff = navConn?.effectiveType || '4g';
+      const estimatedMbps =
+        eff === '2g' || eff === 'slow-2g'
+          ? Math.min(dl, 1.2)
+          : eff === '3g'
+          ? Math.min(dl, 3.0)
+          : dl;
+      setNetworkMbps(estimatedMbps);
+
+      if (!isAdaptiveQuality || !isServerApiSource) return;
+      const now = Date.now();
+      if (now - lastAbrSwitchMsRef.current < 8000) return;
+
+      const vid = videoRef.current;
+      let bufferedAhead = 10;
+      if (vid && vid.buffered && vid.buffered.length > 0) {
+        const cur = vid.currentTime || 0;
+        for (let i = 0; i < vid.buffered.length; i++) {
+          if (cur >= vid.buffered.start(i) - 0.5 && cur <= vid.buffered.end(i) + 0.5) {
+            bufferedAhead = Math.max(0, vid.buffered.end(i) - cur);
+            break;
+          }
+        }
+      }
+
+      // Step down smoothly if network is slow AND preload buffer is running low
+      if ((estimatedMbps < 1.8 || stallCountRef.current >= 2) && bufferedAhead < 4) {
+        if (selectedQuality !== '480p') {
+          stallCountRef.current = 0;
+          applySmoothQualitySwitch('480p', false);
+        }
+      } else if (estimatedMbps < 3.8 && bufferedAhead < 5) {
+        if (selectedQuality === '1080p') {
+          applySmoothQualitySwitch('720p', false);
+        }
+      } else if (estimatedMbps >= 5.0 && bufferedAhead >= 8 && stallCountRef.current === 0) {
+        // Step up to 1080p High (Original Lossless) when network speed is strong and buffer is healthy
+        if (selectedQuality !== '1080p') {
+          applySmoothQualitySwitch('1080p', false);
+        }
+      }
+    };
+
+    evaluateNetworkSpeed();
+    navConn?.addEventListener?.('change', evaluateNetworkSpeed);
+    const interval = setInterval(evaluateNetworkSpeed, 4000);
+    return () => {
+      navConn?.removeEventListener?.('change', evaluateNetworkSpeed);
+      clearInterval(interval);
+    };
+  }, [isAdaptiveQuality, isServerApiSource, selectedQuality, applySmoothQualitySwitch]);
 
   const handleSelectAudioTrack = (index: number) => {
     setShowAudioMenu(false);
@@ -1292,9 +1395,13 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
             }}
             onWaiting={() => {
               setIsBuffering(true);
+              stallCountRef.current += 1;
             }}
             onPlaying={() => {
               setIsBuffering(false);
+              if (stallCountRef.current > 0) {
+                stallCountRef.current = Math.max(0, stallCountRef.current - 1);
+              }
               pendingSeekTargetRef.current = null;
               setPendingSeekTime(null);
             }}
@@ -1483,7 +1590,7 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
         </div>
 
         {/* ====================================================================
-            MULTI-QUALITY STREAM SELECTOR MENU (Auto, 1080p, 720p, 480p, 360p)
+            VIDEO QUALITY SELECTOR MENU (1080p High [Original], 720p, 480p)
         ==================================================================== */}
         {showQualityMenu && (
           <div
@@ -1491,8 +1598,10 @@ export const YouTubeIframePlayer: React.FC<YouTubeIframePlayerProps> = ({
             className="absolute bottom-14 right-3 sm:right-20 z-30 w-52 max-w-[calc(100vw-24px)] bg-[#141311]/95 border border-[#2C2824] text-[#F2EFE9] shadow-2xl py-1 max-h-60 overflow-y-auto"
           >
             <div className="px-3 py-1.5 text-[11px] font-semibold text-[#9E978E] border-b border-[#2C2824] flex items-center justify-between">
-              <span>Video Quality</span>
-              <span className="text-[10px] font-mono text-[#D97757]">{selectedQuality}</span>
+              <span>Quality</span>
+              <span className="text-[10px] font-mono text-[#D97757]">
+                {networkMbps.toFixed(0)} Mbps
+              </span>
             </div>
             {availableQualities.map((q) => {
               const active = selectedQuality === q;
