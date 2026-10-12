@@ -41,6 +41,10 @@ import {
   RotateCcw,
   KeyRound,
   FolderArchive,
+  Copy,
+  Smartphone,
+  Bell,
+  Check,
 } from 'lucide-react';
 import {
   User,
@@ -100,6 +104,8 @@ import {
   SharedLinksView,
   StoragePricingView,
   TelegramStorageView,
+  MediaGalleryView,
+  NotificationSettingsView,
 } from './components/Views';
 import { PWAInstallButton } from './components/PWAInstallButton';
 import { OfflineIndicator } from './components/OfflineIndicator';
@@ -109,12 +115,28 @@ import {
   downloadFilesAsZip,
   getVideoProgress,
 } from './utils/mediaProgressAndZip';
+import {
+  NotificationPreferences,
+  OfflineSavedFileMeta,
+  getNotificationPreferences,
+  saveNotificationPreferences,
+  shouldNotifyForEvent,
+  playTransferCompletionChime,
+  triggerBrowserPushNotification,
+  getOfflineSavedFilesMap,
+  saveFileOfflineToDevice,
+  removeFileFromOffline,
+  clearAllOfflineFiles,
+  analyzeFolderVisualIndicators,
+} from './utils/offlineAndNotifications';
 
 type ActiveView =
   | 'explorer'
+  | 'gallery'
   | 'trash'
   | 'shares'
   | 'pricing'
+  | 'settings'
   | 'telegram_settings';
 
 function renderFileIcon(file: FileRecord) {
@@ -144,14 +166,16 @@ function renderFileIcon(file: FileRecord) {
 
 interface ToastNotificationCardProps {
   notification: RealtimeNotification;
+  durationSeconds?: number;
   onDismiss: (id: string) => void;
 }
 
 const ToastNotificationCard: React.FC<ToastNotificationCardProps> = ({
   notification,
+  durationSeconds = 4,
   onDismiss,
 }) => {
-  const DURATION_MS = 4000;
+  const DURATION_MS = Math.max(2000, durationSeconds * 1000);
   const [remainingMs, setRemainingMs] = useState(DURATION_MS);
   const [isPaused, setIsPaused] = useState(false);
   const [dragOffsetX, setDragOffsetX] = useState(0);
@@ -322,6 +346,7 @@ export default function App() {
   });
   const [showSearchHistory, setShowSearchHistory] = useState(false);
   const [onlyStarred, setOnlyStarred] = useState(false);
+  const [onlyOffline, setOnlyOffline] = useState(false);
   const [selectedTagFilter, setSelectedTagFilter] = useState<string | null>(null);
   const [selectedFileIds, setSelectedFileIds] = useState<string[]>([]);
   const [creatingFolder, setCreatingFolder] = useState(false);
@@ -330,6 +355,27 @@ export default function App() {
   const [isDraggingOver, setIsDraggingOver] = useState(false);
   const [showMobilePlusMenu, setShowMobilePlusMenu] = useState(false);
   const dragDepthRef = useRef<number>(0);
+
+  // User-Configurable Notification Preferences & Offline Local Storage State
+  const [notificationPrefs, setNotificationPrefs] = useState<NotificationPreferences>(() =>
+    getNotificationPreferences()
+  );
+  const notificationPrefsRef = useRef<NotificationPreferences>(notificationPrefs);
+  useEffect(() => {
+    notificationPrefsRef.current = notificationPrefs;
+  }, [notificationPrefs]);
+
+  const [offlineFilesMap, setOfflineFilesMap] = useState<Record<string, OfflineSavedFileMeta>>(() =>
+    getOfflineSavedFilesMap()
+  );
+  const [savingOfflineFileId, setSavingOfflineFileId] = useState<string | null>(null);
+  const [offlineProgressPct, setOfflineProgressPct] = useState<number>(0);
+
+  useEffect(() => {
+    const syncOffline = () => setOfflineFilesMap(getOfflineSavedFilesMap());
+    window.addEventListener('unlim:offline-files-changed', syncOffline);
+    return () => window.removeEventListener('unlim:offline-files-changed', syncOffline);
+  }, []);
 
   // Explorer Grid / List layout toggle (persisted in localStorage)
   const [explorerLayout, setExplorerLayout] = useState<'grid' | 'list'>(() => {
@@ -365,13 +411,14 @@ export default function App() {
     fileName: string;
   } | null>(null);
 
-  // Modals & Drag-and-Drop Move State
+  // Modals & Drag-and-Drop Move/Copy State
   const [showRemoteModal, setShowRemoteModal] = useState(false);
   const [shareModalFile, setShareModalFile] = useState<FileRecord | null>(null);
   const [shareModalFolder, setShareModalFolder] = useState<FolderRecord | null>(null);
   const [inspectedFile, setInspectedFile] = useState<FileRecord | null>(null);
   const [moveModalFile, setMoveModalFile] = useState<FileRecord | null>(null);
   const [batchMoveFiles, setBatchMoveFiles] = useState<FileRecord[] | null>(null);
+  const [moveModalMode, setMoveModalMode] = useState<'move' | 'copy'>('move');
   const [tagModalFiles, setTagModalFiles] = useState<FileRecord[] | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
   const [showBuyTokensModal, setShowBuyTokensModal] = useState(false);
@@ -403,6 +450,15 @@ export default function App() {
   );
 
   const pushNotification = useCallback((notif: RealtimeNotification) => {
+    const decision = shouldNotifyForEvent(notif, notificationPrefsRef.current);
+    if (decision.playSound) {
+      playTransferCompletionChime();
+    }
+    if (decision.sendPush) {
+      triggerBrowserPushNotification(notif.title, notif.message);
+    }
+    if (!decision.showToast) return;
+
     setNotifications((prev) => {
       if (prev.some((n) => n.id === notif.id)) return prev;
       return [notif, ...prev].slice(0, 3);
@@ -1155,6 +1211,127 @@ export default function App() {
       } to ${destName}.`,
       type: 'completed',
     });
+  };
+
+  const handleCopyFiles = async (
+    targetFilesList: FileRecord[],
+    targetFolderId: string | null
+  ) => {
+    if (targetFilesList.length === 0) return;
+    const res = await apiFetch('/api/files/copy', {
+      method: 'POST',
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({
+        fileIds: targetFilesList.map((f) => f.id),
+        targetFolderId,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data.error || 'Could not copy files');
+    }
+    const copiedList: FileRecord[] = Array.isArray(data.files) ? data.files : [];
+    if (copiedList.length > 0) {
+      setFiles((prev) => [...copiedList, ...prev]);
+      for (const cf of copiedList) {
+        syncCloudFileToFirestore(cf, true).catch(() => null);
+      }
+    }
+    setSelectedFileIds([]);
+    const destName =
+      targetFolderId === null
+        ? 'My Cloud Drive (Root)'
+        : folders.find((fl) => fl.id === targetFolderId)?.name || 'Folder';
+    pushNotification({
+      id: `copy_${Date.now()}`,
+      timestamp: new Date().toISOString(),
+      title: 'File Copy Created',
+      message: `Copied ${copiedList.length || targetFilesList.length} ${
+        targetFilesList.length === 1 ? 'file' : 'files'
+      } to ${destName}.`,
+      type: 'completed',
+    });
+  };
+
+  const handleCopySharedToMyDrive = async (payload: {
+    token: string;
+    targetFolderId: string | null;
+    fileIds?: string[];
+    password?: string;
+  }): Promise<number> => {
+    const res = await apiFetch(
+      `/api/public/share/${encodeURIComponent(payload.token)}/copy`,
+      {
+        method: 'POST',
+        headers: authHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({
+          targetFolderId: payload.targetFolderId,
+          fileIds: payload.fileIds,
+          password: payload.password,
+        }),
+      }
+    );
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data.error || 'Could not save shared file to your drive');
+    }
+    const copiedList: FileRecord[] = Array.isArray(data.files) ? data.files : [];
+    if (copiedList.length > 0) {
+      setFiles((prev) => [...copiedList, ...prev]);
+      for (const cf of copiedList) {
+        syncCloudFileToFirestore(cf, true).catch(() => null);
+      }
+    }
+    return copiedList.length;
+  };
+
+  const handleToggleOfflineFile = async (file: FileRecord) => {
+    if (savingOfflineFileId) return;
+    if (offlineFilesMap[file.id]) {
+      await removeFileFromOffline(file.id);
+      setOfflineFilesMap(getOfflineSavedFilesMap());
+      pushNotification({
+        id: `offline_rm_${Date.now()}`,
+        timestamp: new Date().toISOString(),
+        title: 'Removed from Offline Storage',
+        message: `"${file.name}" was removed from local offline storage.`,
+        type: 'info',
+      });
+      return;
+    }
+
+    setSavingOfflineFileId(file.id);
+    setOfflineProgressPct(5);
+    try {
+      await saveFileOfflineToDevice(file, authHeaders(), (pct) => {
+        setOfflineProgressPct(pct);
+      });
+      setOfflineFilesMap(getOfflineSavedFilesMap());
+      pushNotification({
+        id: `offline_save_${Date.now()}`,
+        timestamp: new Date().toISOString(),
+        title: 'Saved Offline on Device',
+        message: `"${file.name}" (${formatBytes(
+          file.sizeBytes
+        )}) is now saved in your device's local storage for offline use.`,
+        type: 'completed',
+        bytes: file.sizeBytes,
+      });
+    } catch (err: unknown) {
+      pushNotification({
+        id: `offline_err_${Date.now()}`,
+        timestamp: new Date().toISOString(),
+        title: 'Could Not Save Offline',
+        message:
+          err instanceof Error
+            ? err.message
+            : 'Failed to store file in local device storage.',
+        type: 'error',
+      });
+    } finally {
+      setSavingOfflineFileId(null);
+      setOfflineProgressPct(0);
+    }
   };
 
   const handleSaveFileTags = async (
@@ -2390,6 +2567,10 @@ export default function App() {
     return (
       <PublicSharePortal
         token={publicShareToken}
+        isAuthenticated={Boolean(firebaseUser)}
+        userFolders={folders.filter((f) => !f.trashed)}
+        onCopyToMyDrive={handleCopySharedToMyDrive}
+        onCreateFolder={(name) => handleCreateFolderFromModal(name, null)}
         onExitPublicPortal={() => {
           const url = new URL(window.location.href);
           url.searchParams.delete('share');
@@ -2516,9 +2697,13 @@ export default function App() {
       if (!hasMatchingTag) return false;
     }
 
+    if (onlyOffline) {
+      if (!offlineFilesMap[f.id]) return false;
+    }
+
     if (onlyStarred) {
       if (!f.starred) return false;
-    } else if (!searchQuery.trim() && !selectedTagFilter) {
+    } else if (!onlyOffline && !searchQuery.trim() && !selectedTagFilter) {
       if (f.folderId !== currentFolderId) return false;
     }
 
@@ -2717,6 +2902,7 @@ export default function App() {
               e.preventDefault();
               setActiveView('explorer');
               setOnlyStarred(false);
+              setOnlyOffline(false);
             }}
             className={`transition-colors whitespace-nowrap shrink-0 py-1 ${
               activeView === 'explorer'
@@ -2725,6 +2911,20 @@ export default function App() {
             }`}
           >
             My Files ({activeFiles.length})
+          </a>
+          <a
+            href="#gallery"
+            onClick={(e) => {
+              e.preventDefault();
+              setActiveView('gallery');
+            }}
+            className={`transition-colors whitespace-nowrap shrink-0 py-1 ${
+              activeView === 'gallery'
+                ? 'text-[#F2EFE9] border-b-2 border-[#D97757] font-semibold'
+                : 'hover:text-[#F2EFE9]'
+            }`}
+          >
+            Gallery
           </a>
           <a
             href="#trash"
@@ -2771,7 +2971,21 @@ export default function App() {
                 : 'hover:text-[#F2EFE9]'
             }`}
           >
-            Plans & Tokens ({tokenBalance.toLocaleString()} T)
+            Plans ({tokenBalance.toLocaleString()} T)
+          </a>
+          <a
+            href="#settings"
+            onClick={(e) => {
+              e.preventDefault();
+              setActiveView('settings');
+            }}
+            className={`transition-colors whitespace-nowrap shrink-0 py-1 ${
+              activeView === 'settings'
+                ? 'text-[#F2EFE9] border-b-2 border-[#D97757] font-semibold'
+                : 'hover:text-[#F2EFE9]'
+            }`}
+          >
+            Alerts &amp; Offline ({Object.keys(offlineFilesMap).length})
           </a>
           {isAdminUser && (
             <a
@@ -3084,6 +3298,18 @@ export default function App() {
                   <Star className="w-4 h-4 shrink-0" fill={onlyStarred ? '#D97757' : 'none'} />
                   <span>Starred</span>
                 </button>
+
+                <button
+                  onClick={() => setOnlyOffline((prev) => !prev)}
+                  className={`min-h-[44px] flex items-center justify-center gap-1.5 px-3.5 py-2.5 text-xs font-semibold border cursor-pointer ${
+                    onlyOffline
+                      ? 'bg-[#24211D] border-[#2E9E6B] text-[#2E9E6B]'
+                      : 'bg-[#1C1A17] border-[#2C2824] text-[#9E978E] hover:text-[#F2EFE9]'
+                  }`}
+                >
+                  <Smartphone className="w-4 h-4 shrink-0" />
+                  <span>Offline ({Object.keys(offlineFilesMap).length})</span>
+                </button>
               </div>
 
               <div ref={searchContainerRef} className="relative w-full lg:w-80">
@@ -3266,11 +3492,26 @@ export default function App() {
 
                   <button
                     type="button"
-                    onClick={() => setBatchMoveFiles(selectedFilesObjects)}
+                    onClick={() => {
+                      setMoveModalMode('move');
+                      setBatchMoveFiles(selectedFilesObjects);
+                    }}
                     className="min-h-[38px] px-3 py-1.5 text-xs font-semibold bg-[#1C1A17] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center justify-center gap-1.5 cursor-pointer"
                   >
                     <FolderInput className="w-3.5 h-3.5 text-[#D97757]" />
-                    <span>Move to Folder</span>
+                    <span>Move</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMoveModalMode('copy');
+                      setBatchMoveFiles(selectedFilesObjects);
+                    }}
+                    className="min-h-[38px] px-3 py-1.5 text-xs font-semibold bg-[#1C1A17] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center justify-center gap-1.5 cursor-pointer"
+                  >
+                    <Copy className="w-3.5 h-3.5 text-[#D97757]" />
+                    <span>Copy to Folder</span>
                   </button>
 
                   <button
@@ -3440,25 +3681,67 @@ export default function App() {
               </div>
             )}
 
-            {/* Folders Section (Supports Google Drive-style Drag & Drop File onto Folder) */}
-            {!onlyStarred && !selectedTagFilter && !searchQuery.trim() && visibleSubfolders.length > 0 && (
+            {/* Folders Section (Supports Google Drive-style Drag & Drop + Content/Status Visual Indicators) */}
+            {!onlyStarred && !onlyOffline && !selectedTagFilter && !searchQuery.trim() && visibleSubfolders.length > 0 && (
               <div className="space-y-2.5">
                 <div className="flex items-center justify-between">
                   <h2 className="text-xs font-semibold text-[#9E978E] uppercase tracking-wider">
                     Folders
                   </h2>
                   <span className="text-[11px] text-[#9E978E]">
-                    Tip: Drag any file onto a folder · Lock private folders with a PIN or share as a gallery
+                    Visual indicators show folder media type, starred/shared items &amp; PIN status
                   </span>
                 </div>
                 <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
                   {visibleSubfolders.map((folder) => {
-                    const count = activeFiles.filter((f) => f.folderId === folder.id).length;
+                    const summary = analyzeFolderVisualIndicators(
+                      folder,
+                      activeFiles,
+                      shares,
+                      offlineFilesMap
+                    );
+                    const count = summary.fileCount;
                     const isDropTarget = dragOverFolderId === folder.id;
                     const isUnlocked = unlockedFolderIds.includes(folder.id);
                     const existingFolderShare = shares.find(
-                      (s) => s.folderId === folder.id || (s.targetType === 'folder' && s.fileId === folder.id)
+                      (s) =>
+                        s.folderId === folder.id ||
+                        (s.targetType === 'folder' && s.fileId === folder.id)
                     );
+
+                    const renderCategoryBadgeIcon = () => {
+                      if (folder.isPinProtected) {
+                        return (
+                          <Lock
+                            className={`w-3 h-3 ${
+                              isUnlocked ? 'text-[#389E6C]' : 'text-[#D99B26]'
+                            }`}
+                          />
+                        );
+                      }
+                      if (summary.category === 'video') {
+                        return <Film className="w-3 h-3 text-[#D97757]" />;
+                      }
+                      if (summary.category === 'image') {
+                        return <ImageIcon className="w-3 h-3 text-[#2E9E6B]" />;
+                      }
+                      if (summary.category === 'audio') {
+                        return <Music className="w-3 h-3 text-[#D99B26]" />;
+                      }
+                      if (summary.category === 'code') {
+                        return <FileCode className="w-3 h-3 text-[#D97757]" />;
+                      }
+                      if (summary.hasShared) {
+                        return <Link2 className="w-3 h-3 text-[#2E9E6B]" />;
+                      }
+                      if (summary.hasStarred) {
+                        return <Star className="w-3 h-3 text-[#D97757]" fill="#D97757" />;
+                      }
+                      return null;
+                    };
+
+                    const badgeIcon = renderCategoryBadgeIcon();
+
                     return (
                       <div
                         key={folder.id}
@@ -3483,39 +3766,64 @@ export default function App() {
                             if (f) handleMoveFile(f, folder.id).catch(() => null);
                           }
                         }}
-                        className={`min-h-[68px] p-4 bg-[#1C1A17] border transition-colors flex items-center justify-between gap-2 cursor-pointer group ${
+                        className={`min-h-[72px] p-4 bg-[#1C1A17] border transition-colors flex items-center justify-between gap-2 cursor-pointer group ${
                           isDropTarget
                             ? 'border-[#D97757] bg-[#24211D]'
                             : 'border-[#2C2824] hover:border-[#D97757]'
                         }`}
                       >
                         <div className="flex items-center gap-3 min-w-0">
-                          <div className="relative shrink-0">
-                            <Folder className="w-6 h-6 text-[#D97757]" />
-                            {folder.isPinProtected && (
-                              <Lock
-                                className={`w-3 h-3 absolute -bottom-1 -right-1 ${
-                                  isUnlocked ? 'text-[#389E6C]' : 'text-[#D99B26]'
-                                }`}
-                              />
+                          <div className="relative w-10 h-10 bg-[#24211D] border border-[#2C2824] flex items-center justify-center shrink-0">
+                            <Folder
+                              className={`w-5 h-5 ${
+                                summary.category === 'video'
+                                  ? 'text-[#D97757]'
+                                  : summary.category === 'image'
+                                  ? 'text-[#2E9E6B]'
+                                  : summary.category === 'audio'
+                                  ? 'text-[#D99B26]'
+                                  : 'text-[#D97757]'
+                              }`}
+                            />
+                            {badgeIcon && (
+                              <span className="absolute -bottom-1 -right-1 w-4 h-4 bg-[#141311] border border-[#2C2824] flex items-center justify-center">
+                                {badgeIcon}
+                              </span>
                             )}
                           </div>
                           <div className="min-w-0">
                             <div className="text-sm font-bold text-[#F2EFE9] truncate group-hover:text-[#D97757] flex items-center gap-1.5">
                               <span className="truncate">{folder.name}</span>
+                              {summary.hasStarred && (
+                                <Star
+                                  className="w-3 h-3 text-[#D97757] shrink-0"
+                                  fill="#D97757"
+                                  aria-label="Contains starred items"
+                                />
+                              )}
                             </div>
-                            <div className="text-xs text-[#9E978E] flex items-center gap-1.5">
+                            <div className="text-xs text-[#9E978E] flex flex-wrap items-center gap-1 tabular-nums">
                               <span>
                                 {count} {count === 1 ? 'file' : 'files'}
                               </span>
-                              {folder.isPinProtected && (
-                                <span className="text-[10px] text-[#D99B26] font-semibold">
-                                  · {isUnlocked ? 'Unlocked' : 'PIN Locked'}
+                              {count > 0 && (
+                                <span className="text-[11px] text-[#F2EFE9]/80">
+                                  · {summary.categoryLabel}
                                 </span>
                               )}
-                              {existingFolderShare && (
+                              {folder.isPinProtected && (
+                                <span className="text-[10px] text-[#D99B26] font-semibold">
+                                  · {isUnlocked ? 'Unlocked' : 'PIN'}
+                                </span>
+                              )}
+                              {summary.hasShared && (
                                 <span className="text-[10px] text-[#389E6C] font-semibold">
                                   · Shared
+                                </span>
+                              )}
+                              {summary.hasOffline && (
+                                <span className="text-[10px] text-[#2E9E6B] font-semibold">
+                                  · Offline
                                 </span>
                               )}
                             </div>
@@ -3963,17 +4271,38 @@ export default function App() {
                                 <Tag className="w-4 h-4" />
                               </button>
                               {!isLocked && (
-                                <button
-                                  onClick={() => setMoveModalFile(file)}
-                                  className="min-w-[36px] min-h-[44px] flex items-center justify-center text-[#9E978E] hover:text-[#D97757] cursor-pointer"
-                                  title="Move to Folder"
-                                >
-                                  <FolderInput className="w-4 h-4" />
-                                </button>
+                                <>
+                                  <button
+                                    onClick={() => {
+                                      setMoveModalMode('copy');
+                                      setMoveModalFile(file);
+                                    }}
+                                    className="min-w-[34px] min-h-[44px] flex items-center justify-center text-[#9E978E] hover:text-[#D97757] cursor-pointer"
+                                    title="Copy File to Another Folder"
+                                  >
+                                    <Copy className="w-4 h-4" />
+                                  </button>
+                                  <button
+                                    onClick={() => void handleToggleOfflineFile(file)}
+                                    disabled={savingOfflineFileId === file.id}
+                                    className={`min-w-[34px] min-h-[44px] flex items-center justify-center cursor-pointer ${
+                                      offlineFilesMap[file.id]
+                                        ? 'text-[#2E9E6B]'
+                                        : 'text-[#9E978E] hover:text-[#D97757]'
+                                    }`}
+                                    title={
+                                      offlineFilesMap[file.id]
+                                        ? 'Saved Offline on Device (Tap to Remove)'
+                                        : 'Save Offline to Local Device Storage'
+                                    }
+                                  >
+                                    <Smartphone className="w-4 h-4" />
+                                  </button>
+                                </>
                               )}
                               <button
                                 onClick={() => handleToggleStar(file)}
-                                className={`min-w-[36px] min-h-[44px] flex items-center justify-center cursor-pointer ${
+                                className={`min-w-[34px] min-h-[44px] flex items-center justify-center cursor-pointer ${
                                   file.starred
                                     ? 'text-[#D97757]'
                                     : 'text-[#9E978E] hover:text-[#F2EFE9]'
@@ -3994,7 +4323,7 @@ export default function App() {
                                     subtitle: `Size: ${formatBytes(file.sizeBytes)}`,
                                   })
                                 }
-                                className="min-w-[36px] min-h-[44px] flex items-center justify-center text-[#9E978E] hover:text-[#D94848] cursor-pointer"
+                                className="min-w-[34px] min-h-[44px] flex items-center justify-center text-[#9E978E] hover:text-[#D94848] cursor-pointer"
                                 title="Move File to Trash"
                               >
                                 <Trash2 className="w-4 h-4" />
@@ -4018,6 +4347,14 @@ export default function App() {
                               {isLocked ? (
                                 <span className="text-[#D99B26] font-semibold">
                                   Locked (&gt;25 GB Limit)
+                                </span>
+                              ) : offlineFilesMap[file.id] ? (
+                                <span className="text-[#2E9E6B] font-semibold">
+                                  Offline Ready
+                                </span>
+                              ) : savingOfflineFileId === file.id ? (
+                                <span className="text-[#D97757] font-semibold">
+                                  Saving Offline ({offlineProgressPct}%)
                                 </span>
                               ) : (
                                 <span>Encrypted Vault</span>
@@ -4092,18 +4429,35 @@ export default function App() {
                             </button>
                           </div>
                         ) : (
-                          <div className="grid grid-cols-3 gap-2 pt-3 border-t border-[#2C2824]">
+                          <div className="grid grid-cols-4 gap-1.5 pt-3 border-t border-[#2C2824]">
                             <button
-                              onClick={() => setMoveModalFile(file)}
-                              className="min-h-[44px] py-2.5 px-2.5 text-xs font-semibold bg-[#24211D] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center justify-center gap-1.5 cursor-pointer"
+                              onClick={() => {
+                                setMoveModalMode('move');
+                                setMoveModalFile(file);
+                              }}
+                              className="min-h-[42px] py-2 px-2 text-xs font-semibold bg-[#24211D] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center justify-center gap-1 cursor-pointer"
+                              title="Move File"
                             >
                               <FolderInput className="w-3.5 h-3.5 text-[#D97757]" />
                               <span>Move</span>
                             </button>
 
                             <button
+                              onClick={() => {
+                                setMoveModalMode('copy');
+                                setMoveModalFile(file);
+                              }}
+                              className="min-h-[42px] py-2 px-2 text-xs font-semibold bg-[#24211D] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center justify-center gap-1 cursor-pointer"
+                              title="Copy File to Another Folder"
+                            >
+                              <Copy className="w-3.5 h-3.5 text-[#D97757]" />
+                              <span>Copy</span>
+                            </button>
+
+                            <button
                               onClick={() => setShareModalFile(file)}
-                              className="min-h-[44px] py-2.5 px-2.5 text-xs font-semibold bg-[#24211D] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center justify-center gap-1.5 cursor-pointer"
+                              className="min-h-[42px] py-2 px-2 text-xs font-semibold bg-[#24211D] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center justify-center gap-1 cursor-pointer"
+                              title="Share File"
                             >
                               <Link2 className="w-3.5 h-3.5 text-[#D97757]" />
                               <span>{existingShare ? 'Shared' : 'Share'}</span>
@@ -4111,10 +4465,11 @@ export default function App() {
 
                             <button
                               onClick={() => handleDownloadFile(file)}
-                              className="min-h-[44px] py-2.5 px-2.5 text-xs font-bold bg-[#D97757] text-[#141311] hover:bg-[#E08568] flex items-center justify-center gap-1.5 cursor-pointer"
+                              className="min-h-[42px] py-2 px-2 text-xs font-bold bg-[#D97757] text-[#141311] hover:bg-[#E08568] flex items-center justify-center gap-1 cursor-pointer"
+                              title="Download File"
                             >
                               <Download className="w-3.5 h-3.5" />
-                              <span>Download</span>
+                              <span>Save</span>
                             </button>
                           </div>
                         )}
@@ -4314,6 +4669,72 @@ export default function App() {
         )}
 
         {/* ==================================================================
+            VIEW 1C: MEDIA GALLERY WITH SEARCH BAR & OFFLINE VAULT
+        ================================================================== */}
+        {activeView === 'gallery' && (
+          <MediaGalleryView
+            files={files}
+            folders={folders}
+            offlineMap={offlineFilesMap}
+            savingOfflineId={savingOfflineFileId}
+            offlineProgressPct={offlineProgressPct}
+            firebaseUid={firebaseUser?.uid || currentUser?.id || ''}
+            firebaseEmail={firebaseUser?.email || currentUser?.email || ''}
+            onInspectFile={(f) => setInspectedFile(f)}
+            onCopyFile={(f) => {
+              setMoveModalMode('copy');
+              setMoveModalFile(f);
+            }}
+            onShareFile={(f) => setShareModalFile(f)}
+            onDownloadFile={handleDownloadFile}
+            onToggleOffline={(f) => void handleToggleOfflineFile(f)}
+          />
+        )}
+
+        {/* ==================================================================
+            VIEW 3B: NOTIFICATION & OFFLINE STORAGE SETTINGS VIEW
+        ================================================================== */}
+        {activeView === 'settings' && (
+          <NotificationSettingsView
+            prefs={notificationPrefs}
+            offlineMap={offlineFilesMap}
+            onUpdatePrefs={(next) => {
+              setNotificationPrefs(next);
+              saveNotificationPreferences(next);
+            }}
+            onTestToast={() => {
+              pushNotification({
+                id: `test_alert_${Date.now()}`,
+                timestamp: new Date().toISOString(),
+                title: 'Large Transfer Complete (Test)',
+                message: '4K-Master-Archive.mkv (1.4 GB) uploaded at 100% original quality.',
+                type: 'completed',
+                bytes: 1400 * 1024 * 1024,
+              });
+            }}
+            onRemoveOfflineFile={async (fid) => {
+              await removeFileFromOffline(fid);
+              setOfflineFilesMap(getOfflineSavedFilesMap());
+            }}
+            onClearAllOffline={async () => {
+              await clearAllOfflineFiles();
+              setOfflineFilesMap({});
+              pushNotification({
+                id: `clear_offline_${Date.now()}`,
+                timestamp: new Date().toISOString(),
+                title: 'Offline Storage Cleared',
+                message: 'All locally cached offline files were removed from this device.',
+                type: 'info',
+              });
+            }}
+            onOpenOfflineFile={(fid) => {
+              const found = files.find((f) => f.id === fid);
+              if (found) setInspectedFile(found);
+            }}
+          />
+        )}
+
+        {/* ==================================================================
             VIEW 4: ADMIN-ONLY STORAGE NODE SETUP
         ================================================================== */}
         {activeView === 'telegram_settings' && isAdminUser && (
@@ -4485,69 +4906,80 @@ export default function App() {
       ==================================================================== */}
       <nav
         className={`fixed bottom-0 left-0 right-0 z-40 md:hidden grid ${
-          isAdminUser ? 'grid-cols-5' : 'grid-cols-4'
+          isAdminUser ? 'grid-cols-6' : 'grid-cols-5'
         } bg-[#1C1A17] border-t border-[#2C2824]`}
       >
         <button
           onClick={() => {
             setActiveView('explorer');
             setOnlyStarred(false);
+            setOnlyOffline(false);
           }}
-          className={`min-h-[56px] flex flex-col items-center justify-center gap-1 text-[11px] font-medium cursor-pointer ${
+          className={`min-h-[56px] flex flex-col items-center justify-center gap-1 text-[10px] font-medium cursor-pointer ${
             activeView === 'explorer' ? 'text-[#D97757] font-bold' : 'text-[#9E978E]'
           }`}
         >
-          <Folder className="w-5 h-5" />
-          <span>My Files</span>
+          <Folder className="w-4 h-4" />
+          <span>Files</span>
         </button>
 
         <button
-          onClick={() => setActiveView('trash')}
-          className={`min-h-[56px] flex flex-col items-center justify-center gap-1 text-[11px] font-medium cursor-pointer ${
-            activeView === 'trash' ? 'text-[#D97757] font-bold' : 'text-[#9E978E]'
+          onClick={() => setActiveView('gallery')}
+          className={`min-h-[56px] flex flex-col items-center justify-center gap-1 text-[10px] font-medium cursor-pointer ${
+            activeView === 'gallery' ? 'text-[#D97757] font-bold' : 'text-[#9E978E]'
           }`}
         >
-          <Trash2 className="w-5 h-5" />
-          <span>Trash</span>
+          <Film className="w-4 h-4" />
+          <span>Gallery</span>
         </button>
 
         <button
           onClick={() => setActiveView('shares')}
-          className={`min-h-[56px] flex flex-col items-center justify-center gap-1 text-[11px] font-medium cursor-pointer ${
+          className={`min-h-[56px] flex flex-col items-center justify-center gap-1 text-[10px] font-medium cursor-pointer ${
             activeView === 'shares' ? 'text-[#D97757] font-bold' : 'text-[#9E978E]'
           }`}
         >
-          <Link2 className="w-5 h-5" />
+          <Link2 className="w-4 h-4" />
           <span>Shared</span>
         </button>
 
         <button
-          onClick={() => setActiveView('pricing')}
-          className={`min-h-[56px] flex flex-col items-center justify-center gap-1 text-[11px] font-medium cursor-pointer ${
-            activeView === 'pricing' ? 'text-[#D97757] font-bold' : 'text-[#9E978E]'
+          onClick={() => setActiveView('trash')}
+          className={`min-h-[56px] flex flex-col items-center justify-center gap-1 text-[10px] font-medium cursor-pointer ${
+            activeView === 'trash' ? 'text-[#D97757] font-bold' : 'text-[#9E978E]'
           }`}
         >
-          <Coins className="w-5 h-5" />
-          <span>Plans</span>
+          <Trash2 className="w-4 h-4" />
+          <span>Trash</span>
+        </button>
+
+        <button
+          onClick={() => setActiveView('settings')}
+          className={`min-h-[56px] flex flex-col items-center justify-center gap-1 text-[10px] font-medium cursor-pointer ${
+            activeView === 'settings' ? 'text-[#D97757] font-bold' : 'text-[#9E978E]'
+          }`}
+        >
+          <Bell className="w-4 h-4" />
+          <span>Alerts</span>
         </button>
 
         {isAdminUser && (
           <button
             onClick={() => setActiveView('telegram_settings')}
-            className={`min-h-[56px] flex flex-col items-center justify-center gap-1 text-[11px] font-medium cursor-pointer ${
+            className={`min-h-[56px] flex flex-col items-center justify-center gap-1 text-[10px] font-medium cursor-pointer ${
               activeView === 'telegram_settings'
                 ? 'text-[#D97757] font-bold'
                 : 'text-[#9E978E]'
             }`}
           >
-            <Settings className="w-5 h-5" />
+            <Settings className="w-4 h-4" />
             <span>Node</span>
           </button>
         )}
       </nav>
 
       {/* ====================================================================
-          REAL-TIME COMPLETION NOTIFICATION POPUP (4s Auto-Hide + Swipe + X)
+          REAL-TIME COMPLETION NOTIFICATION POPUP (Configurable Duration + Swipe + X)
       ==================================================================== */}
       {notifications.length > 0 && (
         <div className="fixed bottom-20 md:bottom-5 left-4 right-4 md:left-auto md:right-5 z-50 md:w-full md:max-w-sm space-y-2 pointer-events-none">
@@ -4555,6 +4987,7 @@ export default function App() {
             <ToastNotificationCard
               key={n.id}
               notification={n}
+              durationSeconds={notificationPrefs.toastDurationSeconds}
               onDismiss={(id) =>
                 setNotifications((prev) => prev.filter((item) => item.id !== id))
               }
@@ -4623,10 +5056,19 @@ export default function App() {
           }
           firebaseUid={firebaseUser?.uid || currentUser?.id || ''}
           firebaseEmail={firebaseUser?.email || currentUser?.email || ''}
+          isSavedOffline={Boolean(offlineFilesMap[inspectedFile.id])}
           onClose={() => setInspectedFile(null)}
           onDownload={handleDownloadFile}
           onOpenShareModal={(f) => setShareModalFile(f)}
-          onOpenMoveModal={(f) => setMoveModalFile(f)}
+          onOpenMoveModal={(f) => {
+            setMoveModalMode('move');
+            setMoveModalFile(f);
+          }}
+          onOpenCopyModal={(f) => {
+            setMoveModalMode('copy');
+            setMoveModalFile(f);
+          }}
+          onToggleOffline={(f) => void handleToggleOfflineFile(f)}
           onRequestDelete={(f) =>
             setDeleteTarget({
               type: 'file',
@@ -4643,6 +5085,7 @@ export default function App() {
         <MoveFileModal
           file={moveModalFile}
           targetFiles={batchMoveFiles || undefined}
+          mode={moveModalMode}
           folders={folders.filter((fl) => !fl.trashed)}
           files={activeFiles}
           onClose={() => {
@@ -4651,6 +5094,7 @@ export default function App() {
           }}
           onMoveFile={handleMoveFile}
           onMoveFiles={handleBatchMoveFiles}
+          onCopyFiles={handleCopyFiles}
           onCreateFolder={handleCreateFolderFromModal}
         />
       )}

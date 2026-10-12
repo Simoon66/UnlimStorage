@@ -19,15 +19,36 @@ import {
   Code2,
   Smartphone,
   KeyRound,
+  Bell,
+  Volume2,
+  Search,
+  Film,
+  Image as ImageIcon,
+  Music,
+  Eye,
+  Folder,
+  Play,
+  X,
+  Link2,
 } from 'lucide-react';
 import {
   ShareLink,
   TelegramConfigState,
   User,
   StoragePlanId,
+  FileRecord,
+  FolderRecord,
 } from '../types';
 import { formatBytes, formatShortDate } from '../utils/format';
 import { apiFetch } from '../services/clientCloudFallback';
+import {
+  NotificationPreferences,
+  OfflineSavedFileMeta,
+  requestBrowserPushPermission,
+  triggerBrowserPushNotification,
+  playTransferCompletionChime,
+} from '../utils/offlineAndNotifications';
+import { getWatchPercentage } from '../utils/mediaProgressAndZip';
 
 // ============================================================================
 // 1. SHARED LINKS VIEW
@@ -1303,4 +1324,638 @@ export const TelegramStorageView: React.FC<TelegramStorageViewProps> = ({
     </div>
   );
 };
+
+// ============================================================================
+// 4. MEDIA GALLERY VIEW WITH REAL-TIME SEARCH BAR & OFFLINE FILTER
+// ============================================================================
+
+interface MediaGalleryViewProps {
+  files: FileRecord[];
+  folders: FolderRecord[];
+  offlineMap: Record<string, OfflineSavedFileMeta>;
+  savingOfflineId: string | null;
+  offlineProgressPct: number;
+  firebaseUid?: string;
+  firebaseEmail?: string;
+  onInspectFile: (file: FileRecord) => void;
+  onCopyFile: (file: FileRecord) => void;
+  onShareFile: (file: FileRecord) => void;
+  onDownloadFile: (file: FileRecord) => void;
+  onToggleOffline: (file: FileRecord) => void;
+}
+
+export const MediaGalleryView: React.FC<MediaGalleryViewProps> = ({
+  files,
+  folders,
+  offlineMap,
+  savingOfflineId,
+  offlineProgressPct,
+  firebaseUid,
+  firebaseEmail,
+  onInspectFile,
+  onCopyFile,
+  onShareFile,
+  onDownloadFile,
+  onToggleOffline,
+}) => {
+  const [searchQuery, setSearchQuery] = useState('');
+  const [mediaFilter, setMediaFilter] = useState<
+    'all' | 'video' | 'image' | 'audio' | 'offline'
+  >('all');
+
+  const isVideoFile = (f: FileRecord) =>
+    f.mimeType.startsWith('video/') ||
+    /\.(mp4|mkv|webm|mov|avi|m4v)$/i.test(f.name);
+  const isImageFile = (f: FileRecord) =>
+    f.mimeType.startsWith('image/') ||
+    /\.(png|jpg|jpeg|gif|webp|svg|bmp)$/i.test(f.name);
+  const isAudioFile = (f: FileRecord) =>
+    f.mimeType.startsWith('audio/') ||
+    /\.(mp3|wav|ogg|m4a|flac)$/i.test(f.name);
+
+  const mediaFiles = files.filter((f) => {
+    if (f.trashed) return false;
+    const isMedia = isVideoFile(f) || isImageFile(f) || isAudioFile(f);
+    const isOffline = Boolean(offlineMap[f.id]);
+
+    if (mediaFilter === 'offline') {
+      if (!isOffline) return false;
+    } else if (mediaFilter === 'video') {
+      if (!isVideoFile(f)) return false;
+    } else if (mediaFilter === 'image') {
+      if (!isImageFile(f)) return false;
+    } else if (mediaFilter === 'audio') {
+      if (!isAudioFile(f)) return false;
+    } else {
+      if (!isMedia && !isOffline) return false;
+    }
+
+    if (searchQuery.trim()) {
+      const q = searchQuery.toLowerCase();
+      const folderName =
+        folders.find((fl) => fl.id === f.folderId)?.name.toLowerCase() || '';
+      const tagMatch = (f.tags || []).some((t) => t.toLowerCase().includes(q));
+      return (
+        f.name.toLowerCase().includes(q) ||
+        folderName.includes(q) ||
+        tagMatch
+      );
+    }
+
+    return true;
+  });
+
+  const videoCount = files.filter((f) => !f.trashed && isVideoFile(f)).length;
+  const imageCount = files.filter((f) => !f.trashed && isImageFile(f)).length;
+  const audioCount = files.filter((f) => !f.trashed && isAudioFile(f)).length;
+  const offlineCount = files.filter((f) => !f.trashed && Boolean(offlineMap[f.id])).length;
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-[#2C2824] pb-4">
+        <div>
+          <h1 className="text-xl font-bold tracking-tight">
+            Media Gallery &amp; Offline Vault
+          </h1>
+          <p className="text-sm text-[#9E978E] mt-1">
+            Search and stream all your original-quality videos, photos, audio, and offline-saved files.
+          </p>
+        </div>
+        <div className="flex items-center gap-2 text-xs text-[#9E978E] tabular-nums">
+          <span>{videoCount} Videos</span>
+          <span>·</span>
+          <span>{imageCount} Photos</span>
+          <span>·</span>
+          <span className="text-[#2E9E6B] font-semibold">
+            {offlineCount} Offline Ready
+          </span>
+        </div>
+      </div>
+
+      {/* Gallery Search Bar + Segmented Filter Controls */}
+      <div className="flex flex-col md:flex-row gap-3">
+        <div className="relative flex-1">
+          <Search className="w-4 h-4 text-[#9E978E] absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+          <input
+            type="text"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder="Search gallery by video/photo name, folder, or label..."
+            className="w-full min-h-[44px] bg-[#1C1A17] border border-[#2C2824] pl-10 pr-9 py-2.5 text-sm text-[#F2EFE9] placeholder-[#9E978E] focus:outline-none focus:border-[#D97757]"
+          />
+          {searchQuery && (
+            <button
+              type="button"
+              onClick={() => setSearchQuery('')}
+              className="absolute right-3 top-1/2 -translate-y-1/2 text-[#9E978E] hover:text-[#F2EFE9] cursor-pointer"
+              aria-label="Clear gallery search"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          )}
+        </div>
+
+        <div className="flex items-center gap-1 bg-[#1C1A17] border border-[#2C2824] p-1 overflow-x-auto">
+          {(
+            [
+              { id: 'all', label: `All Media (${videoCount + imageCount + audioCount})` },
+              { id: 'video', label: `Videos (${videoCount})` },
+              { id: 'image', label: `Photos (${imageCount})` },
+              { id: 'audio', label: `Audio (${audioCount})` },
+              { id: 'offline', label: `Offline (${offlineCount})` },
+            ] as const
+          ).map((tab) => (
+            <button
+              key={tab.id}
+              type="button"
+              onClick={() => setMediaFilter(tab.id)}
+              className={`min-h-[36px] px-3 py-1.5 text-xs font-semibold whitespace-nowrap cursor-pointer transition-colors ${
+                mediaFilter === tab.id
+                  ? 'bg-[#D97757] text-[#141311]'
+                  : 'text-[#9E978E] hover:text-[#F2EFE9]'
+              }`}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {mediaFiles.length === 0 ? (
+        <div className="p-10 bg-[#1C1A17] border border-[#2C2824] text-center space-y-2">
+          <div className="text-base font-bold text-[#F2EFE9]">
+            {searchQuery
+              ? `No gallery items match "${searchQuery}"`
+              : mediaFilter === 'offline'
+              ? 'No files saved for offline access yet'
+              : 'No media files in your gallery yet'}
+          </div>
+          <p className="text-xs text-[#9E978E] max-w-md mx-auto">
+            {mediaFilter === 'offline'
+              ? 'Tap "Save Offline" on any file in My Files or Gallery to store it on your device for instant offline playback.'
+              : 'Upload videos, photos, or audio in 100% original quality to browse and stream them here.'}
+          </p>
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+          {mediaFiles.map((file) => {
+            const isVid = isVideoFile(file);
+            const isImg = isImageFile(file);
+            const isOffline = Boolean(offlineMap[file.id]);
+            const isSavingThisOffline = savingOfflineId === file.id;
+            const watchPct = isVid ? getWatchPercentage(file.id) : null;
+            const folderName =
+              folders.find((fl) => fl.id === file.folderId)?.name || 'Root';
+
+            const imgSrc = isImg
+              ? offlineMap[file.id]?.previewDataUrl ||
+                file.previewDataUrl ||
+                `/api/files/${encodeURIComponent(
+                  file.id
+                )}/download?inline=1&uid=${encodeURIComponent(
+                  firebaseUid || ''
+                )}&email=${encodeURIComponent(firebaseEmail || '')}&name=${encodeURIComponent(
+                  file.name
+                )}`
+              : null;
+
+            return (
+              <div
+                key={file.id}
+                className="bg-[#1C1A17] border border-[#2C2824] hover:border-[#D97757]/70 flex flex-col justify-between overflow-hidden transition-colors"
+              >
+                {/* Visual Media Preview Area */}
+                <div>
+                  <div
+                    onClick={() => onInspectFile(file)}
+                    className="relative h-44 bg-[#141311] border-b border-[#2C2824] flex items-center justify-center overflow-hidden cursor-pointer group"
+                  >
+                    {imgSrc ? (
+                      <img
+                        src={imgSrc}
+                        alt={file.name}
+                        loading="lazy"
+                        className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-200"
+                      />
+                    ) : isVid ? (
+                      <div className="flex flex-col items-center gap-2 text-[#9E978E] group-hover:text-[#D97757] transition-colors">
+                        <div className="w-12 h-12 bg-[#1C1A17] border border-[#D97757] flex items-center justify-center">
+                          <Play className="w-5 h-5 text-[#D97757] fill-current ml-0.5" />
+                        </div>
+                        <span className="text-[11px] font-semibold text-[#F2EFE9]">
+                          Tap to Stream Original Video
+                        </span>
+                      </div>
+                    ) : (
+                      <Music className="w-10 h-10 text-[#D97757]" />
+                    )}
+
+                    {/* Top-right status indicators */}
+                    <div className="absolute top-2.5 right-2.5 flex items-center gap-1.5 bg-[#141311]/90 border border-[#2C2824] px-2 py-1 text-[11px] text-[#F2EFE9] tabular-nums">
+                      <span>{formatBytes(file.sizeBytes)}</span>
+                      {isOffline && (
+                        <>
+                          <span>·</span>
+                          <span className="text-[#2E9E6B] font-bold">Offline</span>
+                        </>
+                      )}
+                    </div>
+
+                    {watchPct !== null && (
+                      <div className="absolute bottom-0 left-0 right-0 h-1 bg-[#24211D]">
+                        <div
+                          className="h-full bg-[#D97757]"
+                          style={{ width: `${watchPct}%` }}
+                        />
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="p-4 space-y-1.5">
+                    <button
+                      type="button"
+                      onClick={() => onInspectFile(file)}
+                      className="text-sm font-bold text-[#F2EFE9] hover:text-[#D97757] text-left line-clamp-1 break-all cursor-pointer"
+                    >
+                      {file.name}
+                    </button>
+                    <div className="flex flex-wrap items-center gap-1.5 text-xs text-[#9E978E] tabular-nums">
+                      <span>Folder: {folderName}</span>
+                      <span>·</span>
+                      <span>{formatShortDate(file.updatedAt)}</span>
+                      {watchPct !== null && (
+                        <>
+                          <span>·</span>
+                          <span className="text-[#D97757] font-semibold">
+                            {watchPct}% watched
+                          </span>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Action Bar: Stream/Preview, Copy to Folder, Save Offline, Share */}
+                <div className="p-3 pt-0 grid grid-cols-4 gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => onInspectFile(file)}
+                    className="min-h-[38px] px-2 py-1.5 text-xs font-bold bg-[#D97757] text-[#141311] hover:bg-[#E08568] flex items-center justify-center gap-1 cursor-pointer"
+                    title="Stream or Preview"
+                  >
+                    <Eye className="w-3.5 h-3.5" />
+                    <span>Open</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => onCopyFile(file)}
+                    className="min-h-[38px] px-2 py-1.5 text-xs font-semibold bg-[#24211D] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center justify-center gap-1 cursor-pointer"
+                    title="Copy to Folder"
+                  >
+                    <Copy className="w-3.5 h-3.5 text-[#D97757]" />
+                    <span>Copy</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    disabled={isSavingThisOffline}
+                    onClick={() => onToggleOffline(file)}
+                    className={`min-h-[38px] px-2 py-1.5 text-xs font-semibold border flex items-center justify-center gap-1 cursor-pointer ${
+                      isOffline
+                        ? 'bg-[#24211D] border-[#2E9E6B] text-[#2E9E6B]'
+                        : 'bg-[#24211D] border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9]'
+                    }`}
+                    title={
+                      isOffline
+                        ? 'Saved in local device storage for offline use (tap to remove)'
+                        : 'Save to local device storage for offline use'
+                    }
+                  >
+                    {isSavingThisOffline ? (
+                      <span>{offlineProgressPct}%</span>
+                    ) : isOffline ? (
+                      <>
+                        <Check className="w-3.5 h-3.5 text-[#2E9E6B]" />
+                        <span>Offline</span>
+                      </>
+                    ) : (
+                      <>
+                        <Smartphone className="w-3.5 h-3.5 text-[#D97757]" />
+                        <span>Offline</span>
+                      </>
+                    )}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => onShareFile(file)}
+                    className="min-h-[38px] px-2 py-1.5 text-xs font-semibold bg-[#24211D] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center justify-center gap-1 cursor-pointer"
+                    title="Share File"
+                  >
+                    <Link2 className="w-3.5 h-3.5 text-[#D97757]" />
+                    <span>Share</span>
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ============================================================================
+// 5. NOTIFICATION & OFFLINE STORAGE SETTINGS VIEW
+// ============================================================================
+
+interface NotificationSettingsViewProps {
+  prefs: NotificationPreferences;
+  offlineMap: Record<string, OfflineSavedFileMeta>;
+  onUpdatePrefs: (next: NotificationPreferences) => void;
+  onTestToast: () => void;
+  onRemoveOfflineFile: (fileId: string) => void;
+  onClearAllOffline: () => void;
+  onOpenOfflineFile: (fileId: string) => void;
+}
+
+export const NotificationSettingsView: React.FC<NotificationSettingsViewProps> = ({
+  prefs,
+  offlineMap,
+  onUpdatePrefs,
+  onTestToast,
+  onRemoveOfflineFile,
+  onClearAllOffline,
+  onOpenOfflineFile,
+}) => {
+  const [pushPermStatus, setPushPermStatus] = useState<string>(() => {
+    if (typeof window === 'undefined' || !('Notification' in window)) {
+      return 'unsupported';
+    }
+    return Notification.permission;
+  });
+
+  const offlineEntries = Object.values(offlineMap).sort(
+    (a, b) => new Date(b.savedAt).getTime() - new Date(a.savedAt).getTime()
+  );
+  const totalOfflineBytes = offlineEntries.reduce((acc, item) => acc + (item.sizeBytes || 0), 0);
+
+  const handleToggleBrowserPush = async (checked: boolean) => {
+    if (checked) {
+      const perm = await requestBrowserPushPermission();
+      setPushPermStatus(perm);
+      if (perm === 'granted') {
+        onUpdatePrefs({ ...prefs, enableBrowserPush: true });
+        triggerBrowserPushNotification(
+          'UnlimStorage Push Alerts Enabled',
+          'You will receive real-time push notifications when large transfers complete.'
+        );
+      } else {
+        onUpdatePrefs({ ...prefs, enableBrowserPush: false });
+      }
+    } else {
+      onUpdatePrefs({ ...prefs, enableBrowserPush: false });
+    }
+  };
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-[#2C2824] pb-4">
+        <div>
+          <h1 className="text-xl font-bold tracking-tight">
+            Notifications &amp; Offline Device Storage
+          </h1>
+          <p className="text-sm text-[#9E978E] mt-1">
+            Configure real-time push or toast notifications for large file transfers and manage files saved offline on your device.
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={() => {
+            if (prefs.enableSoundAlert) playTransferCompletionChime();
+            if (prefs.enableBrowserPush) {
+              triggerBrowserPushNotification(
+                'Large Transfer Complete (Test)',
+                '4K-Master-Archive.mkv (1.4 GB) finished uploading at 100% lossless quality.'
+              );
+            }
+            onTestToast();
+          }}
+          className="min-h-[42px] px-4 py-2 text-xs font-bold bg-[#D97757] text-[#141311] hover:bg-[#E08568] flex items-center justify-center gap-2 cursor-pointer shrink-0"
+        >
+          <Bell className="w-4 h-4" />
+          <span>Send Test Transfer Alert</span>
+        </button>
+      </div>
+
+      {/* Real-Time Transfer Notification Controls */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+        <div className="p-5 sm:p-6 bg-[#1C1A17] border border-[#2C2824] space-y-5">
+          <div className="flex items-center gap-2.5 border-b border-[#2C2824] pb-3">
+            <Bell className="w-4 h-4 text-[#D97757]" />
+            <h2 className="text-sm font-bold text-[#F2EFE9]">
+              Real-Time Push &amp; Toast Notification Channels
+            </h2>
+          </div>
+
+          <label className="flex items-center justify-between gap-4 p-3.5 bg-[#141311] border border-[#2C2824] cursor-pointer">
+            <div className="space-y-0.5">
+              <div className="text-xs font-bold text-[#F2EFE9]">
+                In-App Real-Time Toast Notifications
+              </div>
+              <div className="text-[11px] text-[#9E978E]">
+                Show interactive swipe-to-dismiss toast cards when uploads, downloads, or copies complete
+              </div>
+            </div>
+            <input
+              type="checkbox"
+              checked={prefs.enableToastNotifications}
+              onChange={(e) =>
+                onUpdatePrefs({ ...prefs, enableToastNotifications: e.target.checked })
+              }
+              className="accent-[#D97757] w-5 h-5 shrink-0"
+            />
+          </label>
+
+          <label className="flex items-center justify-between gap-4 p-3.5 bg-[#141311] border border-[#2C2824] cursor-pointer">
+            <div className="space-y-0.5">
+              <div className="text-xs font-bold text-[#F2EFE9]">
+                Browser / Mobile System Push Notifications
+              </div>
+              <div className="text-[11px] text-[#9E978E]">
+                Receive native OS / mobile push alerts even when switching tabs during large transfers (Permission: {pushPermStatus})
+              </div>
+            </div>
+            <input
+              type="checkbox"
+              checked={prefs.enableBrowserPush}
+              onChange={(e) => void handleToggleBrowserPush(e.target.checked)}
+              className="accent-[#D97757] w-5 h-5 shrink-0"
+            />
+          </label>
+
+          <label className="flex items-center justify-between gap-4 p-3.5 bg-[#141311] border border-[#2C2824] cursor-pointer">
+            <div className="space-y-0.5">
+              <div className="text-xs font-bold text-[#F2EFE9] flex items-center gap-1.5">
+                <Volume2 className="w-3.5 h-3.5 text-[#D97757]" />
+                <span>Completion Sound Chime</span>
+              </div>
+              <div className="text-[11px] text-[#9E978E]">
+                Play a subtle acoustic chime when a large upload or offline save finishes
+              </div>
+            </div>
+            <input
+              type="checkbox"
+              checked={prefs.enableSoundAlert}
+              onChange={(e) => {
+                const next = e.target.checked;
+                onUpdatePrefs({ ...prefs, enableSoundAlert: next });
+                if (next) playTransferCompletionChime();
+              }}
+              className="accent-[#D97757] w-5 h-5 shrink-0"
+            />
+          </label>
+        </div>
+
+        {/* Large Transfer Size Threshold & Timing */}
+        <div className="p-5 sm:p-6 bg-[#1C1A17] border border-[#2C2824] space-y-5">
+          <div className="flex items-center gap-2.5 border-b border-[#2C2824] pb-3">
+            <HardDrive className="w-4 h-4 text-[#D97757]" />
+            <h2 className="text-sm font-bold text-[#F2EFE9]">
+              Large Transfer Filter &amp; Display Timing
+            </h2>
+          </div>
+
+          <div className="space-y-2">
+            <label className="block text-xs font-semibold text-[#F2EFE9]">
+              Minimum Transfer Size for Completion Alerts
+            </label>
+            <p className="text-[11px] text-[#9E978E]">
+              Choose whether to notify on every file transfer or only when large transfers exceed your chosen threshold.
+            </p>
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 pt-1">
+              {[
+                { mb: 0, label: 'All Transfers' },
+                { mb: 10, label: '10 MB+ Only' },
+                { mb: 50, label: '50 MB+ Only' },
+                { mb: 100, label: '100 MB+ Only' },
+                { mb: 500, label: '500 MB+ Only' },
+              ].map((opt) => (
+                <button
+                  key={opt.mb}
+                  type="button"
+                  onClick={() =>
+                    onUpdatePrefs({ ...prefs, largeTransferThresholdMb: opt.mb })
+                  }
+                  className={`min-h-[38px] px-3 py-2 text-xs font-semibold border cursor-pointer transition-colors ${
+                    prefs.largeTransferThresholdMb === opt.mb
+                      ? 'bg-[#D97757] border-[#D97757] text-[#141311]'
+                      : 'bg-[#141311] border-[#2C2824] text-[#9E978E] hover:text-[#F2EFE9]'
+                  }`}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="space-y-2 pt-2 border-t border-[#2C2824]">
+            <label className="block text-xs font-semibold text-[#F2EFE9]">
+              Toast Auto-Dismiss Duration
+            </label>
+            <div className="grid grid-cols-4 gap-2">
+              {[3, 4, 6, 10].map((sec) => (
+                <button
+                  key={sec}
+                  type="button"
+                  onClick={() =>
+                    onUpdatePrefs({ ...prefs, toastDurationSeconds: sec })
+                  }
+                  className={`min-h-[38px] px-3 py-2 text-xs font-semibold border cursor-pointer transition-colors ${
+                    prefs.toastDurationSeconds === sec
+                      ? 'bg-[#D97757] border-[#D97757] text-[#141311]'
+                      : 'bg-[#141311] border-[#2C2824] text-[#9E978E] hover:text-[#F2EFE9]'
+                  }`}
+                >
+                  {sec} Seconds
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Offline Local Device Storage Management Section */}
+      <div className="p-5 sm:p-6 bg-[#1C1A17] border border-[#2C2824] space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-[#2C2824] pb-3">
+          <div>
+            <h2 className="text-sm font-bold text-[#F2EFE9] flex items-center gap-2">
+              <Smartphone className="w-4 h-4 text-[#2E9E6B]" />
+              <span>Offline Local Storage Vault ({offlineEntries.length} Files · {formatBytes(totalOfflineBytes)})</span>
+            </h2>
+            <p className="text-xs text-[#9E978E] mt-0.5">
+              Files saved offline are stored in your device&apos;s local storage &amp; IndexedDB so you can open, stream, or view them anytime without internet.
+            </p>
+          </div>
+          {offlineEntries.length > 0 && (
+            <button
+              type="button"
+              onClick={onClearAllOffline}
+              className="min-h-[36px] px-3.5 py-1.5 text-xs font-semibold text-[#D94848] border border-[#2C2824] hover:border-[#D94848] bg-[#141311] cursor-pointer shrink-0"
+            >
+              Clear All Offline Storage
+            </button>
+          )}
+        </div>
+
+        {offlineEntries.length === 0 ? (
+          <div className="p-6 bg-[#141311] border border-[#2C2824] text-center text-xs text-[#9E978E]">
+            No files are currently saved offline on this device. Tap the <strong className="text-[#F2EFE9]">Offline</strong> button on any file in My Files or Gallery to save it locally.
+          </div>
+        ) : (
+          <div className="divide-y divide-[#2C2824] border border-[#2C2824] bg-[#141311]">
+            {offlineEntries.map((item) => (
+              <div
+                key={item.id}
+                className="p-3 sm:px-4 flex items-center justify-between gap-3 text-xs"
+              >
+                <div className="min-w-0 flex-1">
+                  <button
+                    type="button"
+                    onClick={() => onOpenOfflineFile(item.id)}
+                    className="font-bold text-[#F2EFE9] hover:text-[#D97757] truncate block text-left cursor-pointer"
+                  >
+                    {item.name}
+                  </button>
+                  <div className="text-[11px] text-[#9E978E] tabular-nums">
+                    {formatBytes(item.sizeBytes)} · Saved offline {formatShortDate(item.savedAt)}
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => onOpenOfflineFile(item.id)}
+                    className="min-h-[32px] px-3 py-1 font-semibold bg-[#24211D] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] cursor-pointer"
+                  >
+                    Open Offline
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onRemoveOfflineFile(item.id)}
+                    className="min-h-[32px] px-2.5 py-1 text-[#9E978E] hover:text-[#D94848] border border-[#2C2824] bg-[#1C1A17] cursor-pointer"
+                    title="Remove from offline storage"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
 

@@ -1819,6 +1819,158 @@ async function handleClientApi(urlStr: string, init?: RequestInit): Promise<Resp
     return jsonResponse({ ok: true, user: currentUser });
   }
 
+  if (path === '/api/files/copy' && method === 'POST') {
+    const body = await parseBody();
+    const idsToCopy: string[] = Array.isArray(body.fileIds)
+      ? body.fileIds
+      : body.fileId
+      ? [String(body.fileId)]
+      : [];
+    const targetFolderId: string | null = body.targetFolderId ?? null;
+    const copiedFiles: FileRecord[] = [];
+    const nowIso = new Date().toISOString();
+    const blobs = getBlobStore();
+
+    for (const srcId of idsToCopy) {
+      const sourceFile = db.files.find((f) => f.id === srcId);
+      if (!sourceFile) continue;
+
+      const newFileId = `file_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+      const isSameFolder = (targetFolderId ?? null) === (sourceFile.folderId ?? null);
+      const copyName =
+        body.customName && String(body.customName).trim() && idsToCopy.length === 1
+          ? String(body.customName).trim()
+          : isSameFolder
+          ? `Copy of ${sourceFile.name}`
+          : sourceFile.name;
+
+      if (blobs[sourceFile.id]) {
+        blobs[newFileId] = blobs[sourceFile.id];
+      }
+      const existingBin = await getClientBinaryBlob(sourceFile.id, sourceFile);
+      if (existingBin && existingBin.size > 0) {
+        await storeClientBinaryBlob(newFileId, existingBin);
+      }
+
+      const newRecord: FileRecord = {
+        ...sourceFile,
+        id: newFileId,
+        name: copyName,
+        folderId: targetFolderId,
+        ownerId: currentUser.id,
+        ownerName: currentUser.name,
+        telegramChunks: (sourceFile.telegramChunks || []).map((c) => ({ ...c })),
+        starred: false,
+        trashed: false,
+        trashedAt: null,
+        downloadCount: 0,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      };
+      db.files.unshift(newRecord);
+      copiedFiles.push(newRecord);
+    }
+
+    saveBlobStore(blobs);
+    evaluateClientQuotaAndLocks(db, currentUser);
+    saveClientDb(db);
+    return jsonResponse({ ok: true, files: copiedFiles, user: currentUser });
+  }
+
+  if (path.startsWith('/api/public/share/') && path.endsWith('/copy') && method === 'POST') {
+    const token = decodeURIComponent(
+      path.slice('/api/public/share/'.length, path.length - '/copy'.length)
+    );
+    const body = await parseBody();
+    const targetFolderId: string | null = body.targetFolderId ?? null;
+    const share = db.shares.find((s) => s.token === token && s.active);
+    if (!share) {
+      return jsonResponse({ error: 'Shared link not found or inactive.' }, 404);
+    }
+
+    const nowIso = new Date().toISOString();
+    const copiedFiles: FileRecord[] = [];
+    const isFolderShare =
+      share.targetType === 'folder' ||
+      (Array.isArray(share.sharedFiles) && share.sharedFiles.length > 0);
+
+    if (isFolderShare && Array.isArray(share.sharedFiles)) {
+      const filterSet =
+        Array.isArray(body.fileIds) && body.fileIds.length > 0
+          ? new Set(body.fileIds as string[])
+          : null;
+      const itemsToCopy = share.sharedFiles.filter((sf) =>
+        filterSet ? filterSet.has(sf.id) : true
+      );
+
+      for (const item of itemsToCopy) {
+        const newFileId = `file_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+        const newRecord: FileRecord = {
+          id: newFileId,
+          name: item.name,
+          folderId: targetFolderId,
+          ownerId: currentUser.id,
+          ownerName: currentUser.name,
+          sizeBytes: item.sizeBytes || 0,
+          mimeType: item.mimeType || 'application/octet-stream',
+          sha256: item.sha256 || simpleHash(item.name),
+          storageDriver:
+            (item.telegramChunks && item.telegramChunks.length > 0) ||
+            item.storageDriver === 'telegram'
+              ? 'telegram'
+              : 'local_vault',
+          telegramChatId: item.telegramChatId,
+          telegramChunks: (item.telegramChunks || []).map((c) => ({ ...c })),
+          starred: false,
+          trashed: false,
+          trashedAt: null,
+          downloadCount: 0,
+          createdAt: nowIso,
+          updatedAt: nowIso,
+          previewText: item.previewText,
+          previewDataUrl: item.previewDataUrl,
+          lockedOverQuota: false,
+        };
+        db.files.unshift(newRecord);
+        copiedFiles.push(newRecord);
+      }
+    } else {
+      const newFileId = `file_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+      const newRecord: FileRecord = {
+        id: newFileId,
+        name: share.fileName,
+        folderId: targetFolderId,
+        ownerId: currentUser.id,
+        ownerName: currentUser.name,
+        sizeBytes: share.fileSizeBytes,
+        mimeType: share.fileMimeType,
+        sha256: share.fileSha256 || simpleHash(share.fileName),
+        storageDriver:
+          (share.telegramChunks && share.telegramChunks.length > 0) ||
+          share.storageDriver === 'telegram'
+            ? 'telegram'
+            : 'local_vault',
+        telegramChatId: share.telegramChatId,
+        telegramChunks: (share.telegramChunks || []).map((c) => ({ ...c })),
+        starred: false,
+        trashed: false,
+        trashedAt: null,
+        downloadCount: 0,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+        previewText: share.previewText,
+        previewDataUrl: share.previewDataUrl,
+        lockedOverQuota: false,
+      };
+      db.files.unshift(newRecord);
+      copiedFiles.push(newRecord);
+    }
+
+    evaluateClientQuotaAndLocks(db, currentUser);
+    saveClientDb(db);
+    return jsonResponse({ ok: true, files: copiedFiles, user: currentUser });
+  }
+
   if (path.startsWith('/api/transfers/') && path.endsWith('/cancel') && method === 'POST') {
     const transferId = decodeURIComponent(
       path.slice('/api/transfers/'.length, path.length - '/cancel'.length)

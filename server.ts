@@ -4179,6 +4179,229 @@ async function startServer() {
   });
 
   // ============================================================================
+  // GOOGLE DRIVE-STYLE FILE COPY & SAVE SHARED FILE TO MY DRIVE ROUTES
+  // ============================================================================
+
+  app.post('/api/files/copy', requireAuth, (req, res) => {
+    const user = (req as Request & { user: StoredUser }).user;
+    evaluateUserQuotaAndLocks(user);
+
+    const { fileIds, targetFolderId, customName } = req.body as {
+      fileIds?: string[];
+      fileId?: string;
+      targetFolderId?: string | null;
+      customName?: string;
+    };
+
+    const idsToCopy = Array.isArray(fileIds)
+      ? fileIds
+      : req.body?.fileId
+      ? [String(req.body.fileId)]
+      : [];
+
+    if (idsToCopy.length === 0) {
+      res.status(400).json({ error: 'Please select at least one file to copy.' });
+      return;
+    }
+
+    const copiedFiles: FileRecord[] = [];
+    const nowIso = new Date().toISOString();
+
+    for (const srcId of idsToCopy) {
+      const sourceFile = resolveOrRestoreFileRecord(srcId, user);
+      if (!sourceFile) continue;
+
+      const newFileId = `file_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+      const isSameFolder = (targetFolderId ?? null) === (sourceFile.folderId ?? null);
+      const copyName =
+        customName && customName.trim() && idsToCopy.length === 1
+          ? customName.trim()
+          : isSameFolder
+          ? `Copy of ${sourceFile.name}`
+          : sourceFile.name;
+
+      // Copy local disk chunk if present so local streaming/download works immediately
+      const srcDiskPath = path.join(CHUNKS_DIR, sourceFile.id);
+      const dstDiskPath = path.join(CHUNKS_DIR, newFileId);
+      if (fs.existsSync(srcDiskPath) && !fs.existsSync(dstDiskPath)) {
+        try {
+          fs.copyFileSync(srcDiskPath, dstDiskPath);
+        } catch {
+          // ignore disk copy error if backed by Telegram chunks
+        }
+      }
+
+      const effectiveChunks = resolveEffectiveTelegramChunks(
+        sourceFile.id,
+        sourceFile.name,
+        sourceFile.telegramChunks
+      );
+
+      const newRecord: FileRecord = {
+        ...sourceFile,
+        id: newFileId,
+        name: copyName,
+        folderId: targetFolderId ?? null,
+        ownerId: user.id,
+        ownerName: user.name,
+        telegramChunks: effectiveChunks.map((c) => ({ ...c })),
+        starred: false,
+        trashed: false,
+        trashedAt: null,
+        downloadCount: 0,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      };
+
+      db.files.unshift(newRecord);
+      copiedFiles.push(newRecord);
+    }
+
+    evaluateUserQuotaAndLocks(user);
+    saveDb();
+    res.json({ ok: true, files: copiedFiles, user: sanitizeUser(user) });
+  });
+
+  app.post('/api/public/share/:token/copy', requireAuth, async (req, res) => {
+    const user = (req as Request & { user: StoredUser }).user;
+    evaluateUserQuotaAndLocks(user);
+
+    const share = await resolveShareFromLocalOrFirestore(req.params.token);
+    if (!share || !share.active) {
+      res.status(404).json({ error: 'Shared link not found or inactive.' });
+      return;
+    }
+
+    const { targetFolderId, fileIds, password } = req.body as {
+      targetFolderId?: string | null;
+      fileIds?: string[];
+      password?: string;
+    };
+
+    if (share.hasPassword && share.passwordHash) {
+      const provided = String(password || '').trim();
+      if (!provided || hashPassword(provided) !== share.passwordHash) {
+        res.status(401).json({ error: 'Password required to copy this shared item.' });
+        return;
+      }
+    }
+
+    const nowIso = new Date().toISOString();
+    const copiedFiles: FileRecord[] = [];
+    const isFolderShare =
+      share.targetType === 'folder' ||
+      share.fileMimeType === 'application/x-unlim-folder' ||
+      (Array.isArray(share.sharedFiles) && share.sharedFiles.length > 0);
+
+    if (isFolderShare && Array.isArray(share.sharedFiles)) {
+      const filterSet =
+        Array.isArray(fileIds) && fileIds.length > 0 ? new Set(fileIds) : null;
+      const itemsToCopy = share.sharedFiles.filter((sf) =>
+        filterSet ? filterSet.has(sf.id) : true
+      );
+
+      for (const item of itemsToCopy) {
+        const dbSource = db.files.find((f) => f.id === item.id);
+        const newFileId = `file_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+
+        const srcDiskPath = path.join(CHUNKS_DIR, item.id);
+        const dstDiskPath = path.join(CHUNKS_DIR, newFileId);
+        if (fs.existsSync(srcDiskPath) && !fs.existsSync(dstDiskPath)) {
+          try {
+            fs.copyFileSync(srcDiskPath, dstDiskPath);
+          } catch {
+            // ignore
+          }
+        }
+
+        const chunks =
+          (item.telegramChunks && item.telegramChunks.length > 0
+            ? item.telegramChunks
+            : dbSource?.telegramChunks) || [];
+
+        const newRecord: FileRecord = {
+          id: newFileId,
+          name: item.name,
+          folderId: targetFolderId ?? null,
+          ownerId: user.id,
+          ownerName: user.name,
+          sizeBytes: item.sizeBytes || dbSource?.sizeBytes || 0,
+          mimeType: item.mimeType || dbSource?.mimeType || 'application/octet-stream',
+          sha256: item.sha256 || dbSource?.sha256 || '',
+          storageDriver:
+            chunks.length > 0 || item.storageDriver === 'telegram'
+              ? 'telegram'
+              : 'local_vault',
+          telegramChatId: item.telegramChatId || dbSource?.telegramChatId,
+          telegramChunks: chunks.map((c) => ({ ...c })),
+          starred: false,
+          trashed: false,
+          trashedAt: null,
+          downloadCount: 0,
+          createdAt: nowIso,
+          updatedAt: nowIso,
+          previewText: item.previewText || dbSource?.previewText,
+          previewDataUrl: item.previewDataUrl || dbSource?.previewDataUrl,
+          lockedOverQuota: false,
+        };
+
+        db.files.unshift(newRecord);
+        copiedFiles.push(newRecord);
+      }
+    } else {
+      const targetInfo = resolveTargetShareFile(share);
+      const dbSource = db.files.find((f) => f.id === targetInfo.fileId);
+      const newFileId = `file_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+
+      const srcDiskPath = path.join(CHUNKS_DIR, targetInfo.fileId);
+      const dstDiskPath = path.join(CHUNKS_DIR, newFileId);
+      if (fs.existsSync(srcDiskPath) && !fs.existsSync(dstDiskPath)) {
+        try {
+          fs.copyFileSync(srcDiskPath, dstDiskPath);
+        } catch {
+          // ignore
+        }
+      }
+
+      const chunks = resolveEffectiveTelegramChunks(
+        targetInfo.fileId,
+        targetInfo.fileName,
+        targetInfo.telegramChunks
+      );
+
+      const newRecord: FileRecord = {
+        id: newFileId,
+        name: targetInfo.fileName,
+        folderId: targetFolderId ?? null,
+        ownerId: user.id,
+        ownerName: user.name,
+        sizeBytes: targetInfo.fileSizeBytes,
+        mimeType: targetInfo.fileMimeType,
+        sha256: share.fileSha256 || dbSource?.sha256 || '',
+        storageDriver: chunks.length > 0 ? 'telegram' : 'local_vault',
+        telegramChatId: dbSource?.telegramChatId,
+        telegramChunks: chunks.map((c) => ({ ...c })),
+        starred: false,
+        trashed: false,
+        trashedAt: null,
+        downloadCount: 0,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+        previewText: targetInfo.previewText,
+        previewDataUrl: dbSource?.previewDataUrl,
+        lockedOverQuota: false,
+      };
+
+      db.files.unshift(newRecord);
+      copiedFiles.push(newRecord);
+    }
+
+    evaluateUserQuotaAndLocks(user);
+    saveDb();
+    res.json({ ok: true, files: copiedFiles, user: sanitizeUser(user) });
+  });
+
+  // ============================================================================
   // REMOTE URL UPLOAD ENGINE & TRANSFER CANCELLATION
   // ============================================================================
 

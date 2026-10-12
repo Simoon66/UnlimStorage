@@ -17,11 +17,15 @@ import {
   List as ListIcon,
   Play,
   Archive,
+  Copy,
+  FolderPlus,
+  Search,
+  X,
 } from 'lucide-react';
 import { formatBytes, formatShortDate } from '../utils/format';
 import { apiFetch } from '../services/clientCloudFallback';
 import { YouTubeIframePlayer } from './YouTubeIframePlayer';
-import { SharedFolderFileEntry } from '../types';
+import { SharedFolderFileEntry, FolderRecord } from '../types';
 import { buildZipBlob, getWatchPercentage } from '../utils/mediaProgressAndZip';
 import { PWAInstallButton } from './PWAInstallButton';
 
@@ -59,6 +63,15 @@ interface DownloadProgressState {
 interface PublicSharePortalProps {
   token: string;
   onExitPublicPortal: () => void;
+  isAuthenticated?: boolean;
+  userFolders?: FolderRecord[];
+  onCopyToMyDrive?: (payload: {
+    token: string;
+    targetFolderId: string | null;
+    fileIds?: string[];
+    password?: string;
+  }) => Promise<number>;
+  onCreateFolder?: (name: string) => Promise<FolderRecord | null>;
 }
 
 function isMediaVideoFile(name: string, mimeType: string): boolean {
@@ -71,6 +84,10 @@ function isMediaVideoFile(name: string, mimeType: string): boolean {
 export const PublicSharePortal: React.FC<PublicSharePortalProps> = ({
   token,
   onExitPublicPortal,
+  isAuthenticated,
+  userFolders = [],
+  onCopyToMyDrive,
+  onCreateFolder,
 }) => {
   const isEmbedMode = React.useMemo(() => {
     const params = new URLSearchParams(window.location.search);
@@ -94,9 +111,21 @@ export const PublicSharePortal: React.FC<PublicSharePortalProps> = ({
   const [loadingVideoStream, setLoadingVideoStream] = useState(false);
   const [copiedEmbedCode, setCopiedEmbedCode] = useState(false);
 
-  // Shared Folder Gallery state
+  // Shared Folder Gallery state + Search Bar & Filter
   const [folderLayout, setFolderLayout] = useState<'grid' | 'list'>('grid');
   const [activeFolderVideo, setActiveFolderVideo] = useState<SharedFolderFileEntry | null>(null);
+  const [gallerySearchQuery, setGallerySearchQuery] = useState('');
+  const [galleryTypeFilter, setGalleryTypeFilter] = useState<'all' | 'video' | 'image' | 'audio' | 'doc'>('all');
+
+  // Google Drive-style "Save Copy to My Folder" state
+  const [showCopyModal, setShowCopyModal] = useState(false);
+  const [copyTargetFileIds, setCopyTargetFileIds] = useState<string[] | undefined>(undefined);
+  const [copyTargetLabel, setCopyTargetLabel] = useState<string>('');
+  const [selectedDestFolderId, setSelectedDestFolderId] = useState<string | null>(null);
+  const [copyingToDrive, setCopyingToDrive] = useState(false);
+  const [copiedSuccessMsg, setCopiedSuccessMsg] = useState<string | null>(null);
+  const [creatingNewFolder, setCreatingNewFolder] = useState(false);
+  const [newFolderName, setNewFolderName] = useState('');
 
   const isFolderShare = React.useMemo(() => {
     if (!share) return false;
@@ -803,23 +832,92 @@ export const PublicSharePortal: React.FC<PublicSharePortalProps> = ({
                 </div>
               )}
 
-              {/* Shared Folder Gallery View */}
-              {isFolderShare && unlockedKey && Array.isArray(share.sharedFiles) && (
+              {/* Shared Folder Gallery View with Search Bar & Media Type Filter */}
+              {isFolderShare && unlockedKey && Array.isArray(share.sharedFiles) && (() => {
+                const filteredGalleryItems = share.sharedFiles.filter((item) => {
+                  if (gallerySearchQuery.trim()) {
+                    const q = gallerySearchQuery.toLowerCase();
+                    if (!item.name.toLowerCase().includes(q)) return false;
+                  }
+                  if (galleryTypeFilter !== 'all') {
+                    const mime = (item.mimeType || '').toLowerCase();
+                    const name = (item.name || '').toLowerCase();
+                    const isVid = isMediaVideoFile(item.name, item.mimeType);
+                    const isImg = mime.startsWith('image/') || /\.(png|jpg|jpeg|gif|webp|svg|bmp)$/.test(name);
+                    const isAud = mime.startsWith('audio/') || /\.(mp3|wav|ogg|m4a|flac)$/.test(name);
+                    if (galleryTypeFilter === 'video' && !isVid) return false;
+                    if (galleryTypeFilter === 'image' && !isImg) return false;
+                    if (galleryTypeFilter === 'audio' && !isAud) return false;
+                    if (galleryTypeFilter === 'doc' && (isVid || isImg || isAud)) return false;
+                  }
+                  return true;
+                });
+
+                return (
                 <div className="space-y-3 pt-2 border-t border-[#2C2824]">
-                  <div className="flex items-center justify-between text-xs text-[#9E978E]">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs text-[#9E978E]">
                     <span className="font-semibold text-[#F2EFE9]">
-                      Folder Contents ({share.sharedFiles.length})
+                      Folder Gallery ({filteredGalleryItems.length} of {share.sharedFiles.length})
                     </span>
-                    <span>Click any video to stream directly or download individual files</span>
+                    <span>Search files, stream video, or copy to your own folder</span>
                   </div>
 
-                  {share.sharedFiles.length === 0 ? (
+                  {/* Gallery Search Bar + Media Filter Tabs */}
+                  <div className="flex flex-col sm:flex-row gap-2">
+                    <div className="relative flex-1">
+                      <Search className="w-3.5 h-3.5 text-[#9E978E] absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                      <input
+                        type="text"
+                        value={gallerySearchQuery}
+                        onChange={(e) => setGallerySearchQuery(e.target.value)}
+                        placeholder="Search files in this shared gallery..."
+                        className="w-full min-h-[38px] bg-[#141311] border border-[#2C2824] pl-9 pr-8 py-1.5 text-xs text-[#F2EFE9] placeholder-[#9E978E] focus:outline-none focus:border-[#D97757]"
+                      />
+                      {gallerySearchQuery && (
+                        <button
+                          type="button"
+                          onClick={() => setGallerySearchQuery('')}
+                          className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[#9E978E] hover:text-[#F2EFE9] cursor-pointer"
+                        >
+                          <X className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-1 bg-[#141311] border border-[#2C2824] p-0.5 overflow-x-auto">
+                      {(
+                        [
+                          { id: 'all', label: 'All' },
+                          { id: 'video', label: 'Videos' },
+                          { id: 'image', label: 'Photos' },
+                          { id: 'audio', label: 'Audio' },
+                          { id: 'doc', label: 'Docs' },
+                        ] as const
+                      ).map((tab) => (
+                        <button
+                          key={tab.id}
+                          type="button"
+                          onClick={() => setGalleryTypeFilter(tab.id)}
+                          className={`px-2.5 py-1 text-[11px] font-semibold cursor-pointer whitespace-nowrap ${
+                            galleryTypeFilter === tab.id
+                              ? 'bg-[#D97757] text-[#141311]'
+                              : 'text-[#9E978E] hover:text-[#F2EFE9]'
+                          }`}
+                        >
+                          {tab.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {filteredGalleryItems.length === 0 ? (
                     <div className="p-6 text-center bg-[#141311] border border-[#2C2824] text-xs text-[#9E978E]">
-                      This shared folder is currently empty.
+                      {share.sharedFiles.length === 0
+                        ? 'This shared folder is currently empty.'
+                        : 'No files match your gallery search or filter.'}
                     </div>
                   ) : folderLayout === 'grid' ? (
                     <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3 max-h-[420px] overflow-y-auto pr-1">
-                      {share.sharedFiles.map((item) => {
+                      {filteredGalleryItems.map((item) => {
                         const isVid = isMediaVideoFile(item.name, item.mimeType);
                         const isPlayingThis = activeFolderVideo?.id === item.id;
                         const watchPct = isVid ? getWatchPercentage(item.id) : null;
@@ -837,8 +935,16 @@ export const PublicSharePortal: React.FC<PublicSharePortalProps> = ({
                           >
                             <div className="space-y-2.5">
                               <div className="flex items-start justify-between gap-2">
-                                <div className="w-9 h-9 bg-[#1C1A17] border border-[#2C2824] flex items-center justify-center shrink-0">
-                                  {renderShareFileIcon(item.name, item.mimeType)}
+                                <div className="w-9 h-9 bg-[#1C1A17] border border-[#2C2824] flex items-center justify-center shrink-0 overflow-hidden">
+                                  {item.previewDataUrl && item.mimeType.startsWith('image/') ? (
+                                    <img
+                                      src={item.previewDataUrl}
+                                      alt={item.name}
+                                      className="w-full h-full object-cover"
+                                    />
+                                  ) : (
+                                    renderShareFileIcon(item.name, item.mimeType)
+                                  )}
                                 </div>
                                 <div className="flex items-center gap-1">
                                   {isVid && (
@@ -856,6 +962,22 @@ export const PublicSharePortal: React.FC<PublicSharePortalProps> = ({
                                     >
                                       <Play className="w-3 h-3 fill-current" />
                                       <span>{isPlayingThis ? 'Playing' : 'Stream'}</span>
+                                    </button>
+                                  )}
+                                  {onCopyToMyDrive && (
+                                    <button
+                                      type="button"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        setCopyTargetFileIds([item.id]);
+                                        setCopyTargetLabel(item.name);
+                                        setCopiedSuccessMsg(null);
+                                        setShowCopyModal(true);
+                                      }}
+                                      className="p-1.5 bg-[#24211D] hover:border-[#D97757] text-[#F2EFE9] border border-[#2C2824] cursor-pointer"
+                                      title={`Copy "${item.name}" to My Drive`}
+                                    >
+                                      <Copy className="w-3.5 h-3.5 text-[#D97757]" />
                                     </button>
                                   )}
                                   <button
@@ -900,7 +1022,7 @@ export const PublicSharePortal: React.FC<PublicSharePortalProps> = ({
                     </div>
                   ) : (
                     <div className="divide-y divide-[#2C2824] border border-[#2C2824] bg-[#141311] max-h-[420px] overflow-y-auto">
-                      {share.sharedFiles.map((item) => {
+                      {filteredGalleryItems.map((item) => {
                         const isVid = isMediaVideoFile(item.name, item.mimeType);
                         const isPlayingThis = activeFolderVideo?.id === item.id;
                         return (
@@ -942,6 +1064,22 @@ export const PublicSharePortal: React.FC<PublicSharePortalProps> = ({
                                   <span>{isPlayingThis ? 'Playing' : 'Stream'}</span>
                                 </button>
                               )}
+                              {onCopyToMyDrive && (
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setCopyTargetFileIds([item.id]);
+                                    setCopyTargetLabel(item.name);
+                                    setCopiedSuccessMsg(null);
+                                    setShowCopyModal(true);
+                                  }}
+                                  className="px-2.5 py-1 text-[11px] font-medium bg-[#24211D] hover:border-[#D97757] text-[#F2EFE9] border border-[#2C2824] flex items-center gap-1 cursor-pointer"
+                                >
+                                  <Copy className="w-3 h-3 text-[#D97757]" />
+                                  <span>Copy to Drive</span>
+                                </button>
+                              )}
                               <button
                                 type="button"
                                 onClick={(e) => {
@@ -965,9 +1103,10 @@ export const PublicSharePortal: React.FC<PublicSharePortalProps> = ({
                     </div>
                   )}
                 </div>
-              )}
+                );
+              })()}
 
-              {/* Password Box or Primary Download Button */}
+              {/* Password Box or Primary Download + Save Copy to My Drive Buttons */}
               <div className="pt-4 border-t border-[#2C2824]">
                 {share.hasPassword && !unlockedKey ? (
                   <form onSubmit={handleVerifyPassword} className="space-y-4">
@@ -1004,32 +1143,226 @@ export const PublicSharePortal: React.FC<PublicSharePortalProps> = ({
                   </form>
                 ) : (
                   <div className="space-y-4">
-                    <button
-                      onClick={handleStartDownload}
-                      disabled={downloading}
-                      className="min-h-[48px] w-full flex items-center justify-center gap-2.5 py-3.5 px-6 text-sm font-bold bg-[#D97757] text-[#141311] hover:bg-[#E08568] transition-colors cursor-pointer disabled:opacity-60"
-                    >
-                      {downloading ? (
-                        <Loader2 className="w-4 h-4 shrink-0 animate-spin" />
-                      ) : isFolderShare ? (
-                        <Archive className="w-4 h-4 shrink-0" />
-                      ) : (
-                        <Download className="w-4 h-4 shrink-0" />
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <button
+                        onClick={handleStartDownload}
+                        disabled={downloading}
+                        className="min-h-[48px] w-full flex items-center justify-center gap-2.5 py-3.5 px-5 text-sm font-bold bg-[#D97757] text-[#141311] hover:bg-[#E08568] transition-colors cursor-pointer disabled:opacity-60"
+                      >
+                        {downloading ? (
+                          <Loader2 className="w-4 h-4 shrink-0 animate-spin" />
+                        ) : isFolderShare ? (
+                          <Archive className="w-4 h-4 shrink-0" />
+                        ) : (
+                          <Download className="w-4 h-4 shrink-0" />
+                        )}
+                        <span className="truncate">
+                          {downloading
+                            ? downloadProgress?.statusLabel
+                              ? `${downloadProgress.statusLabel} (${downloadProgress.percent}%)`
+                              : downloadProgress && downloadProgress.percent > 0
+                              ? `Downloading... ${downloadProgress.percent}%`
+                              : 'Preparing Cloud Stream...'
+                            : isFolderShare
+                            ? `Download Folder .ZIP (${formatBytes(share.fileSizeBytes)})`
+                            : `Download File (${formatBytes(share.fileSizeBytes)})`}
+                        </span>
+                      </button>
+
+                      {onCopyToMyDrive && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setCopyTargetFileIds(undefined);
+                            setCopyTargetLabel(share.fileName);
+                            setCopiedSuccessMsg(null);
+                            setShowCopyModal(true);
+                          }}
+                          className="min-h-[48px] w-full flex items-center justify-center gap-2 py-3.5 px-5 text-sm font-bold bg-[#24211D] border border-[#D97757] text-[#F2EFE9] hover:bg-[#D97757] hover:text-[#141311] transition-colors cursor-pointer"
+                        >
+                          <Copy className="w-4 h-4 shrink-0" />
+                          <span className="truncate">
+                            {isFolderShare
+                              ? 'Copy All to My Drive Folder'
+                              : 'Save Copy to My Drive Folder'}
+                          </span>
+                        </button>
                       )}
-                      <span className="truncate">
-                        {downloading
-                          ? downloadProgress?.statusLabel
-                            ? `${downloadProgress.statusLabel} (${downloadProgress.percent}%)`
-                            : downloadProgress && downloadProgress.percent > 0
-                            ? `Downloading... ${downloadProgress.percent}% (${formatBytes(
-                                downloadProgress.loadedBytes
-                              )} / ${formatBytes(downloadProgress.totalBytes)})`
-                            : 'Preparing Cloud Stream...'
-                          : isFolderShare
-                          ? `Download Full Folder as .ZIP (${formatBytes(share.fileSizeBytes)})`
-                          : `Download File (${formatBytes(share.fileSizeBytes)})`}
-                      </span>
-                    </button>
+                    </div>
+
+                    {copiedSuccessMsg && (
+                      <div className="p-3 bg-[#141311] border border-[#2E9E6B] flex items-center justify-between gap-3 text-xs text-[#2E9E6B]">
+                        <span>{copiedSuccessMsg}</span>
+                        <button
+                          type="button"
+                          onClick={onExitPublicPortal}
+                          className="px-3 py-1 font-bold bg-[#2E9E6B] text-[#141311] cursor-pointer shrink-0"
+                        >
+                          Open My Drive
+                        </button>
+                      </div>
+                    )}
+
+                    {/* Google Drive-Style "Save Copy to My Folder" Modal inside Public Share Portal */}
+                    {showCopyModal && onCopyToMyDrive && (
+                      <div className="p-4 bg-[#141311] border border-[#D97757] space-y-3">
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="flex items-center gap-2 text-xs font-bold text-[#F2EFE9]">
+                            <Copy className="w-4 h-4 text-[#D97757]" />
+                            <span>Save Copy of &ldquo;{copyTargetLabel}&rdquo; to Your Folder</span>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => setShowCopyModal(false)}
+                            className="text-[#9E978E] hover:text-[#F2EFE9] cursor-pointer"
+                          >
+                            <X className="w-4 h-4" />
+                          </button>
+                        </div>
+
+                        {!isAuthenticated ? (
+                          <div className="text-xs text-[#9E978E] space-y-2">
+                            <p>Please sign in to your UnlimStorage account first to copy shared files into your folders.</p>
+                            <button
+                              type="button"
+                              onClick={onExitPublicPortal}
+                              className="min-h-[38px] px-4 py-2 font-bold bg-[#D97757] text-[#141311] cursor-pointer"
+                            >
+                              Go to Sign In
+                            </button>
+                          </div>
+                        ) : (
+                          <>
+                            <div className="flex items-center justify-between text-xs text-[#9E978E]">
+                              <span>Choose destination folder in your drive:</span>
+                              {onCreateFolder && (
+                                <button
+                                  type="button"
+                                  onClick={() => setCreatingNewFolder((prev) => !prev)}
+                                  className="px-2.5 py-1 bg-[#1C1A17] border border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9] flex items-center gap-1 cursor-pointer"
+                                >
+                                  <FolderPlus className="w-3 h-3 text-[#D97757]" />
+                                  <span>New Folder</span>
+                                </button>
+                              )}
+                            </div>
+
+                            {creatingNewFolder && onCreateFolder && (
+                              <div className="flex gap-2">
+                                <input
+                                  type="text"
+                                  value={newFolderName}
+                                  onChange={(e) => setNewFolderName(e.target.value)}
+                                  placeholder="New folder name..."
+                                  className="flex-1 min-h-[36px] bg-[#1C1A17] border border-[#2C2824] px-3 py-1 text-xs text-[#F2EFE9]"
+                                />
+                                <button
+                                  type="button"
+                                  onClick={async () => {
+                                    if (!newFolderName.trim()) return;
+                                    const created = await onCreateFolder(newFolderName.trim());
+                                    if (created) {
+                                      setSelectedDestFolderId(created.id);
+                                      setNewFolderName('');
+                                      setCreatingNewFolder(false);
+                                    }
+                                  }}
+                                  className="px-3 py-1 text-xs font-bold bg-[#D97757] text-[#141311] cursor-pointer"
+                                >
+                                  Create
+                                </button>
+                              </div>
+                            )}
+
+                            <div className="max-h-44 overflow-y-auto border border-[#2C2824] divide-y divide-[#2C2824] bg-[#1C1A17]">
+                              <div
+                                onClick={() => setSelectedDestFolderId(null)}
+                                className={`px-3 py-2.5 flex items-center justify-between text-xs cursor-pointer ${
+                                  selectedDestFolderId === null
+                                    ? 'bg-[#24211D] text-[#D97757] font-bold'
+                                    : 'text-[#F2EFE9] hover:bg-[#24211D]/50'
+                                }`}
+                              >
+                                <div className="flex items-center gap-2">
+                                  <Folder className="w-4 h-4 text-[#D97757]" />
+                                  <span>My Cloud Drive (Root)</span>
+                                </div>
+                                {selectedDestFolderId === null && <Check className="w-4 h-4" />}
+                              </div>
+                              {userFolders
+                                .filter((f) => !f.trashed)
+                                .map((folder) => (
+                                  <div
+                                    key={folder.id}
+                                    onClick={() => setSelectedDestFolderId(folder.id)}
+                                    className={`px-3 py-2.5 flex items-center justify-between text-xs cursor-pointer ${
+                                      selectedDestFolderId === folder.id
+                                        ? 'bg-[#24211D] text-[#D97757] font-bold'
+                                        : 'text-[#F2EFE9] hover:bg-[#24211D]/50'
+                                    }`}
+                                  >
+                                    <div className="flex items-center gap-2 truncate">
+                                      <Folder className="w-4 h-4 text-[#D97757] shrink-0" />
+                                      <span className="truncate">{folder.name}</span>
+                                    </div>
+                                    {selectedDestFolderId === folder.id && (
+                                      <Check className="w-4 h-4 shrink-0" />
+                                    )}
+                                  </div>
+                                ))}
+                            </div>
+
+                            <div className="flex justify-end gap-2 pt-1">
+                              <button
+                                type="button"
+                                onClick={() => setShowCopyModal(false)}
+                                className="min-h-[38px] px-4 py-1.5 text-xs text-[#9E978E] border border-[#2C2824] cursor-pointer"
+                              >
+                                Cancel
+                              </button>
+                              <button
+                                type="button"
+                                disabled={copyingToDrive}
+                                onClick={async () => {
+                                  setCopyingToDrive(true);
+                                  setDownloadError(null);
+                                  try {
+                                    const count = await onCopyToMyDrive({
+                                      token: share.token,
+                                      targetFolderId: selectedDestFolderId,
+                                      fileIds: copyTargetFileIds,
+                                      password: passwordInput || undefined,
+                                    });
+                                    const destFolderName =
+                                      selectedDestFolderId === null
+                                        ? 'My Cloud Drive (Root)'
+                                        : userFolders.find((f) => f.id === selectedDestFolderId)
+                                            ?.name || 'Selected Folder';
+                                    setCopiedSuccessMsg(
+                                      `Copied ${count} ${
+                                        count === 1 ? 'file' : 'files'
+                                      } to "${destFolderName}"!`
+                                    );
+                                    setShowCopyModal(false);
+                                  } catch (err: unknown) {
+                                    setDownloadError(
+                                      err instanceof Error
+                                        ? err.message
+                                        : 'Failed to copy shared file to your drive'
+                                    );
+                                  } finally {
+                                    setCopyingToDrive(false);
+                                  }
+                                }}
+                                className="min-h-[38px] px-5 py-1.5 text-xs font-bold bg-[#D97757] text-[#141311] hover:bg-[#E08568] cursor-pointer disabled:opacity-50"
+                              >
+                                {copyingToDrive ? 'Saving Copy...' : 'Save Copy Here'}
+                              </button>
+                            </div>
+                          </>
+                        )}
+                      </div>
+                    )}
 
                     {downloading && downloadProgress && (
                       <div className="space-y-1.5 bg-[#141311] border border-[#2C2824] p-3">
@@ -1064,8 +1397,8 @@ export const PublicSharePortal: React.FC<PublicSharePortalProps> = ({
                       <span className="flex items-center gap-1.5 text-[#2E9E6B]">
                         <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
                         {isFolderShare
-                          ? 'Direct streaming & batch ZIP download enabled'
-                          : 'Ready for direct download'}
+                          ? 'Direct streaming, gallery search & copy to drive enabled'
+                          : 'Ready for direct download or copy to your drive'}
                       </span>
                       <span>
                         {share.throttleKbps

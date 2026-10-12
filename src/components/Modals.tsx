@@ -568,10 +568,13 @@ interface FileDetailDrawerProps {
   currentFolderName?: string;
   firebaseUid?: string;
   firebaseEmail?: string;
+  isSavedOffline?: boolean;
   onClose: () => void;
   onDownload: (file: FileRecord) => void;
   onOpenShareModal: (file: FileRecord) => void;
   onOpenMoveModal?: (file: FileRecord) => void;
+  onOpenCopyModal?: (file: FileRecord) => void;
+  onToggleOffline?: (file: FileRecord) => void;
   onRequestDelete: (file: FileRecord) => void;
   onGoToPricing?: () => void;
 }
@@ -581,10 +584,13 @@ export const FileDetailDrawer: React.FC<FileDetailDrawerProps> = ({
   currentFolderName,
   firebaseUid,
   firebaseEmail,
+  isSavedOffline,
   onClose,
   onDownload,
   onOpenShareModal,
   onOpenMoveModal,
+  onOpenCopyModal,
+  onToggleOffline,
   onRequestDelete,
   onGoToPricing,
 }) => {
@@ -858,6 +864,35 @@ export const FileDetailDrawer: React.FC<FileDetailDrawerProps> = ({
                     Move
                   </button>
                 )}
+                {onOpenCopyModal && (
+                  <button
+                    onClick={() => {
+                      onClose();
+                      onOpenCopyModal(file);
+                    }}
+                    className="min-h-[44px] flex items-center justify-center gap-1.5 px-3.5 py-2.5 text-xs font-semibold text-[#F2EFE9] bg-[#24211D] border border-[#2C2824] hover:border-[#D97757] cursor-pointer"
+                  >
+                    <Copy className="w-3.5 h-3.5 text-[#D97757]" />
+                    Copy
+                  </button>
+                )}
+                {onToggleOffline && (
+                  <button
+                    onClick={() => onToggleOffline(file)}
+                    className={`min-h-[44px] flex items-center justify-center gap-1.5 px-3.5 py-2.5 text-xs font-semibold border cursor-pointer ${
+                      isSavedOffline
+                        ? 'bg-[#24211D] border-[#2E9E6B] text-[#2E9E6B]'
+                        : 'bg-[#24211D] border-[#2C2824] hover:border-[#D97757] text-[#F2EFE9]'
+                    }`}
+                  >
+                    {isSavedOffline ? (
+                      <Check className="w-3.5 h-3.5 text-[#2E9E6B]" />
+                    ) : (
+                      <Download className="w-3.5 h-3.5 text-[#D97757]" />
+                    )}
+                    {isSavedOffline ? 'Offline Ready' : 'Save Offline'}
+                  </button>
+                )}
                 <button
                   onClick={() => {
                     onClose();
@@ -885,30 +920,35 @@ export const FileDetailDrawer: React.FC<FileDetailDrawerProps> = ({
 };
 
 // ============================================================================
-// 3B. GOOGLE DRIVE-STYLE MOVE FILE MODAL (Move to Folder / Root + Create Folder)
+// 3B. GOOGLE DRIVE-STYLE MOVE / COPY FILE MODAL (Move or Copy to Folder / Root)
 // ============================================================================
 
 interface MoveFileModalProps {
   file?: FileRecord | null;
   targetFiles?: FileRecord[];
+  mode?: 'move' | 'copy';
   folders: FolderRecord[];
   files: FileRecord[];
   onClose: () => void;
   onMoveFile: (file: FileRecord, targetFolderId: string | null) => Promise<void>;
   onMoveFiles?: (files: FileRecord[], targetFolderId: string | null) => Promise<void>;
+  onCopyFiles?: (files: FileRecord[], targetFolderId: string | null) => Promise<void>;
   onCreateFolder: (name: string, parentId: string | null) => Promise<FolderRecord | null>;
 }
 
 export const MoveFileModal: React.FC<MoveFileModalProps> = ({
   file,
   targetFiles,
+  mode = 'move',
   folders,
   files,
   onClose,
   onMoveFile,
   onMoveFiles,
+  onCopyFiles,
   onCreateFolder,
 }) => {
+  const [activeActionMode, setActiveActionMode] = useState<'move' | 'copy'>(mode);
   const effectiveFiles =
     targetFiles && targetFiles.length > 0 ? targetFiles : file ? [file] : [];
   const primaryFile = effectiveFiles[0];
@@ -954,14 +994,20 @@ export const MoveFileModal: React.FC<MoveFileModalProps> = ({
       onClose();
       return;
     }
-    if (allSameFolder && selectedFolderId === primaryFile?.folderId) {
+    if (
+      activeActionMode === 'move' &&
+      allSameFolder &&
+      selectedFolderId === primaryFile?.folderId
+    ) {
       onClose();
       return;
     }
     setMoving(true);
     setError(null);
     try {
-      if (isBatchMove && onMoveFiles) {
+      if (activeActionMode === 'copy' && onCopyFiles) {
+        await onCopyFiles(effectiveFiles, selectedFolderId);
+      } else if (isBatchMove && onMoveFiles) {
         await onMoveFiles(effectiveFiles, selectedFolderId);
       } else if (isBatchMove) {
         for (const item of effectiveFiles) {
@@ -972,7 +1018,13 @@ export const MoveFileModal: React.FC<MoveFileModalProps> = ({
       }
       onClose();
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Could not move files');
+      setError(
+        err instanceof Error
+          ? err.message
+          : activeActionMode === 'copy'
+          ? 'Could not copy files'
+          : 'Could not move files'
+      );
     } finally {
       setMoving(false);
     }
@@ -988,9 +1040,17 @@ export const MoveFileModal: React.FC<MoveFileModalProps> = ({
       <div className="w-full sm:max-w-lg bg-[#1C1A17] border-t sm:border border-[#2C2824] max-h-[90vh] overflow-y-auto">
         <div className="flex items-center justify-between px-5 py-4 border-b border-[#2C2824] sticky top-0 bg-[#1C1A17] z-10">
           <div className="flex items-center gap-2.5 min-w-0">
-            <FolderInput className="w-4 h-4 text-[#D97757] shrink-0" />
+            {activeActionMode === 'copy' ? (
+              <Copy className="w-4 h-4 text-[#D97757] shrink-0" />
+            ) : (
+              <FolderInput className="w-4 h-4 text-[#D97757] shrink-0" />
+            )}
             <h2 className="text-base font-bold text-[#F2EFE9] truncate">
-              {isBatchMove
+              {activeActionMode === 'copy'
+                ? isBatchMove
+                  ? `Copy ${effectiveFiles.length} Selected Files`
+                  : `Copy "${primaryFile?.name || 'File'}"`
+                : isBatchMove
                 ? `Move ${effectiveFiles.length} Selected Files`
                 : `Move "${primaryFile?.name || 'File'}"`}
             </h2>
@@ -1004,6 +1064,35 @@ export const MoveFileModal: React.FC<MoveFileModalProps> = ({
         </div>
 
         <div className="p-5 sm:p-6 space-y-4">
+          {onCopyFiles && (
+            <div className="grid grid-cols-2 gap-1 p-1 bg-[#141311] border border-[#2C2824]">
+              <button
+                type="button"
+                onClick={() => setActiveActionMode('move')}
+                className={`min-h-[36px] text-xs font-semibold flex items-center justify-center gap-1.5 cursor-pointer transition-colors ${
+                  activeActionMode === 'move'
+                    ? 'bg-[#D97757] text-[#141311]'
+                    : 'text-[#9E978E] hover:text-[#F2EFE9]'
+                }`}
+              >
+                <FolderInput className="w-3.5 h-3.5" />
+                <span>Move File</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveActionMode('copy')}
+                className={`min-h-[36px] text-xs font-semibold flex items-center justify-center gap-1.5 cursor-pointer transition-colors ${
+                  activeActionMode === 'copy'
+                    ? 'bg-[#D97757] text-[#141311]'
+                    : 'text-[#9E978E] hover:text-[#F2EFE9]'
+                }`}
+              >
+                <Copy className="w-3.5 h-3.5" />
+                <span>Make a Copy</span>
+              </button>
+            </div>
+          )}
+
           <div className="flex items-center justify-between text-xs text-[#9E978E]">
             <span>
               Current location:{' '}
@@ -1182,13 +1271,24 @@ export const MoveFileModal: React.FC<MoveFileModalProps> = ({
             <button
               type="button"
               onClick={handleConfirmMove}
-              disabled={moving || (allSameFolder && selectedFolderId === primaryFile?.folderId)}
+              disabled={
+                moving ||
+                (activeActionMode === 'move' &&
+                  allSameFolder &&
+                  selectedFolderId === primaryFile?.folderId)
+              }
               className="min-h-[44px] px-5 py-2.5 text-xs font-bold bg-[#D97757] text-[#141311] hover:bg-[#E08568] disabled:opacity-50 cursor-pointer"
             >
               {moving
-                ? 'Moving...'
-                : allSameFolder && selectedFolderId === primaryFile?.folderId
+                ? activeActionMode === 'copy'
+                  ? 'Copying...'
+                  : 'Moving...'
+                : activeActionMode === 'move' &&
+                  allSameFolder &&
+                  selectedFolderId === primaryFile?.folderId
                 ? 'Already in This Folder'
+                : activeActionMode === 'copy'
+                ? `Copy to "${targetDestinationName}"`
                 : `Move to "${targetDestinationName}"`}
             </button>
           </div>
